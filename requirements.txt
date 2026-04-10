@@ -1,0 +1,2 @@
+selenium>=4.21,<5
+PyYAML>=6.0,<7

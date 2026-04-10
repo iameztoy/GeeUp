@@ -1,0 +1,106 @@
+# Copy this file to config.yaml and edit the values for your machine.
+
+earth_engine_url: "https://code.earthengine.google.com/"
+
+# Local folder that contains your GeoTIFF files.
+input_folder: "C:/Users/YOUR_NAME/Desktop/geotiffs"
+
+# Earth Engine parent path. Each uploaded file becomes:
+#   projects/MY_PROJECT/assets/MY_COLLECTION/<generated_asset_name>
+# If the Earth Engine dialog uses a separate "destination collection" field,
+# this same value is sent there.
+destination_parent: "projects/MY_PROJECT/assets/MY_COLLECTION"
+
+chrome:
+  # Dedicated Chrome profile folder for this tool.
+  # Chrome will keep your Earth Engine login state here.
+  user_data_dir: "./chrome-profile"
+
+  # Leave null to let Chrome use the default profile inside user_data_dir.
+  profile_directory: null
+
+  # Usually leave null. Set this only if Selenium cannot find Chrome.
+  binary_location: null
+
+  # Recommended default. "attach" starts a normal Chrome window with a debugging
+  # port and Selenium attaches to it. This is more reliable for Google sign-in
+  # than launching a fully Selenium-managed browser for the login flow.
+  connection_mode: "attach"
+
+  # Debugging port used when connection_mode is "attach".
+  remote_debugging_port: 9222
+
+  # Headed mode is recommended. Set true only if you know you want headless.
+  headless: false
+  start_maximized: true
+
+upload:
+  batch_size: 50
+  max_active_ingestions: 2
+
+  # Asset naming:
+  # final_name = prefix + sanitized(file_stem) + suffix
+  prefix: ""
+  suffix: ""
+
+  # Optional exact text replacements before regex cleanup.
+  replacement_rules:
+    " ": "_"
+
+  # Replace characters that do not match this pattern.
+  invalid_char_pattern: "[^A-Za-z0-9._-]+"
+  invalid_char_replacement: "_"
+
+  # Set true if you want to scan subfolders too.
+  recursive: false
+
+  # File extensions to include.
+  extensions:
+    - ".tif"
+    - ".tiff"
+
+  pyramiding_policy:
+    # Leave null to keep Earth Engine's default.
+    default: null
+
+    # Optional band-specific policies.
+    # Example:
+    # per_band:
+    #   B1: "MEAN"
+    #   B2: "MODE"
+    per_band: {}
+
+  retry_attempts: 3
+  retry_wait_seconds: 3.0
+
+  # If true, stop the whole run after the first failed upload.
+  fail_fast: false
+
+execution:
+  # Set true to plan uploads without clicking the final UPLOAD button.
+  dry_run: true
+
+  # Skip files that already appear in the CSV report as submitted/completed.
+  resume: true
+
+  # Ask for a final YES confirmation before the first real upload.
+  require_confirmation: true
+
+  # How often to re-check the Tasks panel.
+  task_poll_seconds: 20
+
+  # Small UI fallback wait used after clicks and panel switches.
+  short_ui_wait_seconds: 1.5
+
+  # Maximum wait for task monitoring before the script gives up and exits.
+  wait_timeout_minutes: 720
+
+  page_load_timeout_seconds: 90
+
+  # True = show debug-level logging in the console as well as the log file.
+  verbose_console: true
+
+artifacts:
+  logs_dir: "./logs"
+  artifacts_dir: "./artifacts"
+  report_csv: "./reports/upload_report.csv"

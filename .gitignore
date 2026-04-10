@@ -1,0 +1,39 @@
+# Python cache and build output
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Project runtime output
+logs/
+artifacts/
+reports/
+chrome-profile/
+sample_input/
+
+# Local machine-specific configuration
+config.yaml
+
+# Optional local dotenv files
+.env
+.env.*
+
+# Selenium / browser leftovers
+*.log
