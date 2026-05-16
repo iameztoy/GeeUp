@@ -289,12 +289,28 @@ What to do:
 4. Keep the most reliable option first.
 5. Test with dry-run mode.
 
+## SWOT Metadata Not Added
+
+Symptoms:
+
+- the upload works, but `system:time_start` or custom `swot_*` properties are missing
+- the log says a metadata control could not be clicked or filled
+- the CSV shows `METADATA_NOT_PARSED`
+
+What to check:
+
+1. Confirm the filename follows the SWOT L2 HR Raster pattern with cycle, pass, scene, start time, end time, CRID, and product counter.
+2. Run a dry run and inspect `metadata_start_time`, `metadata_end_time`, `metadata_properties`, and `metadata_status` in `reports/upload_report.csv`.
+3. If your filenames are not SWOT names, set `metadata.require_match: false` or `metadata.enabled: false`.
+4. If filenames parse correctly but the browser fields are not filled, inspect the upload dialog's Properties controls and update the metadata selector labels in `selectors.py`.
+5. Test one real upload and verify the asset properties manually in Earth Engine before running a large batch.
+
 ## Nothing Happens After Clicking UPLOAD
 
 Symptoms:
 
 - the dialog closes but no matching task is detected
-- the report stays at `SUBMITTED`
+- the report stays at `SUBMITTED` or `UNKNOWN_AFTER_CLICK`
 
 What it usually means:
 
@@ -307,6 +323,24 @@ What to do:
 2. Compare the task text with the asset name and file name.
 3. Update the task row selector or matching logic in `ee_ui_uploader.py`.
 4. Check the saved HTML dump in `artifacts/`.
+
+## Browser Session Ended During Upload
+
+Symptoms:
+
+- the log says `invalid session id`
+- the run stops with `Browser/WebDriver session ended`
+- Chrome was closed, restarted, refreshed, or disconnected while the uploader was running
+
+What to do:
+
+1. Stop the run.
+2. Close the controlled Chrome window if it is still open.
+3. Restart Chrome from the launcher or run the upload again with the same configured Chrome profile.
+4. Keep `execution.resume: true`.
+5. Verify the assets already visible in Earth Engine, then rerun. Resume skips `SUBMITTED`, `READY`, `RUNNING`, `COMPLETED`, and `SKIPPED_ALREADY_EXISTS`; it does not skip `ERROR` or `UNKNOWN_AFTER_CLICK` rows.
+
+During uploads, do not interact with the controlled Chrome/Earth Engine window. You can use the computer for other work, but avoid touching that Chrome profile/window, refreshing the page, closing tabs, signing out, or changing the Earth Engine UI while Selenium is controlling it.
 
 ## Dry Run Looks Correct but Real Run Fails
 

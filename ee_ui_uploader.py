@@ -88,6 +88,11 @@ from selenium.webdriver.support.select import Select
 from selenium.webdriver.support.ui import WebDriverWait
 
 import selectors as ee_selectors
+from swot_metadata import (
+    DEFAULT_METADATA_EXTRA_PROPERTIES,
+    ParsedMetadata,
+    parse_swot_l2_hr_raster_metadata,
+)
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -121,6 +126,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "retry_wait_seconds": 3.0,
         "fail_fast": False,
     },
+    "metadata": {
+        "enabled": True,
+        "parser": "swot_l2_hr_raster",
+        "require_match": True,
+        "add_start_time": True,
+        "add_end_time": True,
+        "extra_properties": DEFAULT_METADATA_EXTRA_PROPERTIES,
+    },
     "execution": {
         "dry_run": False,
         "resume": True,
@@ -146,6 +159,10 @@ REPORT_COLUMNS = [
     "detected_task_name",
     "final_status",
     "error_message",
+    "metadata_start_time",
+    "metadata_end_time",
+    "metadata_properties",
+    "metadata_status",
 ]
 
 RESUME_SKIP_STATUSES = {
@@ -160,6 +177,7 @@ TERMINAL_STATUSES = {
     "COMPLETED",
     "FAILED",
     "ERROR",
+    "UNKNOWN_AFTER_CLICK",
     "SKIPPED_ALREADY_EXISTS",
     "PLANNED_DRY_RUN",
 }
@@ -170,6 +188,11 @@ ACTIVE_STATUSES = {
     "RUNNING",
 }
 
+UNKNOWN_AFTER_CLICK_STATUS = "UNKNOWN_AFTER_CLICK"
+FATAL_BROWSER_SESSION_MESSAGE = (
+    "Browser/WebDriver session ended. Stop the run and restart Chrome before continuing."
+)
+
 
 class AlreadyExistsError(Exception):
     """Raised when Earth Engine reports that an asset already exists."""
@@ -177,6 +200,71 @@ class AlreadyExistsError(Exception):
 
 class RetryableUIError(Exception):
     """Raised for transient UI failures that should be retried."""
+
+
+class UnknownAfterClickError(Exception):
+    """Raised when upload was clicked but no task or dialog error was detected."""
+
+
+class FatalBrowserSessionError(RuntimeError):
+    """Raised when the controlled Chrome/WebDriver session is no longer usable."""
+
+
+def is_invalid_browser_session(exc: BaseException) -> bool:
+    """Return True when Selenium reports that the browser session has ended."""
+    return isinstance(exc, InvalidSessionIdException) or "invalid session id" in str(exc).lower()
+
+
+def raise_if_invalid_browser_session(exc: BaseException) -> None:
+    """Raise a fatal run-level error for ended WebDriver sessions."""
+    if is_invalid_browser_session(exc):
+        raise FatalBrowserSessionError(FATAL_BROWSER_SESSION_MESSAGE) from exc
+
+
+def active_upload_dialog_helper_js() -> str:
+    """Return JavaScript helpers for selecting the visible current upload dialog."""
+    return f"""
+    function uploadElementVisible(element) {{
+      if (!element || !element.getClientRects || !element.getBoundingClientRect) return false;
+      const style = window.getComputedStyle ? window.getComputedStyle(element) : null;
+      if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+      const rects = element.getClientRects();
+      const box = element.getBoundingClientRect();
+      return rects.length > 0 || box.width > 0 || box.height > 0;
+    }}
+
+    function uploadDialogLooksOpen(dialog) {{
+      if (!dialog || !dialog.shadowRoot) return false;
+      if (dialog.hasAttribute('opened') || dialog.hasAttribute('open')) return true;
+      const innerDialog = dialog.shadowRoot.querySelector('#asset-upload-dialog, paper-dialog, mwc-dialog, dialog');
+      if (innerDialog && (innerDialog.hasAttribute('opened') || innerDialog.hasAttribute('open'))) return true;
+      return uploadElementVisible(dialog) || uploadElementVisible(innerDialog);
+    }}
+
+    function findActiveUploadDialog() {{
+      const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
+      return dialogs.reverse().find(uploadDialogLooksOpen) || null;
+    }}
+    """
+
+
+DIALOG_ERROR_KEYWORD_RE = re.compile(
+    r"(already exists|does not exist|not found|invalid|error|failed|required)",
+    re.IGNORECASE,
+)
+
+
+def normalize_dialog_error_messages(messages: Iterable[str]) -> str:
+    """Normalize explicit upload-dialog validation messages."""
+    normalized_messages: List[str] = []
+    for message in messages:
+        for line in str(message or "").splitlines():
+            normalized = line.strip()
+            if not normalized:
+                continue
+            if DIALOG_ERROR_KEYWORD_RE.search(normalized):
+                normalized_messages.append(normalized)
+    return " | ".join(dict.fromkeys(normalized_messages))
 
 
 @dataclass
@@ -202,6 +290,18 @@ class PyramidingPolicyConfig:
     def enabled(self) -> bool:
         """Return True when any pyramiding policy value is configured."""
         return bool(self.default or self.per_band)
+
+
+@dataclass
+class MetadataConfig:
+    """Optional Earth Engine asset metadata settings."""
+
+    enabled: bool = True
+    parser: str = "swot_l2_hr_raster"
+    require_match: bool = True
+    add_start_time: bool = True
+    add_end_time: bool = True
+    extra_properties: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -257,6 +357,7 @@ class AppConfig:
     destination_parent: str
     chrome: ChromeConfig
     upload: UploadConfig
+    metadata: MetadataConfig
     execution: ExecutionConfig
     artifacts: ArtifactConfig
     base_dir: Path
@@ -375,6 +476,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
     """Convert a raw dictionary into a validated AppConfig."""
     chrome_data = data.get("chrome", {})
     upload_data = data.get("upload", {})
+    metadata_data = data.get("metadata", {})
     execution_data = data.get("execution", {})
     artifact_data = data.get("artifacts", {})
     pyramiding_data = upload_data.get("pyramiding_policy", {})
@@ -409,6 +511,14 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
             retry_attempts=max(1, int(upload_data.get("retry_attempts", 3))),
             retry_wait_seconds=float(upload_data.get("retry_wait_seconds", 3.0)),
             fail_fast=bool(upload_data.get("fail_fast", False)),
+        ),
+        metadata=MetadataConfig(
+            enabled=bool(metadata_data.get("enabled", True)),
+            parser=str(metadata_data.get("parser", "swot_l2_hr_raster")).strip().lower(),
+            require_match=bool(metadata_data.get("require_match", True)),
+            add_start_time=bool(metadata_data.get("add_start_time", True)),
+            add_end_time=bool(metadata_data.get("add_end_time", True)),
+            extra_properties=dict(metadata_data.get("extra_properties", {})),
         ),
         execution=ExecutionConfig(
             dry_run=bool(execution_data.get("dry_run", False)),
@@ -451,6 +561,11 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError(
             "chrome.headless cannot be true when chrome.connection_mode is 'attach'."
         )
+    if config.metadata.enabled and config.metadata.parser != "swot_l2_hr_raster":
+        raise ValueError("metadata.parser must be 'swot_l2_hr_raster'.")
+    for property_name, source_field in config.metadata.extra_properties.items():
+        if not str(property_name).strip() or not str(source_field).strip():
+            raise ValueError("metadata.extra_properties cannot contain empty names or source fields.")
 
 
 def prompt_bool(prompt: str, default: bool) -> bool:
@@ -517,6 +632,8 @@ def prompt_interactive_config() -> AppConfig:
         "Optional global pyramiding policy (leave blank to keep Earth Engine default)",
         default="",
     )
+    add_metadata = prompt_bool("Add SWOT metadata properties from filenames", True)
+    require_metadata_match = prompt_bool("Require SWOT filename match", True)
     resume = prompt_bool("Resume mode", True)
     dry_run = prompt_bool("Dry run first", True)
 
@@ -537,6 +654,14 @@ def prompt_interactive_config() -> AppConfig:
             "execution": {
                 "resume": resume,
                 "dry_run": dry_run,
+            },
+            "metadata": {
+                "enabled": add_metadata,
+                "parser": "swot_l2_hr_raster",
+                "require_match": require_metadata_match,
+                "add_start_time": True,
+                "add_end_time": True,
+                "extra_properties": DEFAULT_CONFIG["metadata"]["extra_properties"],
             },
         },
     )
@@ -633,6 +758,16 @@ class EarthEngineUIUploader:
             self.ensure_logged_in()
             self.process_batches(planned_items)
             self.wait_for_all_tracked_tasks()
+        except FatalBrowserSessionError as exc:
+            self.logger.error("%s", exc)
+            return 1
+        except WebDriverException as exc:
+            if is_invalid_browser_session(exc):
+                self.logger.error("%s", FATAL_BROWSER_SESSION_MESSAGE)
+                return 1
+            self.logger.exception("Fatal WebDriver error during upload automation.")
+            self.capture_debug_artifacts("fatal_webdriver_error")
+            return 1
         except KeyboardInterrupt:
             self.logger.warning("Interrupted by user. Current report has been saved.")
             self.capture_debug_artifacts("keyboard_interrupt")
@@ -643,11 +778,14 @@ class EarthEngineUIUploader:
             return 1
         finally:
             if self.driver is not None:
-                self.driver.quit()
+                try:
+                    self.driver.quit()
+                except WebDriverException:
+                    pass
 
         counts = self.report.counts(asset.asset_id for asset in planned_items)
         self.logger.info("Run finished. Status summary: %s", counts)
-        if counts.get("FAILED") or counts.get("ERROR"):
+        if counts.get("FAILED") or counts.get("ERROR") or counts.get(UNKNOWN_AFTER_CLICK_STATUS):
             return 2
         return 0
 
@@ -731,6 +869,7 @@ class EarthEngineUIUploader:
         """Record and print planned uploads without touching the UI."""
         self.logger.info("Dry-run mode is enabled. No browser automation will run.")
         for item in planned_items:
+            metadata = self.parse_metadata_for_item(item, required=False)
             row = self.make_report_row(
                 item=item,
                 submit_time="",
@@ -740,6 +879,15 @@ class EarthEngineUIUploader:
             )
             self.report.upsert(row)
             self.logger.info("Plan: %s -> %s", item.local_file, item.asset_id)
+            if metadata.status == "METADATA_PARSED":
+                self.logger.info(
+                    "Metadata: start=%s end=%s properties=%s",
+                    metadata.start_time,
+                    metadata.end_time,
+                    metadata.properties,
+                )
+            elif metadata.error_message:
+                self.logger.warning("Metadata: %s", metadata.error_message)
         self.logger.info("Dry-run complete. Report written to %s", self.config.artifacts.report_csv)
 
     def confirm_before_real_upload(self, planned_items: Sequence[UploadItem]) -> None:
@@ -1012,6 +1160,19 @@ class EarthEngineUIUploader:
                 )
                 self.close_dialog_if_possible()
                 return
+            except UnknownAfterClickError as exc:
+                self.logger.warning("%s", exc)
+                self.report.upsert(
+                    self.make_report_row(
+                        item=item,
+                        submit_time=now_iso(),
+                        detected_task_name="",
+                        final_status=UNKNOWN_AFTER_CLICK_STATUS,
+                        error_message=str(exc),
+                    )
+                )
+                self.close_dialog_if_possible()
+                return
             except (
                 RetryableUIError,
                 TimeoutException,
@@ -1020,6 +1181,7 @@ class EarthEngineUIUploader:
                 UnexpectedAlertPresentException,
                 WebDriverException,
             ) as exc:
+                raise_if_invalid_browser_session(exc)
                 last_exception = exc
                 self.logger.warning(
                     "Retryable UI problem while processing %s: %s",
@@ -1033,6 +1195,7 @@ class EarthEngineUIUploader:
                     continue
                 break
             except Exception as exc:
+                raise_if_invalid_browser_session(exc)
                 last_exception = exc
                 self.capture_debug_artifacts(f"fatal_{sanitize_for_filename(item.asset_name)}")
                 break
@@ -1113,17 +1276,18 @@ class EarthEngineUIUploader:
         """Fill the upload dialog fields for a single asset."""
         if self.is_current_upload_dialog_open():
             self._populate_current_ui_upload_dialog(item)
-            return
+        else:
+            file_input = self.find_first_element("file_input", timeout=15, visible_only=False)
+            file_input.send_keys(str(item.local_file))
 
-        file_input = self.find_first_element("file_input", timeout=15, visible_only=False)
-        file_input.send_keys(str(item.local_file))
+            if not self.populate_destination_fields(item):
+                asset_field = self.find_first_element("asset_id_field", timeout=15, visible_only=True)
+                self.clear_and_type(asset_field, item.asset_id)
 
-        if not self.populate_destination_fields(item):
-            asset_field = self.find_first_element("asset_id_field", timeout=15, visible_only=True)
-            self.clear_and_type(asset_field, item.asset_id)
+            if self.config.upload.pyramiding_policy.enabled():
+                self.apply_pyramiding_policy()
 
-        if self.config.upload.pyramiding_policy.enabled():
-            self.apply_pyramiding_policy()
+        self.apply_metadata_properties(item)
 
     def populate_destination_fields(self, item: UploadItem) -> bool:
         """Fill separate collection/name fields when the UI exposes them.
@@ -1161,7 +1325,18 @@ class EarthEngineUIUploader:
                     raise AlreadyExistsError(error_message)
                 raise RetryableUIError(error_message)
 
-            return self.wait_for_task_name(item, timeout_seconds=30)
+            try:
+                return self.wait_for_task_name(item, timeout_seconds=30)
+            except TimeoutException as exc:
+                error_message = self.read_dialog_error_message()
+                if error_message:
+                    if "already exists" in error_message.lower():
+                        raise AlreadyExistsError(error_message) from exc
+                    raise RetryableUIError(error_message) from exc
+                raise UnknownAfterClickError(
+                    "Upload was clicked, but no matching task row or explicit upload-dialog error was detected. "
+                    "Verify the asset in Earth Engine before retrying."
+                ) from exc
 
         self.click_first_available("upload_button")
         time.sleep(self.config.execution.short_ui_wait_seconds)
@@ -1172,7 +1347,18 @@ class EarthEngineUIUploader:
                 raise AlreadyExistsError(error_message)
             raise RetryableUIError(error_message)
 
-        return self.wait_for_task_name(item, timeout_seconds=30)
+        try:
+            return self.wait_for_task_name(item, timeout_seconds=30)
+        except TimeoutException as exc:
+            error_message = self.read_dialog_error_message()
+            if error_message:
+                if "already exists" in error_message.lower():
+                    raise AlreadyExistsError(error_message) from exc
+                raise RetryableUIError(error_message) from exc
+            raise UnknownAfterClickError(
+                "Upload was clicked, but no matching task row or explicit upload-dialog error was detected. "
+                "Verify the asset in Earth Engine before retrying."
+            ) from exc
 
     def apply_pyramiding_policy(self) -> None:
         """Best-effort handling for optional pyramiding policy controls."""
@@ -1203,20 +1389,21 @@ class EarthEngineUIUploader:
     def is_current_upload_dialog_open(self) -> bool:
         """Return True when the current Earth Engine upload dialog is present."""
         script = f"""
-        const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-        const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+        {active_upload_dialog_helper_js()}
+        const dialog = findActiveUploadDialog();
         return !!(dialog && dialog.shadowRoot);
         """
         try:
             return bool(self.execute_script(script))
-        except WebDriverException:
+        except WebDriverException as exc:
+            raise_if_invalid_browser_session(exc)
             return False
 
     def _wait_for_current_upload_dialog(self, timeout: int) -> bool:
         """Wait until the current Earth Engine upload dialog is ready."""
         script = f"""
-        const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-        const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+        {active_upload_dialog_helper_js()}
+        const dialog = findActiveUploadDialog();
         return !!(dialog && dialog.shadowRoot);
         """
         try:
@@ -1269,8 +1456,8 @@ class EarthEngineUIUploader:
         """Fill the current Earth Engine upload dialog."""
         file_input = self.wait_for_script_value(
             script=f"""
-            const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-            const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+            {active_upload_dialog_helper_js()}
+            const dialog = findActiveUploadDialog();
             if (!dialog || !dialog.shadowRoot) return null;
             const fileList = dialog.shadowRoot.querySelector('{ee_selectors.SHADOW_SELECTORS["upload_dialog_file_list_host"]}');
             if (!fileList || !fileList.shadowRoot) return null;
@@ -1315,8 +1502,8 @@ class EarthEngineUIUploader:
         """Set the asset root dropdown in the current upload dialog."""
         options = self.execute_script(
             f"""
-            const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-            const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+            {active_upload_dialog_helper_js()}
+            const dialog = findActiveUploadDialog();
             if (!dialog || !dialog.shadowRoot) return [];
             const dropdownHost = dialog.shadowRoot.querySelector('{ee_selectors.SHADOW_SELECTORS["upload_dialog_root_dropdown_host"]}');
             if (!dropdownHost || !dropdownHost.shadowRoot) return [];
@@ -1335,8 +1522,8 @@ class EarthEngineUIUploader:
 
         result = self.execute_script(
             f"""
-            const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-            const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+            {active_upload_dialog_helper_js()}
+            const dialog = findActiveUploadDialog();
             const dropdownHost = dialog && dialog.shadowRoot
               ? dialog.shadowRoot.querySelector('{ee_selectors.SHADOW_SELECTORS["upload_dialog_root_dropdown_host"]}')
               : null;
@@ -1371,8 +1558,8 @@ class EarthEngineUIUploader:
         """Fill the asset trailer input in the current upload dialog."""
         result = self.execute_script(
             f"""
-            const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-            const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+            {active_upload_dialog_helper_js()}
+            const dialog = findActiveUploadDialog();
             const host = dialog && dialog.shadowRoot
               ? dialog.shadowRoot.querySelector('{ee_selectors.SHADOW_SELECTORS["upload_dialog_asset_name_host"]}')
               : null;
@@ -1405,8 +1592,8 @@ class EarthEngineUIUploader:
         """Click the upload button inside the current upload dialog."""
         status = self.execute_script(
             f"""
-            const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-            const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+            {active_upload_dialog_helper_js()}
+            const dialog = findActiveUploadDialog();
             const innerDialog = dialog && dialog.shadowRoot
               ? dialog.shadowRoot.querySelector('#asset-upload-dialog')
               : null;
@@ -1430,8 +1617,8 @@ class EarthEngineUIUploader:
 
         self.execute_script(
             f"""
-            const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-            const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+            {active_upload_dialog_helper_js()}
+            const dialog = findActiveUploadDialog();
             const innerDialog = dialog && dialog.shadowRoot
               ? dialog.shadowRoot.querySelector('#asset-upload-dialog')
               : null;
@@ -1455,8 +1642,8 @@ class EarthEngineUIUploader:
             desired = default_policy.strip().upper()
             result = self.execute_script(
                 f"""
-                const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-                const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+                {active_upload_dialog_helper_js()}
+                const dialog = findActiveUploadDialog();
                 const advanced = dialog && dialog.shadowRoot ? dialog.shadowRoot.querySelector('image-advanced-options') : null;
                 const dropdownHost = advanced && advanced.shadowRoot
                   ? advanced.shadowRoot.querySelector('{ee_selectors.SHADOW_SELECTORS["upload_dialog_pyramiding_host"]}')
@@ -1496,6 +1683,276 @@ class EarthEngineUIUploader:
                 "Only the global default was applied."
             )
         return True
+
+    def parse_metadata_for_item(self, item: UploadItem, required: bool = False) -> ParsedMetadata:
+        """Return parsed metadata for a planned upload."""
+        if not self.config.metadata.enabled:
+            return ParsedMetadata(status="METADATA_DISABLED")
+
+        try:
+            parsed = parse_swot_l2_hr_raster_metadata(
+                item.local_file,
+                self.config.metadata.extra_properties,
+            )
+        except ValueError as exc:
+            message = f"Could not parse SWOT metadata timestamp in {item.local_file.name}: {exc}"
+            if required and self.config.metadata.require_match:
+                raise RetryableUIError(message) from exc
+            return ParsedMetadata(status="METADATA_NOT_PARSED", error_message=message)
+        if parsed is not None:
+            return parsed
+
+        message = (
+            "Filename does not match the expected SWOT L2 HR Raster pattern: "
+            f"{item.local_file.name}"
+        )
+        if required and self.config.metadata.require_match:
+            raise RetryableUIError(message)
+        return ParsedMetadata(status="METADATA_NOT_PARSED", error_message=message)
+
+    def apply_metadata_properties(self, item: UploadItem) -> None:
+        """Apply configured asset metadata in the Earth Engine upload dialog."""
+        parsed = self.parse_metadata_for_item(item, required=True)
+        if parsed.status != "METADATA_PARSED":
+            if parsed.error_message:
+                self.logger.warning("%s", parsed.error_message)
+            return
+
+        if not self.is_current_upload_dialog_open():
+            raise RetryableUIError(
+                "Metadata properties are currently mapped for the current Earth Engine upload dialog only."
+            )
+        self._apply_current_ui_metadata_properties(parsed)
+
+    def _apply_current_ui_metadata_properties(self, metadata: ParsedMetadata) -> None:
+        """Fill the current upload dialog's Properties controls."""
+        if self.config.metadata.add_start_time and metadata.start_time:
+            self._add_current_ui_metadata_property(
+                "system:time_start",
+                metadata.start_time,
+                str(ee_selectors.SHADOW_SELECTORS["upload_dialog_add_start_time_label"]),
+            )
+        if self.config.metadata.add_end_time and metadata.end_time:
+            self._add_current_ui_metadata_property(
+                "system:time_end",
+                metadata.end_time,
+                str(ee_selectors.SHADOW_SELECTORS["upload_dialog_add_end_time_label"]),
+            )
+        for property_name, property_value in metadata.properties.items():
+            self._add_current_ui_metadata_property(
+                property_name,
+                property_value,
+                str(ee_selectors.SHADOW_SELECTORS["upload_dialog_add_property_label"]),
+            )
+
+    def _add_current_ui_metadata_property(
+        self,
+        property_name: str,
+        property_value: str,
+        button_label: str,
+    ) -> None:
+        """Click an Add-property control and fill the created row."""
+        self._click_current_ui_metadata_button(button_label)
+        result = self.wait_for_script_value(
+            self.current_ui_metadata_fill_script(),
+            10,
+            f"metadata row for {property_name}",
+            property_name,
+            property_value,
+        )
+        if not isinstance(result, dict) or not result.get("ok"):
+            reason = result.get("reason") if isinstance(result, dict) else "Unknown UI error."
+            raise RetryableUIError(f"Could not fill metadata property '{property_name}'. {reason}")
+
+    def _click_current_ui_metadata_button(self, button_label: str) -> None:
+        """Click a metadata button inside the current upload dialog."""
+        deadline = time.monotonic() + 5
+        last_result: Any = None
+        while time.monotonic() < deadline:
+            result = self.execute_script(
+                self.current_ui_metadata_click_script(),
+                button_label,
+                str(ee_selectors.SHADOW_SELECTORS["upload_dialog_properties_label"]),
+            )
+            last_result = result
+            if isinstance(result, dict) and result.get("ok"):
+                time.sleep(self.config.execution.short_ui_wait_seconds)
+                return
+            time.sleep(0.2)
+        reason = last_result.get("reason") if isinstance(last_result, dict) else "Unknown UI error."
+        raise RetryableUIError(f"Could not click metadata control '{button_label}'. {reason}")
+
+    @staticmethod
+    def current_ui_metadata_click_script() -> str:
+        """Return JavaScript that opens Properties and clicks a named button."""
+        return active_upload_dialog_helper_js() + """
+        const wanted = String(arguments[0] || '').trim().toLowerCase();
+        const propertiesLabel = String(arguments[1] || 'Properties').trim().toLowerCase();
+        const dialog = findActiveUploadDialog();
+        if (!dialog || !dialog.shadowRoot) return {ok: false, reason: 'Upload dialog not found.'};
+
+        function collect(root, output = [], seen = new Set()) {
+          if (!root || seen.has(root)) return output;
+          seen.add(root);
+          if (root.nodeType === Node.ELEMENT_NODE) output.push(root);
+          const children = [
+            ...Array.from(root.children || []),
+            ...(root.shadowRoot ? Array.from(root.shadowRoot.children) : []),
+          ];
+          for (const child of children) collect(child, output, seen);
+          return output;
+        }
+
+        function visible(element) {
+          if (!element || !element.getClientRects) return false;
+          return element.getClientRects().length > 0;
+        }
+
+        function text(element) {
+          return ((element.innerText || element.textContent || element.getAttribute('aria-label') || '') + '').trim();
+        }
+
+        function isButtonLike(element) {
+          const tag = element.tagName ? element.tagName.toLowerCase() : '';
+          return tag === 'button'
+            || tag === 'ee-button'
+            || tag === 'paper-button'
+            || element.getAttribute('role') === 'button'
+            || element.getAttribute('role') === 'menuitem';
+        }
+
+        function findControl(label) {
+          const normalized = label.toLowerCase();
+          const elements = collect(dialog.shadowRoot).filter(visible);
+          const exact = elements.find((element) => {
+            const elementText = text(element).toLowerCase();
+            return isButtonLike(element) && elementText.includes(normalized);
+          });
+          if (exact) return exact;
+          const textMatch = elements.find((element) => text(element).toLowerCase().includes(normalized));
+          if (!textMatch) return null;
+          return textMatch.closest('button, ee-button, paper-button, [role="button"], [role="menuitem"]') || textMatch;
+        }
+
+        let control = findControl(wanted);
+        if (!control) {
+          const properties = findControl(propertiesLabel);
+          if (properties) {
+            properties.scrollIntoView({block: 'center', inline: 'nearest'});
+            properties.click();
+          }
+          control = findControl(wanted);
+        }
+        if (!control) return {ok: false, reason: `Control not found: ${arguments[0]}`};
+
+        control.scrollIntoView({block: 'center', inline: 'nearest'});
+        control.click();
+        return {ok: true};
+        """
+
+    @staticmethod
+    def current_ui_metadata_fill_script() -> str:
+        """Return JavaScript that fills the latest metadata property row."""
+        return active_upload_dialog_helper_js() + """
+        const propertyName = String(arguments[0] || '');
+        const propertyValue = String(arguments[1] || '');
+        const dialog = findActiveUploadDialog();
+        if (!dialog || !dialog.shadowRoot) return {ok: false, reason: 'Upload dialog not found.'};
+
+        function collect(root, output = [], seen = new Set()) {
+          if (!root || seen.has(root)) return output;
+          seen.add(root);
+          if (root.nodeType === Node.ELEMENT_NODE) output.push(root);
+          const children = [
+            ...Array.from(root.children || []),
+            ...(root.shadowRoot ? Array.from(root.shadowRoot.children) : []),
+          ];
+          for (const child of children) collect(child, output, seen);
+          return output;
+        }
+
+        function visible(element) {
+          if (!element || !element.getClientRects) return false;
+          return element.getClientRects().length > 0;
+        }
+
+        function currentValue(element) {
+          if ('value' in element && element.value !== undefined && element.value !== null) {
+            return String(element.value).trim();
+          }
+          return String(element.getAttribute('value') || '').trim();
+        }
+
+        function editable(element) {
+          const tag = element.tagName ? element.tagName.toLowerCase() : '';
+          const type = String(element.getAttribute('type') || '').toLowerCase();
+          return (tag === 'input' || tag === 'textarea')
+            && type !== 'file'
+            && type !== 'hidden'
+            && !element.disabled;
+        }
+
+        function dispatchValueEvents(element) {
+          for (const name of ['input', 'change']) {
+            element.dispatchEvent(new Event(name, {bubbles: true, composed: true}));
+          }
+        }
+
+        function setFieldValue(field, value) {
+          field.focus();
+          field.value = value;
+          dispatchValueEvents(field);
+
+          let root = field.getRootNode ? field.getRootNode() : null;
+          let host = root && root.host ? root.host : null;
+          while (host && host !== dialog) {
+            if ('value' in host) {
+              host.value = value;
+              dispatchValueEvents(host);
+            }
+            root = host.getRootNode ? host.getRootNode() : null;
+            host = root && root.host ? root.host : null;
+          }
+          field.blur();
+        }
+
+        const elements = collect(dialog.shadowRoot);
+        const fields = elements.filter((element) => editable(element) && visible(element));
+        const propertyIndex = fields.findIndex((field) => currentValue(field) === propertyName);
+        const propertyTextIsVisible = elements.some((element) => {
+          const text = String(element.innerText || element.textContent || '').trim();
+          return text === propertyName || text.includes(propertyName);
+        });
+
+        if (propertyIndex >= 0) {
+          const candidates = fields.slice(propertyIndex + 1);
+          const valueField = candidates.find((field) => currentValue(field) === '' || currentValue(field) === propertyValue)
+            || candidates[0];
+          if (!valueField) return {ok: false, reason: `Value field not found for ${propertyName}.`};
+          setFieldValue(valueField, propertyValue);
+          return {ok: currentValue(valueField) === propertyValue, mode: 'existing-property-row'};
+        }
+
+        const emptyFields = fields.filter((field) => currentValue(field) === '');
+        if (propertyTextIsVisible && emptyFields.length >= 1) {
+          const valueField = emptyFields[emptyFields.length - 1];
+          setFieldValue(valueField, propertyValue);
+          return {ok: currentValue(valueField) === propertyValue, mode: 'visible-property-label'};
+        }
+
+        if (emptyFields.length >= 2) {
+          const propertyField = emptyFields[emptyFields.length - 2];
+          const valueField = emptyFields[emptyFields.length - 1];
+          setFieldValue(propertyField, propertyName);
+          setFieldValue(valueField, propertyValue);
+          return {
+            ok: currentValue(propertyField) === propertyName && currentValue(valueField) === propertyValue,
+            mode: 'new-property-row',
+          };
+        }
+
+        return {ok: false, reason: 'No editable metadata fields were found after clicking Add property.'};
+        """
 
     def set_band_policy(self, band_name: str, policy: str) -> None:
         """Best-effort selection of a band-specific pyramiding policy."""
@@ -1643,7 +2100,8 @@ class EarthEngineUIUploader:
                 if found:
                     elements = found
                     break
-            except WebDriverException:
+            except WebDriverException as exc:
+                raise_if_invalid_browser_session(exc)
                 continue
 
         unique_texts: List[str] = []
@@ -1738,12 +2196,15 @@ class EarthEngineUIUploader:
         shadow_message = self.read_current_ui_dialog_error_message()
         if shadow_message:
             return shadow_message[:2000]
+        if self.current_ui_upload_dialog_hosts_present():
+            return ""
 
         assert self.driver is not None
         for by, value in ee_selectors.SELECTORS["dialog_error_message"]:
             try:
                 elements = self.driver.find_elements(by, value)
-            except WebDriverException:
+            except WebDriverException as exc:
+                raise_if_invalid_browser_session(exc)
                 continue
             for element in elements:
                 try:
@@ -1754,35 +2215,82 @@ class EarthEngineUIUploader:
                     return text[:2000]
         return ""
 
+    def current_ui_upload_dialog_hosts_present(self) -> bool:
+        """Return True when the current Earth Engine upload-dialog component is in the page."""
+        try:
+            return bool(
+                self.execute_script(
+                    f"""
+                    return document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}').length > 0;
+                    """
+                )
+            )
+        except WebDriverException as exc:
+            raise_if_invalid_browser_session(exc)
+            return False
+
     def read_current_ui_dialog_error_message(self) -> str:
         """Read validation or upload errors from the current upload dialog."""
         if not self.is_current_upload_dialog_open():
             return ""
 
-        text = self.execute_script(
+        messages = self.execute_script(
             f"""
-            const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-            const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
-            if (!dialog || !dialog.shadowRoot) return '';
-            return dialog.shadowRoot.innerText || '';
+            {active_upload_dialog_helper_js()}
+            const dialog = findActiveUploadDialog();
+            if (!dialog || !dialog.shadowRoot) return [];
+
+            function collect(root, output = [], seen = new Set()) {{
+              if (!root || seen.has(root)) return output;
+              seen.add(root);
+              if (root.nodeType === Node.ELEMENT_NODE) output.push(root);
+              const children = [
+                ...Array.from(root.children || []),
+                ...(root.shadowRoot ? Array.from(root.shadowRoot.children) : []),
+              ];
+              for (const child of children) collect(child, output, seen);
+              return output;
+            }}
+
+            function visible(element) {{
+              if (!element || !element.getClientRects || !element.getBoundingClientRect) return false;
+              const style = window.getComputedStyle ? window.getComputedStyle(element) : null;
+              if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+              const rects = element.getClientRects();
+              const box = element.getBoundingClientRect();
+              return rects.length > 0 || box.width > 0 || box.height > 0;
+            }}
+
+            const explicitSelector = [
+              '[role="alert"]',
+              '[aria-live="assertive"]',
+              '.error',
+              '.error-message',
+              '.validation-error',
+              '.warning',
+              '.warning-message',
+              '.input-error',
+              '.invalid',
+              'paper-input-error',
+            ].join(',');
+            return collect(dialog.shadowRoot)
+              .filter((element) => visible(element) && element.matches && element.matches(explicitSelector))
+              .map((element) => (element.innerText || element.textContent || '').trim())
+              .filter(Boolean);
             """
         )
-        if not isinstance(text, str):
+        if not isinstance(messages, list):
             return ""
-
-        messages = []
-        for line in text.splitlines():
-            normalized = line.strip()
-            if not normalized:
-                continue
-            if re.search(r"(already exists|invalid|error|failed|required)", normalized, re.IGNORECASE):
-                messages.append(normalized)
-        return " | ".join(dict.fromkeys(messages))
+        return normalize_dialog_error_messages(str(message) for message in messages)
 
     def execute_script(self, script: str, *args: Any) -> Any:
         """Execute JavaScript against the current page."""
         assert self.driver is not None
-        return self.driver.execute_script(script, *args)
+        try:
+            return self.driver.execute_script(script, *args)
+        except WebDriverException as exc:
+            raise_if_invalid_browser_session(exc)
+            raise
 
     def wait_for_script_value(
         self,
@@ -1804,6 +2312,7 @@ class EarthEngineUIUploader:
                 StaleElementReferenceException,
                 WebDriverException,
             ) as exc:
+                raise_if_invalid_browser_session(exc)
                 last_exception = exc
                 time.sleep(0.2)
                 continue
@@ -1846,12 +2355,14 @@ class EarthEngineUIUploader:
         element = self.find_first_element(selector_name, timeout=timeout, visible_only=True)
         try:
             element.click()
-        except (ElementClickInterceptedException, WebDriverException):
+        except (ElementClickInterceptedException, WebDriverException) as exc:
+            raise_if_invalid_browser_session(exc)
             assert self.driver is not None
             try:
                 self.driver.execute_script("arguments[0].click();", element)
-            except JavascriptException as exc:
-                raise RetryableUIError(f"Could not click selector '{selector_name}'.") from exc
+            except (JavascriptException, WebDriverException) as script_exc:
+                raise_if_invalid_browser_session(script_exc)
+                raise RetryableUIError(f"Could not click selector '{selector_name}'.") from script_exc
         return element
 
     def find_first_element(
@@ -1941,8 +2452,8 @@ class EarthEngineUIUploader:
         if self.is_current_upload_dialog_open():
             self.execute_script(
                 f"""
-                const dialogs = Array.from(document.querySelectorAll('{ee_selectors.SHADOW_SELECTORS["upload_dialog_host"]}'));
-                const dialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+                {active_upload_dialog_helper_js()}
+                const dialog = findActiveUploadDialog();
                 const innerDialog = dialog && dialog.shadowRoot
                   ? dialog.shadowRoot.querySelector('#asset-upload-dialog')
                   : null;
@@ -1958,7 +2469,8 @@ class EarthEngineUIUploader:
         for by, value in ee_selectors.SELECTORS["dialog_close_button"]:
             try:
                 elements = self.driver.find_elements(by, value)
-            except WebDriverException:
+            except WebDriverException as exc:
+                raise_if_invalid_browser_session(exc)
                 continue
             for element in elements:
                 try:
@@ -2011,6 +2523,7 @@ class EarthEngineUIUploader:
         error_message: str,
     ) -> Dict[str, str]:
         """Create a normalized report row dictionary."""
+        metadata = self.parse_metadata_for_item(item, required=False)
         return {
             "local_file": str(item.local_file),
             "asset_id": item.asset_id,
@@ -2019,6 +2532,10 @@ class EarthEngineUIUploader:
             "detected_task_name": detected_task_name,
             "final_status": final_status,
             "error_message": error_message,
+            "metadata_start_time": metadata.start_time,
+            "metadata_end_time": metadata.end_time,
+            "metadata_properties": json.dumps(metadata.properties, sort_keys=True),
+            "metadata_status": metadata.status,
         }
 
 

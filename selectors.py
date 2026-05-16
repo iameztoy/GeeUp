@@ -89,6 +89,12 @@ SHADOW_SELECTORS: Dict[str, str | int] = {
     "upload_dialog_asset_name_input": "input",
     "upload_dialog_pyramiding_host": ".pyramiding-policy",
     "upload_dialog_pyramiding_dropdown": "paper-dropdown-menu-light",
+    "upload_dialog_properties_label": "Properties",
+    "upload_dialog_add_start_time_label": "Add start time",
+    "upload_dialog_add_end_time_label": "Add end time",
+    "upload_dialog_add_property_label": "Add property",
+    "upload_dialog_property_name_input": "input",
+    "upload_dialog_property_value_input": "input",
     "upload_dialog_upload_button": ".ok-button",
     "upload_dialog_cancel_button": ".cancel-button",
 }
@@ -153,6 +159,28 @@ SELECTORS: Dict[str, List[Locator]] = {
             By.XPATH,
             "//*[contains(., 'Pyramiding')]/following::select[1]",
         ),
+    ],
+    "properties_expand_button": [
+        (By.XPATH, _button_text_xpath("Properties")),
+    ],
+    "add_start_time_button": [
+        (By.XPATH, _button_text_xpath("Add start time")),
+    ],
+    "add_end_time_button": [
+        (By.XPATH, _button_text_xpath("Add end time")),
+    ],
+    "add_property_button": [
+        (By.XPATH, _button_text_xpath("Add property")),
+    ],
+    "property_name_field": [
+        (By.CSS_SELECTOR, "input[aria-label*='Property']"),
+        (By.CSS_SELECTOR, "input[placeholder*='Property']"),
+        (By.XPATH, "//label[contains(., 'Property')]/following::input[1]"),
+    ],
+    "property_value_field": [
+        (By.CSS_SELECTOR, "input[aria-label*='Value']"),
+        (By.CSS_SELECTOR, "input[placeholder*='Value']"),
+        (By.XPATH, "//label[contains(., 'Value')]/following::input[1]"),
     ],
     "upload_button": [
         (By.CSS_SELECTOR, "[aria-label='UPLOAD']"),

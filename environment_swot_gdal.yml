@@ -1,0 +1,12 @@
+name: swot_gdal
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - gdal
+  - libgdal-netcdf
+  - numpy
+  - tqdm
+  - jupyterlab
+  - notebook
+  - ipykernel

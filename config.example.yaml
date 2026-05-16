@@ -2,14 +2,108 @@
 
 earth_engine_url: "https://code.earthengine.google.com/"
 
-# Local folder that contains your GeoTIFF files.
-input_folder: "C:/Users/YOUR_NAME/Desktop/geotiffs"
+# Local folder that contains the GeoTIFF files to upload. By default this is
+# the mosaic output folder, so the Upload tab can receive Mosaic outputs.
+input_folder: "C:/path/to/SWOT_Processing/03_mosaics"
 
 # Earth Engine parent path. Each uploaded file becomes:
 #   projects/MY_PROJECT/assets/MY_COLLECTION/<generated_asset_name>
 # If the Earth Engine dialog uses a separate "destination collection" field,
 # this same value is sent there.
 destination_parent: "projects/MY_PROJECT/assets/MY_COLLECTION"
+
+processing:
+  # Default local processing root. These folders are not committed to Git and
+  # can be changed in the GUI/config if your data lives elsewhere.
+  root: "C:/path/to/SWOT_Processing"
+  raw_downloads: "C:/path/to/SWOT_Processing/01_raw_downloads"
+  extracted_geotiffs: "C:/path/to/SWOT_Processing/02_extracted_geotiffs"
+  mosaics: "C:/path/to/SWOT_Processing/03_mosaics"
+  logs: "C:/path/to/SWOT_Processing/00_logs"
+
+duplicates:
+  # First pipeline step: manually downloaded SWOT NetCDF files go here.
+  input_folder: "C:/path/to/SWOT_Processing/01_raw_downloads"
+
+  # Older duplicate versions move into this subfolder inside the selected
+  # input folder. The newest _NN version stays in place.
+  moved_folder_name: "moved"
+
+  # Timestamped duplicate-removal text logs are written here.
+  log_folder: "C:/path/to/SWOT_Processing/00_logs"
+
+  # Default false to match the original duplicate-cleanup script behavior.
+  recursive: false
+
+extract:
+  # Second pipeline step: cleaned raw SWOT NetCDF files are read from here.
+  input_folder: "C:/path/to/SWOT_Processing/01_raw_downloads"
+
+  # One two-band GeoTIFF per input NetCDF is written here.
+  output_folder: "C:/path/to/SWOT_Processing/02_extracted_geotiffs"
+
+  # Matches the notebook options: original, africa_laea, or wgs84.
+  target_crs_mode: "original"
+
+  # Use "all", one year like 2025, or comma-separated years like "2024,2025".
+  year_selection: "all"
+
+  # Optional test limit. Leave null for all selected files.
+  limit_files: null
+
+  # If true, existing valid GeoTIFFs are reopened and skipped.
+  skip_existing: true
+
+  # Matches the notebook default used for reprojection.
+  resampling_alg: "near"
+
+  manifest_csv: "C:/path/to/SWOT_Processing/00_logs/extract_manifest.csv"
+  errors_csv: "C:/path/to/SWOT_Processing/00_logs/extract_errors.csv"
+
+gdal:
+  # Python executable from the Miniforge/conda GDAL environment.
+  # GeeUp uses this runtime for mosaic processing and future NetCDF extraction.
+  python: "./.conda/swot_gdal/python.exe"
+
+mosaic:
+  # Local folder containing the original SWOT GeoTIFF tiles to mosaic.
+  # The Extraction tab writes GeoTIFFs here by default.
+  input_folder: "C:/path/to/SWOT_Processing/02_extracted_geotiffs"
+
+  # Output folder for upload-ready mosaic GeoTIFFs.
+  output_folder: "C:/path/to/SWOT_Processing/03_mosaics"
+
+  # utm_zone: original projection; keep exact UTM token in the grouping key.
+  # utm_zone_hemisphere: original projection; group MGRS latitude bands that
+  # share the same UTM zone and hemisphere, e.g. UTM30P/UTM30Q/UTM30R -> UTM30N.
+  # pass_date_common_crs: reprojected outputs; mosaic whole pass/date and ignore
+  # original UTM token after GDAL compatibility validation.
+  grouping_mode: "utm_zone"
+
+  # Optional label used in common-CRS mosaic output names, for example LAEA or
+  # WGS84. Blank uses COMMON.
+  target_crs_label: ""
+
+  # Set true if you want to scan subfolders too.
+  recursive: false
+
+  # If false, existing output mosaics are reported and left unchanged.
+  overwrite: false
+
+  # Write a .tfw world file beside each mosaic GeoTIFF. The GeoTIFF itself also
+  # keeps embedded georeferencing.
+  write_world_file: true
+
+  # File extensions to include in mosaic planning.
+  extensions:
+    - ".tif"
+    - ".tiff"
+
+  report_csv: "C:/path/to/SWOT_Processing/00_logs/mosaic_report.csv"
+
+  # Focused CSV with only mosaic groups that combine different source CRIDs.
+  # Leave blank to disable this extra report.
+  mixed_crid_report_csv: "C:/path/to/SWOT_Processing/00_logs/mixed_crid_mosaics.csv"
 
 chrome:
   # Dedicated Chrome profile folder for this tool.
@@ -75,6 +169,35 @@ upload:
 
   # If true, stop the whole run after the first failed upload.
   fail_fast: false
+
+metadata:
+  # Enabled by default for SWOT L2 HR Raster filenames.
+  enabled: true
+  parser: "swot_l2_hr_raster"
+
+  # If true, a file that does not match the expected SWOT filename pattern
+  # is treated as an upload error. Set false to upload unmatched files without
+  # metadata properties.
+  require_match: true
+
+  # system:time_start is populated from RangeBeginningDateTime.
+  add_start_time: true
+
+  # system:time_end is populated from RangeEndingDateTime.
+  add_end_time: true
+
+  # Map Earth Engine property names to parsed filename fields.
+  # Values are stored as strings so leading zeros are preserved.
+  extra_properties:
+    swot_descriptor: descriptor
+    swot_grid_resolution: grid_resolution
+    swot_coordinate_system: coordinate_system
+    swot_granule_overlap: granule_overlap
+    swot_cycle_id: cycle_id
+    swot_pass_id: pass_id
+    swot_scene_id: scene_id
+    swot_crid: crid
+    swot_product_counter: product_counter
 
 execution:
   # Set true to plan uploads without clicking the final UPLOAD button.
