@@ -54,6 +54,14 @@ class ExtractPlanningTests(unittest.TestCase):
     def test_parse_filename_rejects_non_swot_name(self) -> None:
         self.assertIsNone(parse_filename(Path("not_a_swot_file.nc")))
 
+    def test_parse_filename_accepts_podaac_swot_suffix(self) -> None:
+        metadata = parse_filename(Path(nc_name().replace(".nc", "_swot.nc")))
+
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual(metadata["utm_zone"], "36")
+        self.assertEqual(metadata["mgrs_band"], "M")
+
     def test_normalize_year_selection(self) -> None:
         self.assertIsNone(normalize_year_selection("all"))
         self.assertEqual(normalize_year_selection(2025), {2025})

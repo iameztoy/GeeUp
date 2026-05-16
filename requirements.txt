@@ -1,3 +1,4 @@
 selenium>=4.21,<5
 PyYAML>=6.0,<7
 earthengine-api>=1.6,<2
+earthaccess>=0.14,<1

@@ -46,8 +46,15 @@ class GuiLayoutTests(unittest.TestCase):
             tab_ids = notebook.tabs()
             tab_texts = [notebook.tab(tab_id, "text") for tab_id in tab_ids]
 
-            self.assertEqual(tab_texts, ["Duplicate Removal", "Extraction", "Mosaic", "Upload"])
-            duplicate_tab, extract_tab, mosaic_tab, upload_tab = notebook.winfo_children()
+            self.assertEqual(tab_texts, ["Download", "Duplicate Removal", "Extraction", "Mosaic", "Upload"])
+            download_tab, duplicate_tab, extract_tab, mosaic_tab, upload_tab = notebook.winfo_children()
+            self.assertIn("Collection", collect_label_texts(download_tab))
+            self.assertIn("Start date", collect_label_texts(download_tab))
+            self.assertIn("End date", collect_label_texts(download_tab))
+            self.assertIn("Selected tiles", collect_label_texts(download_tab))
+            self.assertIn("Skip files that already exist in the output folder", collect_label_texts(download_tab))
+            self.assertGreaterEqual(len(collect_widgets(download_tab, ttk.Progressbar)), 1)
+            self.assertGreaterEqual(len(collect_widgets(download_tab, ttk.Treeview)), 1)
             self.assertIn("Input folder", collect_label_texts(duplicate_tab))
             self.assertIn("Input NetCDF folder", collect_label_texts(extract_tab))
             self.assertIn("Output GeoTIFF folder", collect_label_texts(extract_tab))
@@ -60,6 +67,20 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertNotIn("GDAL Python", collect_label_texts(upload_tab))
             self.assertGreaterEqual(len(collect_widgets(extract_tab, ttk.Progressbar)), 1)
             self.assertGreaterEqual(len(collect_widgets(mosaic_tab, ttk.Progressbar)), 1)
+        finally:
+            root.destroy()
+
+    def test_download_handoff_sets_raw_processing_inputs(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            app.download_output_var.set("./SWOT_Processing/01_raw_downloads")
+
+            app.apply_download_handoff_to_processing()
+
+            self.assertEqual(app.duplicate_input_var.get(), "./SWOT_Processing/01_raw_downloads")
+            self.assertEqual(app.extract_input_var.get(), "./SWOT_Processing/01_raw_downloads")
         finally:
             root.destroy()
 
@@ -96,13 +117,20 @@ class GuiLayoutTests(unittest.TestCase):
             parsed = app.parse_progress_line(
                 "GEEUP_PROGRESS\textract\t5\t20\tProcessing file.nc\n"
             )
+            download_parsed = app.parse_progress_line(
+                "GEEUP_PROGRESS\tdownload\t1\t3\tDownloading file.nc\n"
+            )
 
             self.assertEqual(parsed, ("extract", 5, 20, "Processing file.nc"))
+            self.assertEqual(download_parsed, ("download", 1, 3, "Downloading file.nc"))
+            app.update_download_progress(1, 3, "Downloading file.nc")
             app.update_extraction_progress(5, 20, "Processing file.nc")
             app.update_mosaic_progress(2, 4, "MOSAIC_CREATED: file.tif")
 
+            self.assertAlmostEqual(app.download_progress_var.get(), 33.3333333333)
             self.assertEqual(app.extract_progress_var.get(), 25.0)
             self.assertEqual(app.mosaic_progress_var.get(), 50.0)
+            self.assertIn("1/3", app.download_progress_text_var.get())
             self.assertIn("5/20", app.extract_progress_text_var.get())
             self.assertIn("2/4", app.mosaic_progress_text_var.get())
         finally:

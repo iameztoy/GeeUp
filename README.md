@@ -2,6 +2,7 @@
 
 This project is a local desktop tool written in Python. It has separated responsibilities:
 
+- **Download:** uses `earthaccess` to search and download PO.DAAC SWOT L2 HR Raster 100 m NetCDF files from NASA Earthdata.
 - **Extraction:** uses the GDAL conda runtime to convert SWOT NetCDF files into two-band GeoTIFFs.
 - **Mosaic:** uses the GDAL conda runtime to reduce GeoTIFF counts before Earth Engine upload.
 - **Upload:** uses Selenium and your local Google Chrome browser to upload GeoTIFF files into Google Earth Engine through the Earth Engine web interface.
@@ -14,6 +15,15 @@ The upload tool does **not** use Google Cloud Storage buckets. It simulates a no
 ## What This Tool Does
 
 The script can:
+
+### Download
+
+1. Authenticate with NASA Earthdata through `earthaccess`.
+2. Search the active SWOT L2 HR Raster 100 m collection, defaulting to `SWOT_L2_HR_Raster_100m_D`.
+3. Filter by date range and UTM tile tokens from the granule filename, such as `UTM30R`.
+4. Preview matching granules, known total size, and per-file metadata before downloading.
+5. Download NetCDF files into the configured raw-download folder.
+6. Hand the output folder to Duplicate Removal and Extraction.
 
 ### Extraction
 
@@ -68,7 +78,8 @@ The script can:
 
 ## Project Files
 
-- `ee_uploader_gui.py`: beginner-friendly desktop launcher with Duplicate Removal, Extraction, Mosaic, and Upload tabs
+- `ee_uploader_gui.py`: beginner-friendly desktop launcher with Download, Duplicate Removal, Extraction, Mosaic, and Upload tabs
+- `swot_download_tool.py`: Earthdata/PO.DAAC search and download module for SWOT L2 HR Raster 100 m data
 - `swot_duplicate_remover.py`: duplicate-cleanup script for raw downloaded SWOT files
 - `swot_extract_tool.py`: GDAL-backed SWOT NetCDF-to-GeoTIFF extraction script
 - `ee_ui_uploader.py`: Earth Engine upload automation script
@@ -77,7 +88,7 @@ The script can:
 - `swot_metadata.py`: shared SWOT filename parser
 - `selectors.py`: all UI locators in one place
 - `config.example.yaml`: sample configuration
-- `requirements.txt`: upload/UI `.venv` dependencies, plus the optional Earth Engine API utility dependency
+- `requirements.txt`: launcher/download/upload `.venv` dependencies, plus the optional Earth Engine API utility dependency
 - `environment_swot_gdal.yml`: GDAL conda environment definition for extraction and mosaicking
 - `SWOT_PROCESSING_GUIDE.md`: detailed processing rules, naming behavior, and overlap logic
 - `TROUBLESHOOTING.md`: common failures and fixes
@@ -98,7 +109,7 @@ You need:
 
 GeeUp intentionally uses two Python environments:
 
-- `.venv`: local project environment for the launcher, duplicate remover, Earth Engine uploader, and small Earth Engine API utilities. It contains Selenium, PyYAML, and `earthengine-api`.
+- `.venv`: local project environment for the launcher, SWOT downloader, duplicate remover, Earth Engine uploader, and small Earth Engine API utilities. It contains Selenium, PyYAML, `earthaccess`, and `earthengine-api`.
 - GDAL conda environment: processing runtime for mosaicking now and NetCDF extraction later. It contains GDAL, `libgdal-netcdf`, NumPy, and tqdm.
 
 Do not try to merge these by default. GDAL on Windows is more reliable from conda-forge, while the uploader is simpler and safer in a lightweight `.venv`.
@@ -310,12 +321,31 @@ python ee_uploader_gui.py
 
 Default processing folders:
 
-- `<LOCAL_PROCESSING_ROOT>\01_raw_downloads`: raw manually downloaded SWOT files
-- `<LOCAL_PROCESSING_ROOT>\02_extracted_geotiffs`: future NetCDF extraction outputs
+- `<LOCAL_PROCESSING_ROOT>\01_raw_downloads`: raw downloaded SWOT NetCDF files
+- `<LOCAL_PROCESSING_ROOT>\02_extracted_geotiffs`: NetCDF extraction outputs
 - `<LOCAL_PROCESSING_ROOT>\03_mosaics`: upload-ready mosaic GeoTIFFs
 - `<LOCAL_PROCESSING_ROOT>\00_logs`: processing reports and logs
 
 The window lets you fill:
+
+Download tab:
+
+- Earthdata authentication check
+- active Version D or superseded Version C 100 m collection
+- start and end date
+- one or more UTM tile tokens such as `UTM30R`
+- output folder for raw NetCDF files
+- optional granule limit
+- preview/report CSV
+- skip-existing mode
+
+For downloading, click:
+
+- `Authenticate`
+- `Preview Search`
+- `Download Matches`
+
+After a successful download, the launcher points Duplicate Removal and Extraction at the download output folder.
 
 Extraction tab:
 
@@ -417,6 +447,12 @@ Minimum values to change:
 
 Common values to review:
 
+- `download.collection_short_name`
+- `download.start_date`
+- `download.end_date`
+- `download.utm_tiles`
+- `download.output_folder`
+- `download.report_csv`
 - `gdal.python`
 - `mosaic.input_folder`
 - `mosaic.output_folder`
@@ -438,6 +474,35 @@ Common values to review:
 - `metadata.add_end_time`
 - `execution.dry_run`
 - `execution.resume`
+
+## SWOT Download Workflow
+
+Use the Download tab to retrieve SWOT L2 HR Raster 100 m NetCDF files from PO.DAAC before local processing.
+
+Recommended workflow:
+
+1. Open `python ee_uploader_gui.py`.
+2. In the Download tab, click `Authenticate`.
+3. Choose the collection. The default is active Version D: `SWOT_L2_HR_Raster_100m_D`.
+4. Enter a start date, end date, and one or more UTM tile tokens such as `UTM30R`.
+5. Set the output folder to your raw downloads folder.
+6. Click `Preview Search` and review the matched granules and estimated size.
+7. Click `Download Matches`.
+8. Continue with Duplicate Removal if repeated product versions are present, then Extraction.
+
+Manual preview:
+
+```powershell
+python swot_download_tool.py --config config.yaml --dry-run
+```
+
+Manual download:
+
+```powershell
+python swot_download_tool.py --config config.yaml
+```
+
+The downloader uses `earthaccess.login(strategy="all", persist=False)`. It can use existing `EARTHDATA_USERNAME` / `EARTHDATA_PASSWORD` environment variables or the Windows `%USERPROFILE%\_netrc` file. Credentials are not written to `config.yaml`.
 
 ## SWOT Extraction Workflow
 

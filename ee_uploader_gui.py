@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import csv
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,20 @@ ensure_isolated_python_environment()
 import yaml
 
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env
+from swot_download_tool import (
+    COLLECTION_LABELS,
+    COLLECTION_LABEL_BY_SHORT_NAME,
+    DEFAULT_COLLECTION_LABEL,
+    DEFAULT_COLLECTION_SHORT_NAME,
+    DownloadConfig,
+    authenticate as authenticate_earthdata,
+    build_download_preview,
+    format_size,
+    generate_utm_tiles,
+    normalize_utm_tiles,
+    run_download,
+    write_download_report,
+)
 
 
 def load_config() -> Dict[str, Any]:
@@ -104,6 +119,7 @@ class LauncherApp:
 
         self.data = load_config()
         processing_data = self.data.get("processing", {})
+        download_data = self.data.get("download", {})
         duplicate_data = self.data.get("duplicates", {})
         extract_data = self.data.get("extract", {})
         metadata_data = self.data.get("metadata", {})
@@ -129,6 +145,61 @@ class LauncherApp:
         self.processing_extracted_geotiffs_var = tk.StringVar(value=extracted_geotiffs)
         self.processing_mosaics_var = tk.StringVar(value=mosaic_outputs)
         self.processing_logs_var = tk.StringVar(value=processing_logs)
+
+        download_short_name = str(
+            download_data.get("collection_short_name", DEFAULT_COLLECTION_SHORT_NAME)
+        ).strip()
+        download_label = str(
+            download_data.get(
+                "collection_version_label",
+                COLLECTION_LABEL_BY_SHORT_NAME.get(
+                    download_short_name,
+                    DEFAULT_COLLECTION_LABEL,
+                ),
+            )
+        ).strip()
+        if download_label not in COLLECTION_LABELS:
+            download_label = COLLECTION_LABEL_BY_SHORT_NAME.get(
+                download_short_name,
+                DEFAULT_COLLECTION_LABEL,
+            )
+        try:
+            selected_tiles = normalize_utm_tiles(download_data.get("utm_tiles", []))
+        except ValueError:
+            selected_tiles = []
+        self.download_collection_var = tk.StringVar(value=download_label)
+        self.download_start_date_var = tk.StringVar(
+            value=str(download_data.get("start_date", ""))
+        )
+        self.download_end_date_var = tk.StringVar(
+            value=str(download_data.get("end_date", ""))
+        )
+        self.download_tile_filter_var = tk.StringVar(value="")
+        self.download_selected_tiles_var = tk.StringVar(
+            value=", ".join(selected_tiles)
+        )
+        self.download_output_var = tk.StringVar(
+            value=download_data.get("output_folder", raw_downloads)
+        )
+        max_granules = download_data.get("max_granules")
+        self.download_max_granules_var = tk.StringVar(
+            value="" if max_granules in (None, "") else str(max_granules)
+        )
+        self.download_report_var = tk.StringVar(
+            value=download_data.get(
+                "report_csv",
+                f"{processing_logs}/download_preview.csv",
+            )
+        )
+        self.download_threads_var = tk.StringVar(
+            value=str(download_data.get("threads", 4))
+        )
+        self.download_skip_existing_var = tk.BooleanVar(
+            value=bool(download_data.get("skip_existing", True))
+        )
+        self.all_utm_tiles = generate_utm_tiles()
+        self.download_visible_utm_tiles = list(self.all_utm_tiles)
+        self.download_selected_tiles = set(selected_tiles)
 
         self.duplicate_input_var = tk.StringVar(
             value=duplicate_data.get("input_folder", raw_downloads)
@@ -266,6 +337,12 @@ class LauncherApp:
         self.status_var = tk.StringVar(
             value="Fill the form, save config, then start a dry run."
         )
+        self.download_status_var = tk.StringVar(
+            value="Authenticate, choose dates and UTM tiles, then preview matching SWOT granules."
+        )
+        self.download_auth_status_var = tk.StringVar(
+            value="Earthdata authentication: not checked"
+        )
         self.mosaic_status_var = tk.StringVar(
             value="Choose a SWOT GeoTIFF folder, then plan mosaics."
         )
@@ -275,6 +352,8 @@ class LauncherApp:
         self.extract_status_var = tk.StringVar(
             value="Choose the cleaned NetCDF folder, then plan extraction."
         )
+        self.download_progress_var = tk.DoubleVar(value=0.0)
+        self.download_progress_text_var = tk.StringVar(value="Progress: not started")
         self.extract_progress_var = tk.DoubleVar(value=0.0)
         self.extract_progress_text_var = tk.StringVar(value="Progress: not started")
         self.mosaic_progress_var = tk.DoubleVar(value=0.0)
@@ -309,19 +388,252 @@ class LauncherApp:
         notebook = ttk.Notebook(outer)
         notebook.grid(row=2, column=0, sticky="nsew")
 
+        download_tab = ttk.Frame(notebook, padding=12)
         duplicate_tab = ttk.Frame(notebook, padding=12)
         extract_tab = ttk.Frame(notebook, padding=12)
         mosaic_tab = ttk.Frame(notebook, padding=12)
         upload_tab = ttk.Frame(notebook, padding=12)
+        notebook.add(download_tab, text="Download")
         notebook.add(duplicate_tab, text="Duplicate Removal")
         notebook.add(extract_tab, text="Extraction")
         notebook.add(mosaic_tab, text="Mosaic")
         notebook.add(upload_tab, text="Upload")
 
+        self.build_download_tab(download_tab)
         self.build_duplicate_tab(duplicate_tab)
         self.build_extract_tab(extract_tab)
         self.build_mosaic_tab(mosaic_tab)
         self.build_upload_tab(upload_tab)
+
+    def build_download_tab(self, parent: ttk.Frame) -> None:
+        """Create SWOT Earthdata download controls."""
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(parent, borderwidth=0, highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        content = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(window_id, width=event.width),
+        )
+        parent = content
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(4, weight=1)
+
+        auth = ttk.LabelFrame(parent, text="Earthdata Authentication", padding=12)
+        auth.grid(row=0, column=0, sticky="ew")
+        auth.columnconfigure(1, weight=1)
+        ttk.Button(
+            auth,
+            text="Authenticate",
+            command=self.authenticate_download,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            auth,
+            textvariable=self.download_auth_status_var,
+            foreground="#184a8b",
+            justify="left",
+        ).grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        form = ttk.Frame(parent)
+        form.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+        form.columnconfigure(1, weight=1)
+
+        row = 0
+        row = self.add_combo_row(
+            form,
+            row,
+            "Collection",
+            self.download_collection_var,
+            list(COLLECTION_LABELS.keys()),
+            "Default is the active Version D 100 m product; Version C remains available for compatibility",
+        )
+        row = self.add_entry_row(
+            form,
+            row,
+            "Start date",
+            self.download_start_date_var,
+            "Use YYYY-MM-DD",
+        )
+        row = self.add_entry_row(
+            form,
+            row,
+            "End date",
+            self.download_end_date_var,
+            "Use YYYY-MM-DD",
+        )
+        row = self.add_path_row(
+            form,
+            row,
+            "Output folder",
+            self.download_output_var,
+            self.browse_download_output_folder,
+            "Folder for downloaded SWOT NetCDF files; defaults to 01_raw_downloads",
+        )
+        row = self.add_entry_row(
+            form,
+            row,
+            "Max granules",
+            self.download_max_granules_var,
+            "Optional safety limit; leave blank to retrieve all matches",
+        )
+        row = self.add_entry_row(
+            form,
+            row,
+            "Download threads",
+            self.download_threads_var,
+            "Per-file earthaccess thread count; use 4 unless you need to reduce network pressure",
+        )
+        row = self.add_path_row(
+            form,
+            row,
+            "Preview/report CSV",
+            self.download_report_var,
+            self.browse_download_report_file,
+            "CSV report for matched, downloaded, skipped, and failed granules",
+        )
+
+        tiles = ttk.LabelFrame(parent, text="UTM Tiles", padding=12)
+        tiles.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        tiles.columnconfigure(1, weight=1)
+        tiles.rowconfigure(2, weight=1)
+
+        ttk.Label(tiles, text="Filter").grid(row=0, column=0, sticky="w", pady=(0, 2))
+        ttk.Entry(tiles, textvariable=self.download_tile_filter_var).grid(
+            row=0, column=1, sticky="ew", pady=(0, 2)
+        )
+        ttk.Label(
+            tiles,
+            text="Select one or more tokens such as UTM30R; use Ctrl/Shift for multi-select",
+            foreground="#666666",
+        ).grid(row=1, column=1, sticky="w", pady=(0, 8))
+
+        list_frame = ttk.Frame(tiles)
+        list_frame.grid(row=2, column=1, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        self.download_tile_listbox = tk.Listbox(
+            list_frame,
+            selectmode="extended",
+            height=7,
+            exportselection=False,
+        )
+        self.download_tile_listbox.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(
+            list_frame,
+            orient="vertical",
+            command=self.download_tile_listbox.yview,
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.download_tile_listbox.configure(yscrollcommand=scrollbar.set)
+        self.download_tile_listbox.bind("<<ListboxSelect>>", self.on_download_tile_select)
+
+        ttk.Label(tiles, text="Selected tiles").grid(row=3, column=0, sticky="w", pady=(8, 2))
+        selected_frame = ttk.Frame(tiles)
+        selected_frame.grid(row=3, column=1, sticky="ew", pady=(8, 2))
+        selected_frame.columnconfigure(0, weight=1)
+        ttk.Entry(selected_frame, textvariable=self.download_selected_tiles_var).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Button(
+            selected_frame,
+            text="Apply",
+            command=self.apply_download_tiles_from_text,
+        ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(
+            selected_frame,
+            text="Clear",
+            command=self.clear_download_tiles,
+        ).grid(row=0, column=2, padx=(8, 0))
+
+        options = ttk.LabelFrame(parent, text="Options", padding=12)
+        options.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        ttk.Checkbutton(
+            options,
+            text="Skip files that already exist in the output folder",
+            variable=self.download_skip_existing_var,
+        ).grid(row=0, column=0, sticky="w", pady=4)
+
+        preview = ttk.LabelFrame(parent, text="Preview", padding=12)
+        preview.grid(row=4, column=0, sticky="nsew", pady=(14, 0))
+        preview.columnconfigure(0, weight=1)
+        preview.rowconfigure(0, weight=1)
+        columns = ("file_name", "utm_tile", "start_time", "end_time", "size_mb", "status")
+        self.download_preview_tree = ttk.Treeview(
+            preview,
+            columns=columns,
+            show="headings",
+            height=7,
+        )
+        headings = {
+            "file_name": ("File name", 330),
+            "utm_tile": ("UTM", 70),
+            "start_time": ("Start", 145),
+            "end_time": ("End", 145),
+            "size_mb": ("MB", 70),
+            "status": ("Status", 110),
+        }
+        for column, (label, width) in headings.items():
+            self.download_preview_tree.heading(column, text=label)
+            self.download_preview_tree.column(column, width=width, anchor="w")
+        self.download_preview_tree.grid(row=0, column=0, sticky="nsew")
+        preview_scrollbar = ttk.Scrollbar(
+            preview,
+            orient="vertical",
+            command=self.download_preview_tree.yview,
+        )
+        preview_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.download_preview_tree.configure(yscrollcommand=preview_scrollbar.set)
+
+        controls = ttk.Frame(parent)
+        controls.grid(row=5, column=0, sticky="ew", pady=(14, 0))
+        controls.columnconfigure(0, weight=1)
+        ttk.Button(controls, text="Save Config", command=self.save_download_config).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(controls, text="Preview Search", command=self.preview_download).grid(
+            row=0, column=1, sticky="w", padx=(8, 0)
+        )
+        ttk.Button(controls, text="Download Matches", command=self.start_download).grid(
+            row=0, column=2, sticky="w", padx=(8, 0)
+        )
+
+        progress = ttk.Frame(parent)
+        progress.grid(row=6, column=0, sticky="ew", pady=(12, 0))
+        progress.columnconfigure(0, weight=1)
+        ttk.Progressbar(
+            progress,
+            variable=self.download_progress_var,
+            maximum=100,
+            mode="determinate",
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Label(
+            progress,
+            textvariable=self.download_progress_text_var,
+            foreground="#555555",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        ttk.Label(
+            parent,
+            textvariable=self.download_status_var,
+            foreground="#184a8b",
+            justify="left",
+        ).grid(row=7, column=0, sticky="w", pady=(12, 0))
+
+        self.download_tile_filter_var.trace_add(
+            "write",
+            lambda *_args: self.refresh_download_tile_list(),
+        )
+        self.refresh_download_tile_list()
+        self.load_download_report_preview(limit=100)
 
     def build_duplicate_tab(self, parent: ttk.Frame) -> None:
         """Create duplicate-removal controls for raw SWOT downloads."""
@@ -934,6 +1246,27 @@ class LauncherApp:
         if selected:
             self.folder_var.set(selected)
 
+    def browse_download_output_folder(self) -> None:
+        """Let the user choose the raw SWOT download output folder."""
+        selected = filedialog.askdirectory(
+            title="Choose the folder for downloaded SWOT NetCDF files",
+            initialdir=self.download_output_var.get() or str(PROJECT_ROOT),
+        )
+        if selected:
+            self.download_output_var.set(selected)
+
+    def browse_download_report_file(self) -> None:
+        """Let the user choose the download preview/report CSV path."""
+        selected = filedialog.asksaveasfilename(
+            title="Choose the download report CSV path",
+            initialfile=Path(self.download_report_var.get() or "download_preview.csv").name,
+            initialdir=str(Path(self.download_report_var.get() or PROJECT_ROOT).parent),
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if selected:
+            self.download_report_var.set(selected)
+
     def browse_gdal_python(self) -> None:
         """Let the user choose the Python executable from the GDAL conda env."""
         selected = filedialog.askopenfilename(
@@ -1030,6 +1363,125 @@ class LauncherApp:
         )
         if selected:
             self.profile_dir_var.set(selected)
+
+    def selected_download_collection_short_name(self) -> str:
+        """Return the collection short name for the selected Download label."""
+        return COLLECTION_LABELS.get(
+            self.download_collection_var.get(),
+            DEFAULT_COLLECTION_SHORT_NAME,
+        )
+
+    def refresh_download_tile_list(self) -> None:
+        """Refresh the filtered UTM listbox while preserving selected tiles."""
+        if not hasattr(self, "download_tile_listbox"):
+            return
+        self.download_tile_listbox.delete(0, tk.END)
+        needle = self.download_tile_filter_var.get().strip().upper()
+        self.download_visible_utm_tiles = [
+            tile for tile in self.all_utm_tiles if needle in tile
+        ]
+        for tile in self.download_visible_utm_tiles:
+            self.download_tile_listbox.insert(tk.END, tile)
+            if tile in self.download_selected_tiles:
+                self.download_tile_listbox.selection_set(tk.END)
+
+    def on_download_tile_select(self, _event: tk.Event | None = None) -> None:
+        """Update selected tile state from the current listbox selection."""
+        if not hasattr(self, "download_tile_listbox"):
+            return
+        selected_indices = set(self.download_tile_listbox.curselection())
+        for index, tile in enumerate(self.download_visible_utm_tiles):
+            if index in selected_indices:
+                self.download_selected_tiles.add(tile)
+            else:
+                self.download_selected_tiles.discard(tile)
+        self.download_selected_tiles_var.set(
+            ", ".join(sorted(self.download_selected_tiles))
+        )
+
+    def apply_download_tiles_from_text(self) -> None:
+        """Parse the selected-tile text box and apply it to the listbox."""
+        try:
+            tiles = normalize_utm_tiles(self.download_selected_tiles_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Invalid UTM tiles", str(exc))
+            return
+        self.download_selected_tiles = set(tiles)
+        self.download_selected_tiles_var.set(", ".join(tiles))
+        self.refresh_download_tile_list()
+
+    def clear_download_tiles(self) -> None:
+        """Clear all selected UTM tiles."""
+        self.download_selected_tiles.clear()
+        self.download_selected_tiles_var.set("")
+        self.refresh_download_tile_list()
+
+    def current_download_tiles(self) -> list[str]:
+        """Return the selected tiles from text/listbox state."""
+        tiles = normalize_utm_tiles(self.download_selected_tiles_var.get())
+        self.download_selected_tiles = set(tiles)
+        return tiles
+
+    def download_tiles_for_config(self) -> list[str]:
+        """Return download tiles without letting another tab's save fail."""
+        try:
+            return self.current_download_tiles()
+        except ValueError:
+            return sorted(self.download_selected_tiles)
+
+    def download_config_from_ui(self) -> DownloadConfig:
+        """Build a DownloadConfig from the Download tab."""
+        max_granules = self.parse_optional_int_or_none(
+            self.download_max_granules_var.get()
+        )
+        threads = self.parse_int_or_default(self.download_threads_var.get(), 4)
+        return DownloadConfig(
+            collection_short_name=self.selected_download_collection_short_name(),
+            collection_version_label=self.download_collection_var.get(),
+            output_folder=Path(self.download_output_var.get().strip()),
+            start_date=self.download_start_date_var.get().strip(),
+            end_date=self.download_end_date_var.get().strip(),
+            utm_tiles=self.current_download_tiles(),
+            max_granules=max_granules,
+            report_csv=Path(self.download_report_var.get().strip()),
+            skip_existing=self.download_skip_existing_var.get(),
+            threads=threads,
+            base_dir=PROJECT_ROOT,
+        )
+
+    def validate_download(self) -> bool:
+        """Check download form values before previewing or downloading."""
+        if not self.download_output_var.get().strip():
+            messagebox.showerror(
+                "Missing download output folder",
+                "Please choose where downloaded SWOT NetCDF files should be written.",
+            )
+            return False
+        if not self.download_report_var.get().strip():
+            messagebox.showerror(
+                "Missing download report CSV",
+                "Please choose a CSV path for the download preview/report.",
+            )
+            return False
+        try:
+            config = self.download_config_from_ui()
+            from swot_download_tool import validate_config
+
+            validate_config(config)
+        except ValueError as exc:
+            messagebox.showerror("Invalid download settings", str(exc))
+            return False
+
+        try:
+            config.output_folder.mkdir(parents=True, exist_ok=True)
+            config.report_csv.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Could not create download folders",
+                f"Failed to create download output/report folders:\n{exc}",
+            )
+            return False
+        return True
 
     def validate_duplicate_removal(self) -> bool:
         """Check duplicate-removal form values before planning or running."""
@@ -1322,7 +1774,8 @@ class LauncherApp:
             "destination_parent": self.destination_var.get().strip(),
             "processing": {
                 "root": self.processing_root_var.get().strip() or DEFAULT_PROCESSING_PATHS["root"],
-                "raw_downloads": self.duplicate_input_var.get().strip()
+                "raw_downloads": self.download_output_var.get().strip()
+                or self.duplicate_input_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["raw_downloads"],
                 "extracted_geotiffs": self.extract_output_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["extracted_geotiffs"],
@@ -1331,8 +1784,28 @@ class LauncherApp:
                 "logs": self.duplicate_log_folder_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["logs"],
             },
+            "download": {
+                "collection_short_name": self.selected_download_collection_short_name(),
+                "collection_version_label": self.download_collection_var.get(),
+                "output_folder": self.download_output_var.get().strip()
+                or DEFAULT_PROCESSING_PATHS["raw_downloads"],
+                "start_date": self.download_start_date_var.get().strip(),
+                "end_date": self.download_end_date_var.get().strip(),
+                "utm_tiles": self.download_tiles_for_config(),
+                "max_granules": self.parse_optional_int_or_none(
+                    self.download_max_granules_var.get()
+                ),
+                "report_csv": self.download_report_var.get().strip()
+                or f"{DEFAULT_PROCESSING_PATHS['logs']}/download_preview.csv",
+                "skip_existing": self.download_skip_existing_var.get(),
+                "threads": self.parse_int_or_default(
+                    self.download_threads_var.get(),
+                    4,
+                ),
+            },
             "duplicates": {
                 "input_folder": self.duplicate_input_var.get().strip()
+                or self.download_output_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["raw_downloads"],
                 "moved_folder_name": self.duplicate_moved_folder_var.get().strip()
                 or "moved",
@@ -1342,6 +1815,7 @@ class LauncherApp:
             },
             "extract": {
                 "input_folder": self.extract_input_var.get().strip()
+                or self.download_output_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["raw_downloads"],
                 "output_folder": self.extract_output_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["extracted_geotiffs"],
@@ -1438,12 +1912,15 @@ class LauncherApp:
         self,
         notify: bool = True,
         dry_run_override: bool | None = None,
+        validate_download: bool = False,
         validate_upload: bool = True,
         validate_mosaic: bool = False,
         validate_duplicates: bool = False,
         validate_extract: bool = False,
     ) -> bool:
         """Save config.yaml from the current form values."""
+        if validate_download and not self.validate_download():
+            return False
         if validate_duplicates and not self.validate_duplicate_removal():
             return False
         if validate_extract and not self.validate_extraction():
@@ -1455,6 +1932,7 @@ class LauncherApp:
         data = self.build_config(dry_run_override=dry_run_override)
         with CONFIG_PATH.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=False)
+        self.download_status_var.set(f"Saved config to {CONFIG_PATH}")
         self.status_var.set(f"Saved config to {CONFIG_PATH}")
         self.mosaic_status_var.set(f"Saved config to {CONFIG_PATH}")
         self.duplicate_status_var.set(f"Saved config to {CONFIG_PATH}")
@@ -1463,10 +1941,22 @@ class LauncherApp:
             messagebox.showinfo("Config saved", f"Saved:\n{CONFIG_PATH}")
         return True
 
+    def save_download_config(self) -> bool:
+        """Save config after validating the download tab."""
+        return self.save_config(
+            notify=True,
+            validate_download=True,
+            validate_upload=False,
+            validate_mosaic=False,
+            validate_duplicates=False,
+            validate_extract=False,
+        )
+
     def save_upload_config(self) -> bool:
         """Save config after validating the upload tab."""
         return self.save_config(
             notify=True,
+            validate_download=False,
             validate_upload=True,
             validate_mosaic=False,
             validate_duplicates=False,
@@ -1476,6 +1966,7 @@ class LauncherApp:
         """Save config after validating the mosaic tab."""
         return self.save_config(
             notify=True,
+            validate_download=False,
             validate_upload=False,
             validate_mosaic=True,
             validate_duplicates=False,
@@ -1486,6 +1977,7 @@ class LauncherApp:
         """Save config after validating the duplicate-removal tab."""
         return self.save_config(
             notify=True,
+            validate_download=False,
             validate_upload=False,
             validate_mosaic=False,
             validate_duplicates=True,
@@ -1496,11 +1988,194 @@ class LauncherApp:
         """Save config after validating the extraction tab."""
         return self.save_config(
             notify=True,
+            validate_download=False,
             validate_upload=False,
             validate_mosaic=False,
             validate_duplicates=False,
             validate_extract=True,
         )
+
+    def authenticate_download(self) -> None:
+        """Authenticate Earthdata access in a background thread."""
+        self.download_auth_status_var.set(
+            "Earthdata authentication: checking. Watch the console if credentials are requested."
+        )
+        thread = threading.Thread(
+            target=self.run_download_authentication,
+            daemon=True,
+        )
+        thread.start()
+
+    def run_download_authentication(self) -> None:
+        """Run earthaccess.login off the Tkinter UI thread."""
+        try:
+            authenticate_earthdata(strategy="all", persist=False)
+        except Exception as exc:
+            self.root.after(0, self.finish_download_authentication_error, exc)
+            return
+        self.root.after(0, self.finish_download_authentication)
+
+    def finish_download_authentication(self) -> None:
+        """Show successful Earthdata authentication."""
+        self.download_auth_status_var.set("Earthdata authentication: succeeded")
+        self.download_status_var.set("Earthdata authentication succeeded for this session.")
+
+    def finish_download_authentication_error(self, exc: Exception) -> None:
+        """Show failed Earthdata authentication."""
+        self.download_auth_status_var.set(f"Earthdata authentication: failed ({exc})")
+        self.download_status_var.set("Earthdata authentication failed. Check credentials or _netrc.")
+        messagebox.showerror(
+            "Earthdata authentication failed",
+            f"earthaccess could not authenticate with Earthdata Login:\n{exc}",
+        )
+
+    def preview_download(self) -> None:
+        """Save config and search matching SWOT granules without downloading."""
+        if not self.save_config(
+            notify=False,
+            validate_download=True,
+            validate_upload=False,
+            validate_mosaic=False,
+            validate_duplicates=False,
+            validate_extract=False,
+        ):
+            return
+        config = self.download_config_from_ui()
+        self.download_status_var.set("Started SWOT download preview. Searching CMR...")
+        self.download_progress_var.set(0.0)
+        self.download_progress_text_var.set("Progress: searching CMR")
+        thread = threading.Thread(
+            target=self.run_download_preview_process,
+            args=(config,),
+            daemon=True,
+        )
+        thread.start()
+
+    def run_download_preview_process(self, config: DownloadConfig) -> None:
+        """Run the Earthdata search off the Tkinter UI thread."""
+        try:
+            preview = build_download_preview(
+                config,
+                progress_callback=lambda current, total, message: self.root.after(
+                    0,
+                    self.update_download_progress,
+                    current,
+                    total,
+                    message,
+                ),
+            )
+            report_csv = write_download_report(config, preview)
+        except Exception as exc:
+            self.root.after(0, self.finish_download_process_error, exc)
+            return
+        self.root.after(0, self.finish_download_preview_process, preview, report_csv)
+
+    def finish_download_preview_process(self, preview: Any, report_csv: Path) -> None:
+        """Update the UI after a download preview finishes."""
+        self.load_download_report_preview(limit=300)
+        self.download_progress_var.set(100.0)
+        self.download_progress_text_var.set("Progress: preview complete")
+        size_text = format_size(preview.total_known_size_mb, preview.missing_size_count)
+        self.download_status_var.set(
+            f"Preview found {len(preview.granules)} granules. Estimated size: {size_text}. Report: {report_csv}"
+        )
+        messagebox.showinfo(
+            "Download preview finished",
+            (
+                f"Matched granules: {len(preview.granules)}\n"
+                f"Estimated size: {size_text}\n"
+                f"Report CSV:\n{report_csv}"
+            ),
+        )
+
+    def start_download(self) -> None:
+        """Save config and download matching SWOT granules."""
+        if not self.save_config(
+            notify=False,
+            validate_download=True,
+            validate_upload=False,
+            validate_mosaic=False,
+            validate_duplicates=False,
+            validate_extract=False,
+        ):
+            return
+        config = self.download_config_from_ui()
+        self.download_status_var.set("Started SWOT download. Searching CMR...")
+        self.download_progress_var.set(0.0)
+        self.download_progress_text_var.set("Progress: starting")
+        thread = threading.Thread(
+            target=self.run_download_process,
+            args=(config,),
+            daemon=True,
+        )
+        thread.start()
+
+    def run_download_process(self, config: DownloadConfig) -> None:
+        """Run search and downloads off the Tkinter UI thread."""
+        try:
+            result = run_download(
+                config,
+                progress_callback=lambda current, total, message: self.root.after(
+                    0,
+                    self.update_download_progress,
+                    current,
+                    total,
+                    message,
+                ),
+            )
+        except Exception as exc:
+            self.root.after(0, self.finish_download_process_error, exc)
+            return
+        self.root.after(0, self.finish_download_process, result)
+
+    def finish_download_process_error(self, exc: Exception) -> None:
+        """Show a failed download preview or run."""
+        self.download_status_var.set(f"Download module failed: {exc}")
+        messagebox.showerror(
+            "Download module failed",
+            f"The SWOT download module failed:\n{exc}",
+        )
+
+    def finish_download_process(self, result: Any) -> None:
+        """Update the UI after a download run exits."""
+        self.load_download_report_preview(limit=300)
+        self.download_progress_var.set(100.0)
+        if not result.failures:
+            self.apply_download_handoff_to_processing()
+            self.download_progress_text_var.set("Progress: download complete")
+            self.download_status_var.set(
+                f"Download finished. Downloaded {len(result.downloaded_files)} file(s), skipped {len(result.skipped_existing)} existing file(s)."
+            )
+            messagebox.showinfo(
+                "Download finished",
+                (
+                    f"Downloaded files: {len(result.downloaded_files)}\n"
+                    f"Skipped existing: {len(result.skipped_existing)}\n"
+                    f"Report CSV:\n{result.report_csv}\n\n"
+                    "The output folder is now set as the input for Duplicate Removal and Extraction."
+                ),
+            )
+            return
+
+        self.download_progress_text_var.set("Progress: download finished with failures")
+        self.download_status_var.set(
+            f"Download finished with {len(result.failures)} failed granule(s). Review the report CSV."
+        )
+        messagebox.showwarning(
+            "Download finished with failures",
+            (
+                f"Downloaded files: {len(result.downloaded_files)}\n"
+                f"Skipped existing: {len(result.skipped_existing)}\n"
+                f"Failed granules: {len(result.failures)}\n"
+                f"Report CSV:\n{result.report_csv}"
+            ),
+        )
+
+    def apply_download_handoff_to_processing(self) -> None:
+        """Point the next processing steps at the download output folder."""
+        output_folder = self.download_output_var.get().strip()
+        self.duplicate_input_var.set(output_folder)
+        self.extract_input_var.set(output_folder)
 
     def plan_duplicate_removal(self) -> None:
         """Save config and run duplicate removal in dry-run mode."""
@@ -1651,6 +2326,45 @@ class LauncherApp:
             "".join(output_lines),
             "",
         )
+
+    def update_download_progress(self, current: int, total: int, message: str) -> None:
+        """Update Download progress widgets from worker progress events."""
+        percent = 0.0 if total <= 0 else min(100.0, max(0.0, current / total * 100.0))
+        self.download_progress_var.set(percent)
+        self.download_progress_text_var.set(f"Progress: {current}/{total} - {message}")
+
+    def load_download_report_preview(self, limit: int = 300) -> int:
+        """Load recent download report rows into the preview tree."""
+        if not hasattr(self, "download_preview_tree"):
+            return 0
+        for item in self.download_preview_tree.get_children():
+            self.download_preview_tree.delete(item)
+        report_path = Path(self.download_report_var.get().strip() or "")
+        if not report_path.exists() or not report_path.is_file():
+            return 0
+        count = 0
+        try:
+            with report_path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    if count >= limit:
+                        break
+                    self.download_preview_tree.insert(
+                        "",
+                        tk.END,
+                        values=(
+                            row.get("file_name", ""),
+                            row.get("utm_tile", ""),
+                            row.get("start_time", ""),
+                            row.get("end_time", ""),
+                            row.get("size_mb", ""),
+                            row.get("status", ""),
+                        ),
+                    )
+                    count += 1
+        except OSError:
+            return count
+        return count
 
     def update_extraction_progress(self, current: int, total: int, message: str) -> None:
         """Update Extraction progress widgets from subprocess progress events."""

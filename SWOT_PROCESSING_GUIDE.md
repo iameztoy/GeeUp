@@ -6,10 +6,11 @@ This document keeps the processing-specific behavior that is too detailed for th
 
 The current GUI workflow is:
 
-1. `Duplicate Removal`
-2. `Extraction`
-3. `Mosaic`
-4. `Upload`
+1. `Download`
+2. `Duplicate Removal`
+3. `Extraction`
+4. `Mosaic`
+5. `Upload`
 
 Default working folders:
 
@@ -18,7 +19,19 @@ Default working folders:
 - `<LOCAL_PROCESSING_ROOT>\03_mosaics`
 - `<LOCAL_PROCESSING_ROOT>\00_logs`
 
-The detailed sections below prioritize the main processing path: extraction, mosaicking, upload compatibility, and runtime setup. Optional cleanup and maintenance utilities are documented at the end.
+The detailed sections below prioritize the main processing path: download, extraction, mosaicking, upload compatibility, and runtime setup. Optional cleanup and maintenance utilities are documented at the end.
+
+## Download Inputs
+
+The Download tab searches PO.DAAC through `earthaccess` and writes matched SWOT L2 HR Raster 100 m NetCDF files to `01_raw_downloads` by default.
+
+Phase 1 download filtering uses:
+
+- collection short name, default `SWOT_L2_HR_Raster_100m_D`
+- start and end date
+- one or more UTM/MGRS tile tokens embedded in filenames, such as `UTM30R`
+
+The preview report records matched filenames, UTM tokens, date metadata, known file sizes, local paths, status, and Earthdata links. After a successful download, the launcher points Duplicate Removal and Extraction at the same raw-download folder.
 
 ## Extraction Outputs
 

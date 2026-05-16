@@ -21,6 +21,35 @@ processing:
   mosaics: "C:/path/to/SWOT_Processing/03_mosaics"
   logs: "C:/path/to/SWOT_Processing/00_logs"
 
+download:
+  # First pipeline step: search and download PO.DAAC SWOT L2 HR Raster 100 m
+  # NetCDF granules through NASA Earthdata / earthaccess.
+  collection_short_name: "SWOT_L2_HR_Raster_100m_D"
+  collection_version_label: "Version D active"
+
+  # Downloaded NetCDF files should land in the raw-download folder so the next
+  # tabs can remove duplicate versions and extract GeoTIFFs without extra setup.
+  output_folder: "C:/path/to/SWOT_Processing/01_raw_downloads"
+
+  # Required search window. Use YYYY-MM-DD.
+  start_date: ""
+  end_date: ""
+
+  # One or more UTM/MGRS tile tokens from the SWOT filename, e.g. UTM30R.
+  utm_tiles: []
+
+  # Optional safety cap for testing. Leave null to retrieve all matches.
+  max_granules: null
+
+  # Preview and final download status report.
+  report_csv: "C:/path/to/SWOT_Processing/00_logs/download_preview.csv"
+
+  # Existing local files with the same expected filename are skipped.
+  skip_existing: true
+
+  # Passed to earthaccess.download for each file.
+  threads: 4
+
 duplicates:
   # First pipeline step: manually downloaded SWOT NetCDF files go here.
   input_folder: "C:/path/to/SWOT_Processing/01_raw_downloads"

@@ -59,7 +59,7 @@ FILENAME_RE = re.compile(
     r"(?P<overlap>[A-Z])_(?P<spare1>[^_]+)_(?P<spare2>[^_]+)_(?P<spare3>[^_]+)_"
     r"(?P<cycle>\d{3})_(?P<pass>\d{3})_(?P<scene>\d{3}[A-Z])_"
     r"(?P<start>\d{8}T\d{6})_(?P<end>\d{8}T\d{6})_"
-    r"(?P<crid>[^_]+)_(?P<counter>\d+)\.nc$"
+    r"(?P<crid>[^_]+)_(?P<counter>\d+)(?:_swot)?\.nc$"
 )
 
 METADATA_COLUMNS = [

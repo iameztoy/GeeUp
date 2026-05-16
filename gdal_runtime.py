@@ -66,6 +66,21 @@ def build_gdal_runtime_env(
     return env
 
 
+def configure_current_process_gdal_env(python_path: str | Path | None = None) -> None:
+    """Apply conda-forge GDAL runtime variables to the current process."""
+    python = Path(python_path or sys.executable)
+    prefix = infer_conda_prefix(python)
+    if not (prefix / "Library").exists():
+        return
+
+    marker = "GEEUP_GDAL_RUNTIME_CONFIGURED_PREFIX"
+    if os.environ.get(marker) == str(prefix):
+        return
+
+    os.environ.update(build_gdal_runtime_env(python, os.environ))
+    os.environ[marker] = str(prefix)
+
+
 def gdal_check_code(required_drivers: Iterable[str] = REQUIRED_GDAL_DRIVERS) -> str:
     """Return Python code that validates GDAL imports and required drivers."""
     drivers = list(required_drivers)
@@ -133,6 +148,8 @@ def current_process_gdal_check(
     required_drivers: Sequence[str] = REQUIRED_GDAL_DRIVERS,
 ) -> str:
     """Validate GDAL in the current Python process and return a short summary."""
+    configure_current_process_gdal_env()
+
     from osgeo import gdal
 
     gdal.UseExceptions()
