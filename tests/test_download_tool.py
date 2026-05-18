@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -8,10 +9,14 @@ from swot_download_tool import (
     build_granule_patterns,
     dedupe_granules,
     existing_download_path,
+    file_appears_complete,
     generate_utm_tiles,
     load_config_file,
+    manifest_downloaded_tiles,
+    move_incomplete_download,
     normalize_utm_tiles,
     run_download,
+    write_download_report,
 )
 
 
@@ -60,6 +65,7 @@ class FakeEarthaccess:
     def __init__(self, results: list[FakeGranule]) -> None:
         self.results = results
         self.downloaded: list[str] = []
+        self.download_batches: list[list[str]] = []
         self.login_calls = 0
 
     def search_data(self, **kwargs):
@@ -84,6 +90,7 @@ class FakeEarthaccess:
         paths = []
         root = Path(local_path)
         root.mkdir(parents=True, exist_ok=True)
+        self.download_batches.append([granule.name for granule in granules])
         for granule in granules:
             path = root / granule.name
             path.write_text("downloaded", encoding="utf-8")
@@ -123,6 +130,7 @@ class DownloadToolTests(unittest.TestCase):
                         "  start_date: '2026-01-01'",
                         "  end_date: '2026-01-31'",
                         "  utm_tiles: ['UTM30R']",
+                        "  batch_size: 50",
                         "",
                     ]
                 ),
@@ -133,7 +141,9 @@ class DownloadToolTests(unittest.TestCase):
 
             self.assertEqual(config.output_folder, root / "raw")
             self.assertEqual(config.report_csv, root / "logs" / "download_preview.csv")
+            self.assertEqual(config.manifest_csv, root / "logs" / "download_manifest.csv")
             self.assertEqual(config.collection_short_name, "SWOT_L2_HR_Raster_100m_D")
+            self.assertEqual(config.batch_size, 50)
 
     def test_preview_deduplicates_and_aggregates_known_sizes(self) -> None:
         duplicate = FakeGranule(granule_name(utm="UTM30R"), concept_id="G1", size_mb=12.5)
@@ -165,7 +175,7 @@ class DownloadToolTests(unittest.TestCase):
         new_name = granule_name(utm="UTM31R")
         earthaccess = FakeEarthaccess(
             [
-                FakeGranule(existing_name, concept_id="G1"),
+                FakeGranule(existing_name, concept_id="G1", size_mb=None),
                 FakeGranule(new_name, concept_id="G2"),
             ]
         )
@@ -192,7 +202,174 @@ class DownloadToolTests(unittest.TestCase):
             self.assertEqual([path.name for path in result.skipped_existing], [existing_name])
             self.assertEqual([path.name for path in result.downloaded_files], [new_name])
             self.assertEqual(earthaccess.downloaded, [new_name])
+            self.assertEqual(earthaccess.download_batches, [[new_name]])
             self.assertTrue((root / "report.csv").exists())
+
+    def test_run_download_batches_multiple_granules(self) -> None:
+        names = [
+            granule_name(utm="UTM30R", scene="001F"),
+            granule_name(utm="UTM31R", scene="002F"),
+            granule_name(utm="UTM32R", scene="003F"),
+        ]
+        earthaccess = FakeEarthaccess(
+            [
+                FakeGranule(name, concept_id=f"G{index}", size_mb=None)
+                for index, name in enumerate(names)
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = DownloadConfig(
+                output_folder=root,
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                utm_tiles=["UTM30R", "UTM31R", "UTM32R"],
+                report_csv=root / "report.csv",
+                batch_size=2,
+            )
+
+            result = run_download(config, earthaccess_module=earthaccess)
+
+            self.assertTrue(result.all_complete)
+            self.assertEqual(
+                earthaccess.download_batches,
+                [names[:2], names[2:]],
+            )
+            self.assertEqual(len(result.downloaded_files), 3)
+
+    def test_manifest_skip_avoids_redownload_after_raw_file_deleted(self) -> None:
+        name = granule_name(utm="UTM30R")
+        earthaccess = FakeEarthaccess([FakeGranule(name, concept_id="G1", size_mb=None)])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = DownloadConfig(
+                output_folder=root,
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                utm_tiles=["UTM30R"],
+                report_csv=root / "report.csv",
+                manifest_csv=root / "manifest.csv",
+            )
+            first = run_download(config, earthaccess_module=earthaccess)
+            (root / name).unlink()
+            preview = build_download_preview(config, earthaccess_module=earthaccess)
+            write_download_report(config, preview)
+            preview_report_text = (root / "report.csv").read_text(encoding="utf-8")
+            self.assertIn("SKIPPED_MANIFEST", preview_report_text)
+            self.assertIn(",yes,no,yes,", preview_report_text)
+
+            second = run_download(config, earthaccess_module=earthaccess)
+            report_text = (root / "report.csv").read_text(encoding="utf-8")
+
+            self.assertTrue(first.all_complete)
+            self.assertTrue(second.all_complete)
+            self.assertEqual(len(second.skipped_manifest), 1)
+            self.assertEqual(earthaccess.downloaded, [name])
+            self.assertIn("SKIPPED_MANIFEST", report_text)
+            self.assertIn(",yes,no,yes,", report_text)
+            self.assertEqual(manifest_downloaded_tiles(root / "manifest.csv"), ["UTM30R"])
+
+    def test_incomplete_existing_file_is_retried(self) -> None:
+        incomplete_name = granule_name(utm="UTM30R")
+        earthaccess = FakeEarthaccess(
+            [FakeGranule(incomplete_name, concept_id="G1", size_mb=10.0)]
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            local_file = root / incomplete_name
+            local_file.write_bytes(b"partial")
+            config = DownloadConfig(
+                output_folder=root,
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                utm_tiles=["UTM30R"],
+                report_csv=root / "report.csv",
+                skip_existing=True,
+            )
+            preview = build_download_preview(config, earthaccess_module=earthaccess)
+            granule = preview.granules[0]
+
+            self.assertFalse(file_appears_complete(local_file, granule.size_mb))
+            self.assertIsNone(existing_download_path(config, granule))
+            moved = move_incomplete_download(config, granule)
+
+            self.assertIsNotNone(moved)
+            self.assertTrue(moved.exists())
+            self.assertFalse(local_file.exists())
+
+            result = run_download(config, earthaccess_module=earthaccess)
+
+            self.assertEqual([path.name for path in result.downloaded_files], [incomplete_name])
+            self.assertTrue(local_file.exists())
+
+    def test_run_download_reports_missing_and_downloaded_flags(self) -> None:
+        failed_name = granule_name(utm="UTM30R")
+
+        class FailingEarthaccess(FakeEarthaccess):
+            def download(self, granules, local_path: str, threads: int = 4, show_progress: bool = False):
+                raise RuntimeError("network down")
+
+        earthaccess = FailingEarthaccess([FakeGranule(failed_name, concept_id="G1")])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = DownloadConfig(
+                output_folder=root,
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                utm_tiles=["UTM30R"],
+                report_csv=root / "report.csv",
+            )
+
+            result = run_download(config, earthaccess_module=earthaccess)
+            report_text = (root / "report.csv").read_text(encoding="utf-8")
+
+            self.assertFalse(result.all_complete)
+            self.assertEqual(len(result.missing_granules), 1)
+            self.assertIn("downloaded", report_text)
+            self.assertIn("FAILED", report_text)
+            self.assertIn(",no,", report_text)
+
+    def test_run_download_can_be_stopped_before_attempting_files(self) -> None:
+        first_name = granule_name(utm="UTM30R")
+        second_name = granule_name(utm="UTM31R")
+        earthaccess = FakeEarthaccess(
+            [
+                FakeGranule(first_name, concept_id="G1"),
+                FakeGranule(second_name, concept_id="G2"),
+            ]
+        )
+        stop_event = threading.Event()
+        progress_events: list[tuple[int, int, str]] = []
+
+        def progress(current: int, total: int, message: str) -> None:
+            progress_events.append((current, total, message))
+            if message == "Starting download":
+                stop_event.set()
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = DownloadConfig(
+                output_folder=root,
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                utm_tiles=["UTM30R", "UTM31R"],
+                report_csv=root / "report.csv",
+                batch_size=1,
+            )
+
+            result = run_download(
+                config,
+                earthaccess_module=earthaccess,
+                progress_callback=progress,
+                stop_event=stop_event,
+            )
+
+            self.assertTrue(result.stopped)
+            self.assertEqual(result.downloaded_files, [])
+            self.assertEqual(len(result.missing_granules), 2)
+            self.assertIn("Download stop requested", [event[2] for event in progress_events])
+            report_text = (root / "report.csv").read_text(encoding="utf-8")
+            self.assertIn("CANCELLED", report_text)
 
     def test_deduplication_prefers_first_seen_granule(self) -> None:
         first = FakeGranule(granule_name(scene="001F"), concept_id="G1")

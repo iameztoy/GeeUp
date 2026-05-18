@@ -6,7 +6,7 @@ This project is a local desktop tool written in Python. It has separated respons
 - **Extraction:** uses the GDAL conda runtime to convert SWOT NetCDF files into two-band GeoTIFFs.
 - **Mosaic:** uses the GDAL conda runtime to reduce GeoTIFF counts before Earth Engine upload.
 - **Upload:** uses Selenium and your local Google Chrome browser to upload GeoTIFF files into Google Earth Engine through the Earth Engine web interface.
-- **Optional cleanup:** includes local raw-file duplicate removal and Earth Engine ImageCollection cleanup utilities.
+- **Optional cleanup and audit:** includes local raw-file duplicate removal, project statistics, conservative intermediate-file cleanup, and Earth Engine ImageCollection cleanup utilities.
 
 For detailed processing behavior, overlap rules, naming conventions, and workflow notes, see [SWOT_PROCESSING_GUIDE.md](./SWOT_PROCESSING_GUIDE.md).
 
@@ -16,14 +16,23 @@ The upload tool does **not** use Google Cloud Storage buckets. It simulates a no
 
 The script can:
 
+### Projects
+
+1. Create one project per AOI/workflow, such as `Okavango Delta` or `Africa Full`.
+2. Keep raw downloads, extracted GeoTIFFs, mosaics, logs, and tile presets inside that project folder.
+3. Save project settings in `project.yaml` while keeping `config.yaml` as the active session mirror.
+4. Reuse UTM tile presets across date ranges and prepare update windows from project download history.
+
 ### Download
 
 1. Authenticate with NASA Earthdata through `earthaccess`.
 2. Search the active SWOT L2 HR Raster 100 m collection, defaulting to `SWOT_L2_HR_Raster_100m_D`.
 3. Filter by date range and UTM tile tokens from the granule filename, such as `UTM30R`.
+   Tokens can be entered manually or populated from built-in/project presets.
 4. Preview matching granules, known total size, and per-file metadata before downloading.
 5. Download NetCDF files into the configured raw-download folder.
-6. Hand the output folder to Duplicate Removal and Extraction.
+6. Verify whether every matched granule is accounted for by a local raw file or the project download manifest.
+7. Hand the output folder to Duplicate Removal and Extraction when the matched set is complete.
 
 ### Extraction
 
@@ -79,7 +88,10 @@ The script can:
 ## Project Files
 
 - `ee_uploader_gui.py`: beginner-friendly desktop launcher with Download, Duplicate Removal, Extraction, Mosaic, and Upload tabs
+- `geeup_project.py`: project, project-history, and reusable tile-preset helpers
 - `swot_download_tool.py`: Earthdata/PO.DAAC search and download module for SWOT L2 HR Raster 100 m data
+- `utm_map_selector.py`: pure Tkinter visual UTM tile selector
+- `build_spatial_presets.py`: offline builder for continent-to-UTM preset JSON from GeoPackages
 - `swot_duplicate_remover.py`: duplicate-cleanup script for raw downloaded SWOT files
 - `swot_extract_tool.py`: GDAL-backed SWOT NetCDF-to-GeoTIFF extraction script
 - `ee_ui_uploader.py`: Earth Engine upload automation script
@@ -88,6 +100,8 @@ The script can:
 - `swot_metadata.py`: shared SWOT filename parser
 - `selectors.py`: all UI locators in one place
 - `config.example.yaml`: sample configuration
+- `spatial_presets/continent_utm_tiles.json`: built-in continent UTM presets consumed by the GUI
+- `spatial_presets/utm_display_geometries.json`: lightweight UTM grid and continent geometry for the visual selector
 - `requirements.txt`: launcher/download/upload `.venv` dependencies, plus the optional Earth Engine API utility dependency
 - `environment_swot_gdal.yml`: GDAL conda environment definition for extraction and mosaicking
 - `SWOT_PROCESSING_GUIDE.md`: detailed processing rules, naming behavior, and overlap logic
@@ -440,6 +454,84 @@ Then edit `config.yaml`.
 
 `config.yaml` is intended to stay local and is ignored by Git. Keep `config.example.yaml` as the tracked template.
 
+## GeeUp Project Workflow
+
+Use projects when each AOI or production workflow should keep its own folders, UTM tiles, date coverage, and Earth Engine destination.
+
+Recommended workflow:
+
+1. Open `python ee_uploader_gui.py`.
+2. Click `New Project` or `Open Project` before previewing, downloading, or running processing steps.
+3. Use one project root per AOI, for example `Okavango_Delta` or `Africa_Full`.
+4. Configure the Download, Duplicate Removal, Extraction, Mosaic, and Upload tabs.
+5. Click `Save Project`.
+
+The GUI treats projects as required for workflow actions. `config.yaml` is still a session mirror and may contain paths from the previous run, but GeeUp blocks preview/download/processing actions until a project is explicitly active. If `config.yaml` points to a folder containing `project.yaml`, the GUI auto-opens that project on startup.
+
+The project creates this folder layout:
+
+```text
+<project_root>\project.yaml
+<project_root>\01_raw_downloads
+<project_root>\02_extracted_geotiffs
+<project_root>\03_mosaics
+<project_root>\00_logs
+<project_root>\00_logs\upload_artifacts
+<project_root>\profiles
+```
+
+`project.yaml` stores settings and summary download history. Large NetCDF, GeoTIFF, mosaic, upload logs, upload reports, and debug artifacts stay in those project folders. `config.yaml` is still written as the active session mirror so the existing command-line tools continue to work.
+
+Project stage tracking:
+
+- `00_logs/download_manifest.csv`: cumulative per-granule download memory
+- `00_logs/extract_manifest.csv`: cumulative per-NetCDF extraction memory
+- `00_logs/mosaic_manifest.csv`: cumulative per-mosaic output memory, including source-set signatures
+- `00_logs/upload_report.csv`: cumulative Earth Engine upload/report ledger
+- `00_logs/workflow_manifest.csv`: shared stage ledger for future project statistics and overview tools
+
+Statistics and cleanup:
+
+- The `Statistics` tab summarizes the active project from manifests, reports, and files currently on disk.
+- It reports total project files and size, raw/extracted/mosaic file counts, duplicate files moved, recorded downloads, completed extractions, completed mosaics, upload rows, dates covered, UTM tile counts, SWOT cycles/passes/scenes/CRIDs, known cumulative download size, and folder sizes.
+- The tab includes simple bar plots for processing-stage rows and the top recorded UTM tiles, plus tables for tile and date counts.
+- `Preview Cleanup` lists local intermediate files that have downstream manifest proof: raw NetCDFs after extraction, extracted GeoTIFFs after mosaic, and mosaic GeoTIFFs after successful/already-existing upload.
+- Cleanup deletion is explicit. Use `Delete Selected Cleanup Files` or `Delete All Cleanup Candidates`; GeeUp only deletes the files shown in the preview table.
+
+Tile presets:
+
+- Built-in continent presets are available from the Download tab's `Tile preset` selector.
+- Manual UTM entry remains available through the selected-tiles text field and searchable list.
+- `Open UTM Map Selector` shows continent outlines with UTM tiles overlaid. Click a tile once to select it and click again to unselect it.
+- The visual selector uses the same selected-tile state as manual entry, so applying `Africa` first highlights African tiles and you can then add or remove neighboring tiles visually.
+- The selector shows UTM zone numbers and latitude-band letters as a reference layer. The exact clicked tile still appears in the status line.
+- `Save Selected As Preset` writes a project-specific JSON preset under `<project_root>\profiles`.
+
+Project updates:
+
+- After a project download finishes, the GUI records the selected tiles, date window, collection, counts, report path, and manifest path.
+- `Prepare Update` sets the start date to the last successful download end date and the end date to today.
+- `skip_existing`, `skip_manifest_existing`, and Duplicate Removal remain the safety mechanisms for overlap.
+
+Download verification and interruption:
+
+- `download_preview.csv` is the current search/run report. `download_manifest.csv` is the cumulative project memory across runs.
+- The report includes `downloaded`, `raw_exists`, and `known_from_manifest` for every matched granule.
+- `downloaded=yes` means the granule is accounted for by a local raw file or by the manifest. `raw_exists=no` and `known_from_manifest=yes` means the raw NetCDF was probably deleted after a previous successful run.
+- A completed run reports whether all matched granules are accounted for or whether files are still missing.
+- Extraction and mosaic stages use the same idea. Existing outputs are skipped when present, and manifest-known outputs can be skipped even if intermediate files were later deleted.
+- For common-CRS whole pass/date mosaics, GeeUp records a source-set signature. If an existing mosaic output is present but the current source set has changed, the mosaic report marks it `STALE_EXISTS` instead of silently reusing a potentially incomplete mosaic.
+- GeeUp downloads granules in batches for better throughput. `Download threads` controls earthaccess parallel workers and `Batch size` controls how many granules are submitted to earthaccess at once.
+- `Stop Download` requests a cooperative stop after the current batch finishes or fails.
+- Restart the same project/date/tile run with `skip_existing` and `skip_manifest_existing` enabled to continue after a stop or interruption.
+- In the UTM map selector, blue tiles are part of the active query selection, green tiles have at least one granule recorded in the project manifest, and teal tiles are both selected and already covered. Keeping a covered tile selected will not force re-download unless `skip_manifest_existing` is disabled or new dates/granules are searched.
+
+Regenerate built-in continent presets and visual selector geometry from GeoPackages:
+
+```powershell
+python build_spatial_presets.py --utm-grid C:\path\to\World_UTM_Grid.gpkg --continents C:\path\to\World_Continents.gpkg --output spatial_presets\continent_utm_tiles.json --display-output spatial_presets\utm_display_geometries.json
+```
+
 Minimum values to change:
 
 - `input_folder`
@@ -453,17 +545,20 @@ Common values to review:
 - `download.utm_tiles`
 - `download.output_folder`
 - `download.report_csv`
+- `download.manifest_csv`
 - `gdal.python`
 - `mosaic.input_folder`
 - `mosaic.output_folder`
 - `extract.input_folder`
 - `extract.output_folder`
+- `extract.manifest_csv`
 - `extract.target_crs_mode`
 - `extract.year_selection`
 - `mosaic.grouping_mode`
 - `mosaic.target_crs_label`
 - `mosaic.overwrite`
 - `mosaic.report_csv`
+- `mosaic.manifest_csv`
 - `mosaic.mixed_crid_report_csv`
 - `upload.batch_size`
 - `upload.max_active_ingestions`
@@ -486,7 +581,7 @@ Recommended workflow:
 3. Choose the collection. The default is active Version D: `SWOT_L2_HR_Raster_100m_D`.
 4. Enter a start date, end date, and one or more UTM tile tokens such as `UTM30R`.
 5. Set the output folder to your raw downloads folder.
-6. Click `Preview Search` and review the matched granules and estimated size.
+6. Click `Preview Search` and review the matched granules, estimated size, raw-file status, and manifest-known status.
 7. Click `Download Matches`.
 8. Continue with Duplicate Removal if repeated product versions are present, then Extraction.
 
@@ -735,10 +830,12 @@ reports/upload_report.csv
 
 The script creates:
 
-- `logs/`: run logs
-- `artifacts/`: screenshots and HTML dumps when something fails
-- `reports/upload_report.csv`: upload manifest and result report
-- `reports/mosaic_report.csv`: mosaic plan/result report
+- `<project_root>/00_logs/`: run logs and CSV reports when using a GeeUp project
+- `<project_root>/00_logs/upload_artifacts/`: uploader screenshots and HTML dumps when something fails
+- `<project_root>/00_logs/upload_report.csv`: upload manifest and result report
+- `<project_root>/00_logs/mosaic_report.csv`: mosaic plan/result report
+
+Older root-level folders such as `logs/`, `artifacts/`, and `reports/` may exist from pre-project runs or manual CLI runs that used the old defaults.
 
 The CSV includes:
 

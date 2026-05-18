@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import yaml
 
 from gdal_runtime import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
+from workflow_manifest import timestamp_text, upsert_workflow_manifest, workflow_manifest_path
 
 
 PROGRESS_PREFIX = "GEEUP_PROGRESS"
@@ -48,6 +49,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "year_selection": "all",
         "limit_files": None,
         "skip_existing": True,
+        "skip_manifest_existing": True,
         "resampling_alg": "near",
         "manifest_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/extract_manifest.csv",
         "errors_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/extract_errors.csv",
@@ -80,12 +82,18 @@ METADATA_COLUMNS = [
     "date",
 ]
 MANIFEST_COLUMNS = [
+    "record_id",
     "status",
     "input_nc",
     "output_tif",
+    "target_crs_mode",
     "xsize",
     "ysize",
     "band_count",
+    "raw_exists",
+    "output_exists",
+    "known_from_manifest",
+    "updated_at",
     *METADATA_COLUMNS,
 ]
 ERROR_COLUMNS = ["input_nc", "error", *METADATA_COLUMNS]
@@ -101,6 +109,7 @@ class ExtractConfig:
     year_selection: Any = "all"
     limit_files: Optional[int] = None
     skip_existing: bool = True
+    skip_manifest_existing: bool = True
     resampling_alg: str = "near"
     manifest_csv: Path = Path(DEFAULT_CONFIG["extract"]["manifest_csv"])
     errors_csv: Path = Path(DEFAULT_CONFIG["extract"]["errors_csv"])
@@ -176,6 +185,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> ExtractConfig:
         year_selection=extract_data.get("year_selection", "all"),
         limit_files=normalize_limit_files(extract_data.get("limit_files")),
         skip_existing=bool(extract_data.get("skip_existing", True)),
+        skip_manifest_existing=bool(extract_data.get("skip_manifest_existing", True)),
         resampling_alg=str(extract_data.get("resampling_alg", "near")).strip() or "near",
         manifest_csv=resolve_path(
             extract_data.get("manifest_csv", f"{logs_folder}/extract_manifest.csv"),
@@ -449,18 +459,167 @@ def validate_output_geotiff(output_path: Path, gdal: Any) -> Dict[str, Any]:
     }
 
 
-def process_one_file(source: ExtractSource, config: ExtractConfig, gdal: Any) -> Dict[str, Any]:
+def extract_record_id(source: ExtractSource, config: ExtractConfig) -> str:
+    """Return the stable extraction manifest key for one input and CRS mode."""
+    return f"{source.path.name}|{config.target_crs_mode}"
+
+
+def manifest_row_completed(row: Dict[str, str] | None) -> bool:
+    """Return True when an extraction manifest row is reusable history."""
+    if not row:
+        return False
+    return row.get("status", "").lower() in {
+        "written",
+        "skipped_existing",
+        "skipped_manifest",
+        "local_complete",
+    }
+
+
+def extract_manifest_key_from_row(row: Dict[str, str]) -> str:
+    """Return a manifest key from either new or older extract-manifest rows."""
+    if row.get("record_id"):
+        return row["record_id"]
+    input_name = Path(row.get("input_nc", "")).name
+    mode = row.get("target_crs_mode") or ""
+    if input_name and mode:
+        return f"{input_name}|{mode}"
+    return input_name or row.get("output_tif", "")
+
+
+def read_extract_manifest(path: Path) -> Dict[str, Dict[str, str]]:
+    """Load the cumulative extraction manifest keyed by input filename and CRS mode."""
+    if not path.exists() or not path.is_file():
+        return {}
+    rows: Dict[str, Dict[str, str]] = {}
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                normalized = {column: row.get(column, "") for column in MANIFEST_COLUMNS}
+                key = extract_manifest_key_from_row(normalized)
+                if key:
+                    rows[key] = normalized
+    except OSError:
+        return {}
+    return rows
+
+
+def enrich_extract_row(row: Dict[str, Any], config: ExtractConfig) -> Dict[str, Any]:
+    """Add cumulative tracking fields to one extraction manifest row."""
+    input_path = Path(str(row.get("input_nc", "")))
+    output_path = Path(str(row.get("output_tif", "")))
+    record_id = row.get("record_id") or f"{input_path.name}|{config.target_crs_mode}"
+    row.update(
+        {
+            "record_id": record_id,
+            "target_crs_mode": config.target_crs_mode,
+            "raw_exists": "yes" if input_path.exists() else "no",
+            "output_exists": "yes" if output_path.exists() else "no",
+            "known_from_manifest": row.get("known_from_manifest", "no"),
+            "updated_at": row.get("updated_at") or timestamp_text(),
+        }
+    )
+    return row
+
+
+def write_extract_manifest(config: ExtractConfig, results: Iterable[Dict[str, Any]]) -> None:
+    """Merge extraction results into the cumulative extract manifest."""
+    existing = read_extract_manifest(config.manifest_csv)
+    for result in results:
+        row = enrich_extract_row(dict(result), config)
+        key = extract_manifest_key_from_row(row)
+        previous = existing.get(key, {column: "" for column in MANIFEST_COLUMNS})
+        previous.update(row)
+        existing[key] = previous
+    write_csv(config.manifest_csv, MANIFEST_COLUMNS, existing.values())
+
+
+def write_extract_workflow_manifest(
+    config: ExtractConfig,
+    results: Iterable[Dict[str, Any]],
+    errors: Iterable[Dict[str, Any]],
+) -> None:
+    """Update the shared workflow manifest with extraction rows."""
+    rows: List[Dict[str, Any]] = []
+    for result in results:
+        input_path = Path(str(result.get("input_nc", "")))
+        output_path = Path(str(result.get("output_tif", "")))
+        rows.append(
+            {
+                "stage": "extract",
+                "record_id": result.get("record_id") or f"{input_path.name}|{config.target_crs_mode}",
+                "record_type": "swot_extraction",
+                "status": result.get("status", ""),
+                "source_path": str(input_path),
+                "output_path": str(output_path),
+                "utm_tile": f"UTM{result.get('utm_zone', '')}{result.get('mgrs_band', '')}",
+                "date": result.get("date", ""),
+                "start_time": result.get("start", ""),
+                "end_time": result.get("end", ""),
+                "cycle_id": result.get("cycle", ""),
+                "pass_id": result.get("pass", ""),
+                "scene_id": result.get("scene", ""),
+                "coordinate_system": f"UTM{result.get('utm_zone', '')}{result.get('mgrs_band', '')}",
+                "raw_exists": "yes" if input_path.exists() else "no",
+                "output_exists": "yes" if output_path.exists() else "no",
+                "known_from_stage_manifest": result.get("known_from_manifest", "no"),
+            }
+        )
+    for error in errors:
+        input_path = Path(str(error.get("input_nc", "")))
+        rows.append(
+            {
+                "stage": "extract",
+                "record_id": input_path.name,
+                "record_type": "swot_extraction",
+                "status": "error",
+                "source_path": str(input_path),
+                "message": error.get("error", ""),
+                "raw_exists": "yes" if input_path.exists() else "no",
+            }
+        )
+    upsert_workflow_manifest(workflow_manifest_path(config.manifest_csv), rows)
+
+
+def process_one_file(
+    source: ExtractSource,
+    config: ExtractConfig,
+    gdal: Any,
+    existing_manifest: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, Any]:
     """Extract one NetCDF file into one 2-band GeoTIFF."""
     output_path = build_output_path(source.path, config.output_folder, config.target_crs_mode)
+    record_id = extract_record_id(source, config)
     if config.skip_existing and output_path.exists():
         info = validate_output_geotiff(output_path, gdal)
         return {
+            "record_id": record_id,
             "status": "skipped_existing",
             "input_nc": str(source.path),
             "output_tif": str(output_path),
+            "target_crs_mode": config.target_crs_mode,
             "xsize": info["xsize"],
             "ysize": info["ysize"],
             "band_count": info["band_count"],
+            "raw_exists": "yes",
+            "output_exists": "yes",
+            "known_from_manifest": "no",
+            **source.metadata,
+        }
+    manifest_row = (existing_manifest or {}).get(record_id)
+    if config.skip_manifest_existing and manifest_row_completed(manifest_row):
+        return {
+            "record_id": record_id,
+            "status": "skipped_manifest",
+            "input_nc": str(source.path),
+            "output_tif": str(output_path),
+            "target_crs_mode": config.target_crs_mode,
+            "xsize": manifest_row.get("xsize", "") if manifest_row else "",
+            "ysize": manifest_row.get("ysize", "") if manifest_row else "",
+            "band_count": manifest_row.get("band_count", "") if manifest_row else "",
+            "raw_exists": "yes",
+            "output_exists": "yes" if output_path.exists() else "no",
+            "known_from_manifest": "yes",
             **source.metadata,
         }
 
@@ -473,12 +632,17 @@ def process_one_file(source: ExtractSource, config: ExtractConfig, gdal: Any) ->
 
     info = validate_output_geotiff(output_path, gdal)
     return {
+        "record_id": record_id,
         "status": "written",
         "input_nc": str(source.path),
         "output_tif": str(output_path),
+        "target_crs_mode": config.target_crs_mode,
         "xsize": info["xsize"],
         "ysize": info["ysize"],
         "band_count": info["band_count"],
+        "raw_exists": "yes",
+        "output_exists": "yes",
+        "known_from_manifest": "no",
         **source.metadata,
     }
 
@@ -531,6 +695,7 @@ def run_extract(
     results: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = unmatched_error_rows(plan)
     gdal = require_gdal()
+    existing_manifest = read_extract_manifest(config.manifest_csv)
     total = len(plan.selected)
     if progress_callback is not None:
         progress_callback(0, total, "Starting extraction")
@@ -541,7 +706,7 @@ def run_extract(
             progress_callback(index - 1, total, f"Processing {source.path.name}")
         status = "done"
         try:
-            row = process_one_file(source, config, gdal)
+            row = process_one_file(source, config, gdal, existing_manifest)
             results.append(row)
             status = row.get("status", "done")
         except Exception as exc:  # noqa: BLE001
@@ -556,8 +721,9 @@ def run_extract(
         if progress_callback is not None:
             progress_callback(index, total, f"{status}: {source.path.name}")
 
-    write_csv(config.manifest_csv, MANIFEST_COLUMNS, results)
+    write_extract_manifest(config, results)
     write_csv(config.errors_csv, ERROR_COLUMNS, errors)
+    write_extract_workflow_manifest(config, results, errors)
     return (2 if errors else 0), plan, results, errors
 
 

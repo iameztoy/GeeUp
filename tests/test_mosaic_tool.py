@@ -11,7 +11,9 @@ from ee_mosaic_tool import (
     GROUPING_MODE_UTM_ZONE_HEMISPHERE,
     MosaicConfig,
     build_mosaic_plan,
+    group_source_signature,
     run_mosaic,
+    write_mosaic_manifest,
 )
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env, check_gdal_runtime
 from swot_metadata import parse_swot_l2_hr_raster_metadata
@@ -229,6 +231,71 @@ class MosaicPlanningTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 2)
             self.assertEqual(rows[0]["status"], "INVALID_FILENAME")
+
+    def test_manifest_skip_avoids_rebuilding_deleted_mosaic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / swot_name(scene="000A")).touch()
+            config = MosaicConfig(
+                input_folder=root,
+                output_folder=root / "out",
+                report_csv=root / "report.csv",
+                manifest_csv=root / "mosaic_manifest.csv",
+            )
+            plan = build_mosaic_plan(config)
+            group = plan.groups[0]
+            signature = group_source_signature(group)
+            write_mosaic_manifest(
+                config,
+                [
+                    {
+                        "status": "COPIED_SINGLETON",
+                        "output_file": str(group.output_file),
+                        "input_count": "1",
+                        "source_signature": signature,
+                    }
+                ],
+            )
+
+            exit_code, rows = run_mosaic(config, dry_run=False)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(rows[0]["status"], "SKIPPED_MANIFEST")
+            self.assertEqual(rows[0]["known_from_manifest"], "yes")
+            self.assertFalse(group.output_file.exists())
+            self.assertTrue((root / "workflow_manifest.csv").exists())
+
+    def test_existing_mosaic_with_changed_source_signature_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / swot_name(scene="000A")).touch()
+            config = MosaicConfig(
+                input_folder=root,
+                output_folder=root / "out",
+                report_csv=root / "report.csv",
+                manifest_csv=root / "mosaic_manifest.csv",
+            )
+            plan = build_mosaic_plan(config)
+            group = plan.groups[0]
+            group.output_file.parent.mkdir(parents=True, exist_ok=True)
+            group.output_file.touch()
+            write_mosaic_manifest(
+                config,
+                [
+                    {
+                        "status": "MOSAIC_CREATED",
+                        "output_file": str(group.output_file),
+                        "input_count": "1",
+                        "source_signature": "old-signature",
+                    }
+                ],
+            )
+
+            exit_code, rows = run_mosaic(config, dry_run=False)
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(rows[0]["status"], "STALE_EXISTS")
+            self.assertEqual(rows[0]["stale"], "true")
 
 
 @unittest.skipUnless(GDAL_AVAILABLE, f"GDAL runtime unavailable: {GDAL_CHECK.stderr}")

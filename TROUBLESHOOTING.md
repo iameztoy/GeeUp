@@ -97,7 +97,7 @@ What to do:
 python ee_ui_uploader.py --config config.yaml --verbose
 ```
 
-2. Open the generated screenshot and HTML file in `artifacts/`.
+2. Open the generated screenshot and HTML file in the configured artifact folder. In project mode this is `<project_root>/00_logs/upload_artifacts/`; older non-project runs may use `artifacts/`.
 3. Check whether the browser really reached the expected Earth Engine page.
 4. Inspect the page with Chrome DevTools.
 5. Update the relevant selector in `selectors.py`.
@@ -322,7 +322,7 @@ What to do:
 1. Watch the Tasks panel manually during a run.
 2. Compare the task text with the asset name and file name.
 3. Update the task row selector or matching logic in `ee_ui_uploader.py`.
-4. Check the saved HTML dump in `artifacts/`.
+4. Check the saved HTML dump in the configured artifact folder. In project mode this is `<project_root>/00_logs/upload_artifacts/`.
 
 ## Browser Session Ended During Upload
 
@@ -355,7 +355,7 @@ What to do:
 
 1. Run one file only with a very small test folder.
 2. Watch the browser.
-3. Inspect `logs/` and `artifacts/`.
+3. Inspect the configured logs and artifact folders. In project mode these are `<project_root>/00_logs/` and `<project_root>/00_logs/upload_artifacts/`.
 4. Adjust selectors or naming rules based on the actual UI response.
 
 ## General Advice

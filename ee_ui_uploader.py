@@ -93,6 +93,7 @@ from swot_metadata import (
     ParsedMetadata,
     parse_swot_l2_hr_raster_metadata,
 )
+from workflow_manifest import upsert_workflow_manifest, workflow_manifest_path
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -419,6 +420,29 @@ class ReportManager:
         existing.update({column: row.get(column, existing.get(column, "")) for column in REPORT_COLUMNS})
         self.rows[asset_id] = existing
         self.write()
+        self.write_workflow_row(existing)
+
+    def write_workflow_row(self, row: Dict[str, str]) -> None:
+        """Mirror upload report status into the shared workflow manifest."""
+        local_file = Path(row.get("local_file", ""))
+        upsert_workflow_manifest(
+            workflow_manifest_path(self.report_path),
+            [
+                {
+                    "stage": "upload",
+                    "record_id": row.get("asset_id", ""),
+                    "record_type": "earth_engine_asset",
+                    "status": row.get("final_status", ""),
+                    "source_path": row.get("local_file", ""),
+                    "output_path": row.get("asset_id", ""),
+                    "start_time": row.get("metadata_start_time", ""),
+                    "end_time": row.get("metadata_end_time", ""),
+                    "output_exists": "unknown",
+                    "raw_exists": "yes" if local_file.exists() else "no",
+                    "message": row.get("error_message", ""),
+                }
+            ],
+        )
 
     def write(self) -> None:
         """Write the report to disk."""

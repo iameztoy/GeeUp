@@ -16,6 +16,12 @@ import yaml
 
 from gdal_runtime import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
 from swot_metadata import ParsedMetadata, parse_swot_l2_hr_raster_metadata, swot_product_rank
+from workflow_manifest import (
+    source_signature,
+    timestamp_text,
+    upsert_workflow_manifest,
+    workflow_manifest_path,
+)
 
 
 PROGRESS_PREFIX = "GEEUP_PROGRESS"
@@ -50,6 +56,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "write_world_file": True,
         "extensions": [".tif", ".tiff"],
         "report_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/mosaic_report.csv",
+        "manifest_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/mosaic_manifest.csv",
+        "skip_manifest_existing": True,
         "mixed_crid_report_csv": "",
     },
 }
@@ -73,6 +81,11 @@ REPORT_COLUMNS = [
     "source_product_counters",
     "dominant_crid",
     "preferred_crid",
+    "source_signature",
+    "output_exists",
+    "known_from_manifest",
+    "stale",
+    "updated_at",
     "message",
     "input_files",
 ]
@@ -102,6 +115,8 @@ class MosaicConfig:
     write_world_file: bool = True
     extensions: List[str] = field(default_factory=lambda: [".tif", ".tiff"])
     report_csv: Path = Path("./reports/mosaic_report.csv")
+    manifest_csv: Path = Path(f"{DEFAULT_PROCESSING_PATHS['logs']}/mosaic_manifest.csv")
+    skip_manifest_existing: bool = True
     mixed_crid_report_csv: Optional[Path] = None
     base_dir: Path = Path.cwd()
 
@@ -184,6 +199,14 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> MosaicConfig:
             for value in mosaic_data.get("extensions", [".tif", ".tiff"])
         ],
         report_csv=resolve_path(mosaic_data.get("report_csv", "./reports/mosaic_report.csv"), base_dir),
+        manifest_csv=resolve_path(
+            mosaic_data.get(
+                "manifest_csv",
+                f"{data.get('processing', {}).get('logs', DEFAULT_PROCESSING_PATHS['logs'])}/mosaic_manifest.csv",
+            ),
+            base_dir,
+        ),
+        skip_manifest_existing=bool(mosaic_data.get("skip_manifest_existing", True)),
         mixed_crid_report_csv=resolve_optional_path(
             mosaic_data.get("mixed_crid_report_csv", ""),
             base_dir,
@@ -335,6 +358,106 @@ def build_mosaic_plan(config: MosaicConfig) -> MosaicPlan:
     return MosaicPlan(groups=groups, report_rows=report_rows)
 
 
+def mosaic_record_id(group: MosaicGroup) -> str:
+    """Return the stable manifest key for one planned mosaic output."""
+    return group.output_file.name
+
+
+def group_source_signature(group: MosaicGroup) -> str:
+    """Return a signature for the current source membership of a mosaic group."""
+    return source_signature([source.path for source in group.sources])
+
+
+def read_mosaic_manifest(path: Path) -> Dict[str, Dict[str, str]]:
+    """Load the cumulative mosaic manifest keyed by output file name."""
+    if not path.exists() or not path.is_file():
+        return {}
+    rows: Dict[str, Dict[str, str]] = {}
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                key = Path(row.get("output_file", "")).name
+                if key:
+                    rows[key] = {column: row.get(column, "") for column in REPORT_COLUMNS}
+    except OSError:
+        return {}
+    return rows
+
+
+def mosaic_manifest_completed(row: Dict[str, str] | None) -> bool:
+    """Return True when a mosaic manifest row records completed work."""
+    if not row:
+        return False
+    return row.get("status", "") in {
+        "MOSAIC_CREATED",
+        "COPIED_SINGLETON",
+        "SKIPPED_EXISTS",
+        "SKIPPED_MANIFEST",
+    }
+
+
+def add_mosaic_tracking_fields(
+    row: Dict[str, str],
+    group: MosaicGroup,
+    signature: str,
+    *,
+    known_from_manifest: bool = False,
+    stale: bool = False,
+) -> Dict[str, str]:
+    """Attach manifest/ledger tracking fields to one mosaic row."""
+    row["source_signature"] = signature
+    row["output_exists"] = "yes" if group.output_file.exists() else "no"
+    row["known_from_manifest"] = "yes" if known_from_manifest else "no"
+    row["stale"] = "true" if stale else "false"
+    row["updated_at"] = row.get("updated_at") or timestamp_text()
+    return row
+
+
+def write_mosaic_manifest(config: MosaicConfig, rows: Iterable[Dict[str, str]]) -> None:
+    """Merge mosaic run rows into the cumulative mosaic manifest."""
+    existing = read_mosaic_manifest(config.manifest_csv)
+    for row in rows:
+        key = Path(row.get("output_file", "")).name
+        if not key:
+            continue
+        previous = existing.get(key, {column: "" for column in REPORT_COLUMNS})
+        previous.update(row)
+        previous["updated_at"] = timestamp_text()
+        existing[key] = previous
+    write_report(config.manifest_csv, existing.values())
+
+
+def write_mosaic_workflow_manifest(config: MosaicConfig, rows: Iterable[Dict[str, str]]) -> None:
+    """Update the shared workflow manifest with mosaic rows."""
+    workflow_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        output_path = Path(row.get("output_file", ""))
+        workflow_rows.append(
+            {
+                "stage": "mosaic",
+                "record_id": output_path.name,
+                "record_type": "swot_mosaic",
+                "status": row.get("status", ""),
+                "source_path": row.get("input_files", ""),
+                "output_path": row.get("output_file", ""),
+                "date": row.get("start_date", ""),
+                "start_time": row.get("range_beginning", ""),
+                "end_time": row.get("range_ending", ""),
+                "cycle_id": row.get("cycle_id", ""),
+                "pass_id": row.get("pass_id", ""),
+                "scene_id": "MOSA",
+                "coordinate_system": row.get("coordinate_system", ""),
+                "grouping_mode": config.grouping_mode,
+                "source_signature": row.get("source_signature", ""),
+                "input_count": row.get("input_count", ""),
+                "output_exists": row.get("output_exists", ""),
+                "known_from_stage_manifest": row.get("known_from_manifest", "no"),
+                "message": row.get("message", ""),
+            }
+        )
+    upsert_workflow_manifest(workflow_manifest_path(config.report_csv), workflow_rows)
+
+
 def group_sort_key(key: MosaicGroupKey) -> Tuple[str, str, str, str, str]:
     """Return a stable sortable tuple for group keys."""
     return (
@@ -377,6 +500,7 @@ def run_mosaic(
     """Plan and optionally write all mosaic outputs."""
     plan = build_mosaic_plan(config)
     rows = list(plan.report_rows)
+    existing_manifest = read_mosaic_manifest(config.manifest_csv)
     total = len(plan.groups)
     if progress_callback is not None:
         progress_callback(0, total, "Starting mosaic planning" if dry_run else "Starting mosaic run")
@@ -385,13 +509,20 @@ def run_mosaic(
         if progress_callback is not None:
             progress_callback(index - 1, total, f"Processing {group.output_file.name}")
         status = "PLANNED"
+        signature = group_source_signature(group)
+        manifest_row = existing_manifest.get(mosaic_record_id(group))
+        previous_signature = (manifest_row or {}).get("source_signature", "")
         if dry_run:
             status = "PLANNED_COPY" if len(group.sources) == 1 else "PLANNED_MOSAIC"
             rows.append(
-                report_row_for_group(
+                add_mosaic_tracking_fields(
+                    report_row_for_group(
+                        group,
+                        status,
+                        "Dry run only. No output written.",
+                    ),
                     group,
-                    status,
-                    "Dry run only. No output written.",
+                    signature,
                 )
             )
             if progress_callback is not None:
@@ -399,12 +530,42 @@ def run_mosaic(
             continue
 
         if group.output_file.exists() and not config.overwrite:
-            status = "SKIPPED_EXISTS"
+            stale = bool(previous_signature and previous_signature != signature)
+            status = "STALE_EXISTS" if stale else "SKIPPED_EXISTS"
+            message = (
+                "Output exists, but the current source set differs from the recorded mosaic manifest. "
+                "Enable overwrite or remove the output to rebuild."
+                if stale
+                else "Output exists and overwrite is disabled."
+            )
             rows.append(
-                report_row_for_group(
+                add_mosaic_tracking_fields(
+                    report_row_for_group(group, status, message),
                     group,
-                    status,
-                    "Output exists and overwrite is disabled.",
+                    signature,
+                    stale=stale,
+                )
+            )
+            if progress_callback is not None:
+                progress_callback(index, total, f"{status}: {group.output_file.name}")
+            continue
+
+        if (
+            config.skip_manifest_existing
+            and mosaic_manifest_completed(manifest_row)
+            and previous_signature == signature
+        ):
+            status = "SKIPPED_MANIFEST"
+            rows.append(
+                add_mosaic_tracking_fields(
+                    report_row_for_group(
+                        group,
+                        status,
+                        "Mosaic output is already recorded in the cumulative mosaic manifest.",
+                    ),
+                    group,
+                    signature,
+                    known_from_manifest=True,
                 )
             )
             if progress_callback is not None:
@@ -416,10 +577,14 @@ def run_mosaic(
                 copy_singleton(group, config)
                 status = "COPIED_SINGLETON"
                 rows.append(
-                    report_row_for_group(
+                    add_mosaic_tracking_fields(
+                        report_row_for_group(
+                            group,
+                            status,
+                            "Single-file group written to mosaic output folder.",
+                        ),
                         group,
-                        status,
-                        "Single-file group written to mosaic output folder.",
+                        signature,
                     )
                 )
             else:
@@ -427,23 +592,42 @@ def run_mosaic(
                 merge_group(group, config)
                 status = "MOSAIC_CREATED"
                 rows.append(
-                    report_row_for_group(
+                    add_mosaic_tracking_fields(
+                        report_row_for_group(
+                            group,
+                            status,
+                            "Merged with current wse priority and wse_qual fallback over class 3.",
+                        ),
                         group,
-                        status,
-                        "Merged with current wse priority and wse_qual fallback over class 3.",
+                        signature,
                     )
                 )
         except IncompatibleRasterGroupError as exc:
             status = "SKIPPED_INCOMPATIBLE"
-            rows.append(report_row_for_group(group, status, str(exc)))
+            rows.append(
+                add_mosaic_tracking_fields(
+                    report_row_for_group(group, status, str(exc)),
+                    group,
+                    signature,
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             status = "ERROR"
-            rows.append(report_row_for_group(group, status, str(exc)))
+            rows.append(
+                add_mosaic_tracking_fields(
+                    report_row_for_group(group, status, str(exc)),
+                    group,
+                    signature,
+                )
+            )
         if progress_callback is not None:
             progress_callback(index, total, f"{status}: {group.output_file.name}")
 
     write_report(config.report_csv, rows)
     write_mixed_crid_report(config.mixed_crid_report_csv, rows)
+    if not dry_run:
+        write_mosaic_manifest(config, rows)
+        write_mosaic_workflow_manifest(config, rows)
     return summarize_exit_code(rows), rows
 
 
@@ -838,6 +1022,10 @@ def report_row(
     source_product_counters: str = "",
     dominant_crid: str = "",
     preferred_crid: str = "",
+    source_signature: str = "",
+    output_exists: str = "",
+    known_from_manifest: str = "no",
+    stale: str = "false",
 ) -> Dict[str, str]:
     """Create a normalized report row."""
     return {
@@ -858,6 +1046,10 @@ def report_row(
         "source_product_counters": source_product_counters,
         "dominant_crid": dominant_crid,
         "preferred_crid": preferred_crid,
+        "source_signature": source_signature,
+        "output_exists": output_exists,
+        "known_from_manifest": known_from_manifest,
+        "stale": stale,
         "message": message,
         "input_files": json.dumps([str(path) for path in input_files]),
     }
@@ -891,7 +1083,7 @@ def write_mixed_crid_report(
 
 def summarize_exit_code(rows: Sequence[Dict[str, str]]) -> int:
     """Return a process exit code for report statuses."""
-    failing = {"ERROR", "INVALID_FILENAME", "SKIPPED_INCOMPATIBLE"}
+    failing = {"ERROR", "INVALID_FILENAME", "SKIPPED_INCOMPATIBLE", "STALE_EXISTS"}
     return 2 if any(row.get("status") in failing for row in rows) else 0
 
 

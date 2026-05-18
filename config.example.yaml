@@ -1,4 +1,8 @@
 # Copy this file to config.yaml and edit the values for your machine.
+#
+# The GUI can also create/open GeeUp projects. A project writes the same config
+# shape into <project_root>/project.yaml and repoints the processing folders to
+# that project root, while config.yaml remains the active session mirror.
 
 earth_engine_url: "https://code.earthengine.google.com/"
 
@@ -44,11 +48,24 @@ download:
   # Preview and final download status report.
   report_csv: "C:/path/to/SWOT_Processing/00_logs/download_preview.csv"
 
+  # Cumulative project memory of granules already downloaded. This lets GeeUp
+  # skip previously completed granules even if raw NetCDF files are deleted
+  # after duplicate cleanup/extraction.
+  manifest_csv: "C:/path/to/SWOT_Processing/00_logs/download_manifest.csv"
+
   # Existing local files with the same expected filename are skipped.
   skip_existing: true
 
-  # Passed to earthaccess.download for each file.
-  threads: 4
+  # Granules already marked downloaded in manifest_csv are skipped, even when
+  # the raw NetCDF file is no longer present.
+  skip_manifest_existing: true
+
+  # earthaccess parallel workers per batch.
+  threads: 6
+
+  # Number of granules submitted to earthaccess.download at once. Set to 1 for
+  # the old one-file-at-a-time behavior; 25 is a conservative large-run default.
+  batch_size: 25
 
 duplicates:
   # First pipeline step: manually downloaded SWOT NetCDF files go here.
@@ -82,6 +99,7 @@ extract:
 
   # If true, existing valid GeoTIFFs are reopened and skipped.
   skip_existing: true
+  skip_manifest_existing: true
 
   # Matches the notebook default used for reprojection.
   resampling_alg: "near"
@@ -129,6 +147,8 @@ mosaic:
     - ".tiff"
 
   report_csv: "C:/path/to/SWOT_Processing/00_logs/mosaic_report.csv"
+  manifest_csv: "C:/path/to/SWOT_Processing/00_logs/mosaic_manifest.csv"
+  skip_manifest_existing: true
 
   # Focused CSV with only mosaic groups that combine different source CRIDs.
   # Leave blank to disable this extra report.
@@ -253,6 +273,6 @@ execution:
   verbose_console: true
 
 artifacts:
-  logs_dir: "./logs"
-  artifacts_dir: "./artifacts"
-  report_csv: "./reports/upload_report.csv"
+  logs_dir: "C:/path/to/SWOT_Processing/00_logs"
+  artifacts_dir: "C:/path/to/SWOT_Processing/00_logs/upload_artifacts"
+  report_csv: "C:/path/to/SWOT_Processing/00_logs/upload_report.csv"

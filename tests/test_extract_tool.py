@@ -6,6 +6,7 @@ from pathlib import Path
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env, check_gdal_runtime
 from swot_extract_tool import (
     ExtractConfig,
+    ExtractSource,
     TARGET_CRS_AFRICA_LAEA,
     TARGET_CRS_ORIGINAL,
     TARGET_CRS_WGS84,
@@ -14,6 +15,7 @@ from swot_extract_tool import (
     load_config_file,
     normalize_year_selection,
     parse_filename,
+    process_one_file,
     run_extract,
 )
 
@@ -162,6 +164,41 @@ class ExtractPlanningTests(unittest.TestCase):
             self.assertEqual(config.year_selection, "2024,2025")
             self.assertEqual(config.limit_files, 5)
             self.assertFalse(config.skip_existing)
+
+    def test_process_one_file_can_skip_from_manifest_without_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            input_path = root / nc_name()
+            input_path.touch()
+            metadata = parse_filename(input_path)
+            assert metadata is not None
+            config = ExtractConfig(
+                input_folder=root,
+                output_folder=root / "out",
+                manifest_csv=root / "manifest.csv",
+                errors_csv=root / "errors.csv",
+            )
+            source = ExtractSource(path=input_path, metadata=metadata)
+            record_id = f"{input_path.name}|original"
+
+            row = process_one_file(
+                source,
+                config,
+                gdal=None,
+                existing_manifest={
+                    record_id: {
+                        "record_id": record_id,
+                        "status": "written",
+                        "xsize": "10",
+                        "ysize": "20",
+                        "band_count": "2",
+                    }
+                },
+            )
+
+            self.assertEqual(row["status"], "skipped_manifest")
+            self.assertEqual(row["known_from_manifest"], "yes")
+            self.assertEqual(row["output_exists"], "no")
 
 
 @unittest.skipUnless(GDAL_AVAILABLE, f"GDAL runtime unavailable: {GDAL_CHECK.stderr}")

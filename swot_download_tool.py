@@ -6,6 +6,7 @@ import argparse
 import csv
 import re
 import sys
+import warnings
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from urllib.parse import unquote, urlparse
 import yaml
 
 from swot_metadata import parse_swot_l2_hr_raster_metadata
+from workflow_manifest import upsert_workflow_manifest, workflow_manifest_path
 
 
 PROGRESS_PREFIX = "GEEUP_PROGRESS"
@@ -31,6 +33,8 @@ DEFAULT_PROCESSING_PATHS = {
 
 DEFAULT_COLLECTION_SHORT_NAME = "SWOT_L2_HR_Raster_100m_D"
 DEFAULT_COLLECTION_LABEL = "Version D active"
+DEFAULT_REPORT_CSV = Path(f"{DEFAULT_PROCESSING_PATHS['logs']}/download_preview.csv")
+DEFAULT_MANIFEST_CSV = Path(f"{DEFAULT_PROCESSING_PATHS['logs']}/download_manifest.csv")
 COLLECTION_LABELS = {
     "Version D active": "SWOT_L2_HR_Raster_100m_D",
     "Version C superseded": "SWOT_L2_HR_Raster_100m_2.0",
@@ -41,6 +45,13 @@ COLLECTION_LABEL_BY_SHORT_NAME = {
 MGRS_LATITUDE_BANDS = "CDEFGHJKLMNPQRSTUVWX"
 UTM_TILE_RE = re.compile(r"^UTM(?P<zone>0[1-9]|[1-5]\d|60)(?P<band>[C-HJ-NP-X])$")
 _AUTHENTICATED = False
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"As of version 1\.0, `DataGranule\.size` will be accessed as an attribute.*",
+    category=FutureWarning,
+    module=r"earthaccess\.results",
+)
 
 
 @dataclass
@@ -54,9 +65,12 @@ class DownloadConfig:
     end_date: str = ""
     utm_tiles: List[str] = field(default_factory=list)
     max_granules: Optional[int] = None
-    report_csv: Path = Path(f"{DEFAULT_PROCESSING_PATHS['logs']}/download_preview.csv")
+    report_csv: Path = DEFAULT_REPORT_CSV
+    manifest_csv: Path = DEFAULT_MANIFEST_CSV
     skip_existing: bool = True
-    threads: int = 4
+    skip_manifest_existing: bool = True
+    threads: int = 6
+    batch_size: int = 25
     base_dir: Path = Path.cwd()
 
 
@@ -109,8 +123,21 @@ class DownloadResult:
     preview: DownloadPreview
     downloaded_files: List[Path] = field(default_factory=list)
     skipped_existing: List[Path] = field(default_factory=list)
+    skipped_manifest: List[DownloadGranule] = field(default_factory=list)
     failures: List[Tuple[DownloadGranule, str]] = field(default_factory=list)
+    missing_granules: List[DownloadGranule] = field(default_factory=list)
+    stopped: bool = False
     report_csv: Optional[Path] = None
+
+    @property
+    def complete_count(self) -> int:
+        """Return how many matched granules are locally or historically accounted for."""
+        return len(self.preview.granules) - len(self.missing_granules)
+
+    @property
+    def all_complete(self) -> bool:
+        """Return True when every matched granule is locally or historically accounted for."""
+        return not self.missing_granules
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -124,8 +151,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "utm_tiles": [],
         "max_granules": None,
         "report_csv": "",
+        "manifest_csv": "",
         "skip_existing": True,
-        "threads": 4,
+        "skip_manifest_existing": True,
+        "threads": 6,
+        "batch_size": 25,
     },
 }
 
@@ -250,8 +280,14 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> DownloadConfig:
             download_data.get("report_csv") or f"{logs_folder}/download_preview.csv",
             base_dir,
         ),
+        manifest_csv=resolve_path(
+            download_data.get("manifest_csv") or f"{logs_folder}/download_manifest.csv",
+            base_dir,
+        ),
         skip_existing=bool(download_data.get("skip_existing", True)),
-        threads=int(download_data.get("threads", 4) or 4),
+        skip_manifest_existing=bool(download_data.get("skip_manifest_existing", True)),
+        threads=int(download_data.get("threads", 6) or 6),
+        batch_size=int(download_data.get("batch_size", 25) or 25),
         base_dir=base_dir,
     )
     validate_config(config)
@@ -272,10 +308,14 @@ def validate_config(config: DownloadConfig) -> None:
         raise ValueError(f"Download output path is not a directory: {config.output_folder}")
     if config.report_csv.exists() and config.report_csv.is_dir():
         raise ValueError(f"Download report path is a directory: {config.report_csv}")
+    if config.manifest_csv.exists() and config.manifest_csv.is_dir():
+        raise ValueError(f"Download manifest path is a directory: {config.manifest_csv}")
     if config.max_granules is not None and config.max_granules < 1:
         raise ValueError("download.max_granules must be blank or at least 1.")
     if config.threads < 1:
         raise ValueError("download.threads must be at least 1.")
+    if config.batch_size < 1:
+        raise ValueError("download.batch_size must be at least 1.")
 
 
 def build_granule_patterns(utm_tiles: Sequence[str]) -> List[str]:
@@ -475,10 +515,29 @@ def granule_file_name(granule: Any) -> str:
 
 def granule_size_mb(granule: Any) -> Optional[float]:
     """Return size in MB when exposed by earthaccess or CMR metadata."""
-    size_method = getattr(granule, "size", None)
-    if callable(size_method):
+    size_value = mapping_value(granule, "size")
+    if size_value not in (None, "") and not callable(size_value):
         try:
-            value = size_method()
+            return float(size_value)
+        except (TypeError, ValueError):
+            pass
+
+    size_attr = getattr(granule, "size", None)
+    if size_attr not in (None, "") and not callable(size_attr):
+        try:
+            return float(size_attr)
+        except (TypeError, ValueError):
+            pass
+
+    if callable(size_attr):
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"As of version 1\.0, `DataGranule\.size` will be accessed as an attribute.*",
+                    category=FutureWarning,
+                )
+                value = size_attr()
             if value is not None:
                 return float(value)
         except Exception:
@@ -583,7 +642,257 @@ def existing_download_path(config: DownloadConfig, granule: DownloadGranule) -> 
     if not granule.file_name:
         return None
     candidate = config.output_folder / granule.file_name
-    return candidate if candidate.exists() else None
+    if not candidate.exists():
+        return None
+    return candidate if file_appears_complete(candidate, granule.size_mb) else None
+
+
+def file_appears_complete(path: Path, expected_size_mb: Optional[float]) -> bool:
+    """Return False for zero-byte or clearly undersized local downloads."""
+    try:
+        actual_size = path.stat().st_size
+    except OSError:
+        return False
+    if actual_size <= 0:
+        return False
+    if expected_size_mb in (None, 0):
+        return True
+    expected_size = float(expected_size_mb) * 1024 * 1024
+    tolerance = max(1024 * 1024, expected_size * 0.05)
+    return actual_size + tolerance >= expected_size
+
+
+def next_incomplete_path(path: Path) -> Path:
+    """Return an unused sidecar path for an incomplete local download."""
+    candidate = path.with_name(f"{path.name}.incomplete")
+    counter = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.incomplete{counter}")
+        counter += 1
+    return candidate
+
+
+def move_incomplete_download(config: DownloadConfig, granule: DownloadGranule) -> Optional[Path]:
+    """Move a clearly incomplete local file aside before retrying a download."""
+    if not granule.file_name:
+        return None
+    candidate = config.output_folder / granule.file_name
+    if not candidate.exists() or file_appears_complete(candidate, granule.size_mb):
+        return None
+    target = next_incomplete_path(candidate)
+    candidate.replace(target)
+    return target
+
+
+def chunks(items: Sequence[DownloadGranule], size: int) -> Iterable[Sequence[DownloadGranule]]:
+    """Yield fixed-size chunks from a sequence."""
+    for start in range(0, len(items), max(1, size)):
+        yield items[start : start + max(1, size)]
+
+
+def effective_manifest_csv(config: DownloadConfig) -> Path:
+    """Return the manifest path, defaulting beside a custom report CSV."""
+    if config.manifest_csv == DEFAULT_MANIFEST_CSV and config.report_csv != DEFAULT_REPORT_CSV:
+        return config.report_csv.with_name("download_manifest.csv")
+    return config.manifest_csv
+
+
+def local_complete_path(config: DownloadConfig, granule: DownloadGranule) -> Optional[Path]:
+    """Return the local path when a complete local file exists for a granule."""
+    return existing_download_path(config, granule)
+
+
+MANIFEST_COLUMNS = [
+    "granule_id",
+    "file_name",
+    "utm_tile",
+    "start_time",
+    "end_time",
+    "size_mb",
+    "collection_short_name",
+    "downloaded",
+    "raw_exists",
+    "local_path",
+    "last_status",
+    "first_seen",
+    "last_seen",
+    "last_downloaded",
+]
+
+
+def manifest_key(granule: DownloadGranule) -> str:
+    """Return the stable manifest key for one granule."""
+    return granule.identity or granule.file_name
+
+
+def read_download_manifest(path: Path) -> Dict[str, Dict[str, str]]:
+    """Load a cumulative download manifest keyed by granule id."""
+    if not path.exists() or not path.is_file():
+        return {}
+    rows: Dict[str, Dict[str, str]] = {}
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                key = row.get("granule_id") or row.get("file_name")
+                if key:
+                    rows[key] = {column: str(value or "") for column, value in row.items()}
+    except OSError:
+        return {}
+    return rows
+
+
+def manifest_row_downloaded(row: Mapping[str, str] | None) -> bool:
+    """Return True when a manifest row records a successful previous download."""
+    if not row:
+        return False
+    return str(row.get("downloaded", "")).strip().lower() in {"yes", "true", "1"}
+
+
+def manifest_has_downloaded(
+    manifest: Mapping[str, Mapping[str, str]],
+    granule: DownloadGranule,
+) -> bool:
+    """Return True when a granule is already known as downloaded in the manifest."""
+    return manifest_row_downloaded(manifest.get(manifest_key(granule)))
+
+
+def manifest_downloaded_tiles(path: Path) -> List[str]:
+    """Return UTM tiles that have at least one downloaded granule in a manifest."""
+    tiles = {
+        row.get("utm_tile", "")
+        for row in read_download_manifest(path).values()
+        if manifest_row_downloaded(row)
+    }
+    return sorted(tile for tile in tiles if tile)
+
+
+def write_download_manifest(
+    config: DownloadConfig,
+    preview: DownloadPreview,
+    statuses: Mapping[str, Tuple[str, str]],
+) -> Path:
+    """Merge one run into the cumulative project/download manifest."""
+    manifest_csv = effective_manifest_csv(config)
+    manifest_csv.parent.mkdir(parents=True, exist_ok=True)
+    rows = read_download_manifest(manifest_csv)
+    timestamp = datetime.now().replace(microsecond=0).isoformat()
+    for granule in preview.granules:
+        key = manifest_key(granule)
+        existing = rows.get(key, {})
+        status, local_path = statuses.get(key, statuses.get(granule.identity, ("MATCHED", "")))
+        raw_path = local_complete_path(config, granule)
+        raw_exists = raw_path is not None
+        status_downloaded = status in {"DOWNLOADED", "SKIPPED_EXISTING", "LOCAL_COMPLETE", "SKIPPED_MANIFEST"}
+        downloaded = status_downloaded or manifest_row_downloaded(existing)
+        last_downloaded = existing.get("last_downloaded", "")
+        if status in {"DOWNLOADED", "SKIPPED_EXISTING", "LOCAL_COMPLETE"}:
+            last_downloaded = timestamp
+        size_text = "" if granule.size_mb is None else f"{granule.size_mb:.3f}"
+        rows[key] = {
+            "granule_id": key,
+            "file_name": granule.file_name,
+            "utm_tile": granule.utm_tile,
+            "start_time": granule.start_time,
+            "end_time": granule.end_time,
+            "size_mb": size_text,
+            "collection_short_name": preview.query.collection_short_name,
+            "downloaded": "yes" if downloaded else "no",
+            "raw_exists": "yes" if raw_exists else "no",
+            "local_path": str(raw_path or local_path or existing.get("local_path", "")),
+            "last_status": status,
+            "first_seen": existing.get("first_seen") or timestamp,
+            "last_seen": timestamp,
+            "last_downloaded": last_downloaded,
+        }
+    with manifest_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MANIFEST_COLUMNS)
+        writer.writeheader()
+        for key in sorted(rows, key=lambda item: rows[item].get("file_name", item).lower()):
+            row = rows[key]
+            writer.writerow({column: row.get(column, "") for column in MANIFEST_COLUMNS})
+    return manifest_csv
+
+
+def write_download_workflow_manifest(
+    config: DownloadConfig,
+    preview: DownloadPreview,
+    statuses: Mapping[str, Tuple[str, str]],
+) -> Path:
+    """Update the shared project workflow manifest with download status rows."""
+    rows = []
+    for granule in preview.granules:
+        status, local_path = statuses.get(granule.identity, ("MATCHED", ""))
+        raw_path = local_complete_path(config, granule)
+        rows.append(
+            {
+                "stage": "download",
+                "record_id": manifest_key(granule),
+                "record_type": "swot_granule",
+                "status": status,
+                "source_path": " ".join(granule.links),
+                "output_path": str(raw_path or local_path),
+                "utm_tile": granule.utm_tile,
+                "start_time": granule.start_time,
+                "end_time": granule.end_time,
+                "raw_exists": "yes" if raw_path is not None else "no",
+                "output_exists": "yes" if raw_path is not None else "no",
+                "known_from_stage_manifest": "yes" if status == "SKIPPED_MANIFEST" else "no",
+            }
+        )
+    return upsert_workflow_manifest(workflow_manifest_path(config.report_csv), rows)
+
+
+def update_statuses_from_local_files(
+    config: DownloadConfig,
+    preview: DownloadPreview,
+    statuses: Dict[str, Tuple[str, str]],
+) -> List[DownloadGranule]:
+    """Mark every preview granule according to current local or manifest completeness."""
+    missing: List[DownloadGranule] = []
+    for granule in preview.granules:
+        complete_path = local_complete_path(config, granule)
+        current_status, current_path = statuses.get(granule.identity, ("", ""))
+        if complete_path is not None:
+            if current_status in {"DOWNLOADED", "SKIPPED_EXISTING"}:
+                statuses[granule.identity] = (current_status, str(complete_path))
+            else:
+                statuses[granule.identity] = ("LOCAL_COMPLETE", str(complete_path))
+            continue
+        if current_status == "SKIPPED_MANIFEST":
+            statuses[granule.identity] = (current_status, current_path)
+            continue
+        missing.append(granule)
+        if current_status in {"FAILED", "CANCELLED"}:
+            statuses[granule.identity] = (current_status, current_path)
+        elif current_status:
+            statuses[granule.identity] = ("MISSING", current_path)
+        else:
+            statuses[granule.identity] = ("MISSING", "")
+    return missing
+
+
+def preview_statuses_from_existing(
+    config: DownloadConfig,
+    preview: DownloadPreview,
+) -> Dict[str, Tuple[str, str]]:
+    """Return preview statuses from local raw files and the project manifest."""
+    statuses: Dict[str, Tuple[str, str]] = {}
+    manifest = read_download_manifest(effective_manifest_csv(config))
+    for granule in preview.granules:
+        existing = existing_download_path(config, granule)
+        if existing is not None:
+            status = "SKIPPED_EXISTING" if config.skip_existing else "LOCAL_COMPLETE"
+            statuses[granule.identity] = (status, str(existing))
+            continue
+        if config.skip_manifest_existing and manifest_has_downloaded(manifest, granule):
+            manifest_row = manifest.get(manifest_key(granule), {})
+            statuses[granule.identity] = (
+                "SKIPPED_MANIFEST",
+                str(manifest_row.get("local_path", "")),
+            )
+        else:
+            statuses[granule.identity] = ("MATCHED", "")
+    return statuses
 
 
 def write_download_report(
@@ -593,7 +902,7 @@ def write_download_report(
 ) -> Path:
     """Write a CSV preview/download report."""
     config.report_csv.parent.mkdir(parents=True, exist_ok=True)
-    statuses = statuses or {}
+    statuses = statuses if statuses is not None else preview_statuses_from_existing(config, preview)
     columns = [
         "status",
         "file_name",
@@ -601,6 +910,9 @@ def write_download_report(
         "start_time",
         "end_time",
         "size_mb",
+        "downloaded",
+        "raw_exists",
+        "known_from_manifest",
         "local_path",
         "granule_id",
         "links",
@@ -610,6 +922,15 @@ def write_download_report(
         writer.writeheader()
         for granule in preview.granules:
             status, local_path = statuses.get(granule.identity, ("MATCHED", ""))
+            raw_exists = local_complete_path(config, granule) is not None
+            known_from_manifest = status == "SKIPPED_MANIFEST"
+            downloaded = (
+                "yes"
+                if raw_exists
+                or known_from_manifest
+                or status in {"DOWNLOADED", "SKIPPED_EXISTING", "LOCAL_COMPLETE"}
+                else "no"
+            )
             writer.writerow(
                 {
                     "status": status,
@@ -618,6 +939,9 @@ def write_download_report(
                     "start_time": granule.start_time,
                     "end_time": granule.end_time,
                     "size_mb": "" if granule.size_mb is None else f"{granule.size_mb:.3f}",
+                    "downloaded": downloaded,
+                    "raw_exists": "yes" if raw_exists else "no",
+                    "known_from_manifest": "yes" if known_from_manifest else "no",
                     "local_path": local_path,
                     "granule_id": granule.identity,
                     "links": " ".join(granule.links),
@@ -630,6 +954,7 @@ def run_download(
     config: DownloadConfig,
     earthaccess_module: Any = None,
     progress_callback: Optional[ProgressCallback] = None,
+    stop_event: Any = None,
 ) -> DownloadResult:
     """Search for matching granules and download missing files."""
     earthaccess = earthaccess_module or import_earthaccess()
@@ -643,11 +968,20 @@ def run_download(
     statuses: Dict[str, Tuple[str, str]] = {}
     to_download: List[DownloadGranule] = []
     skipped: List[Path] = []
+    skipped_manifest: List[DownloadGranule] = []
+    manifest = read_download_manifest(effective_manifest_csv(config))
     for granule in preview.granules:
         existing = existing_download_path(config, granule)
         if config.skip_existing and existing is not None:
             skipped.append(existing)
             statuses[granule.identity] = ("SKIPPED_EXISTING", str(existing))
+        elif config.skip_manifest_existing and manifest_has_downloaded(manifest, granule):
+            skipped_manifest.append(granule)
+            manifest_row = manifest.get(manifest_key(granule), {})
+            statuses[granule.identity] = (
+                "SKIPPED_MANIFEST",
+                str(manifest_row.get("local_path", "")),
+            )
         else:
             to_download.append(granule)
 
@@ -660,34 +994,73 @@ def run_download(
     if progress_callback is not None:
         progress_callback(0, total, "Starting download" if total else "No new files to download")
 
-    for index, granule in enumerate(to_download, start=1):
+    stopped = False
+    completed_attempts = 0
+    for batch in chunks(to_download, config.batch_size):
+        if stop_event is not None and stop_event.is_set():
+            stopped = True
+            for pending in to_download[completed_attempts:]:
+                statuses[pending.identity] = ("CANCELLED", "")
+            if progress_callback is not None:
+                progress_callback(completed_attempts, total, "Download stop requested")
+            break
+        for granule in batch:
+            move_incomplete_download(config, granule)
         if progress_callback is not None:
-            progress_callback(index - 1, total, f"Downloading {granule.file_name}")
+            if len(batch) == 1:
+                message = f"Downloading {batch[0].file_name}"
+            else:
+                message = f"Downloading batch of {len(batch)} files"
+            progress_callback(completed_attempts, total, message)
         try:
             paths = earthaccess.download(
-                [granule.source],
+                [granule.source for granule in batch],
                 local_path=str(config.output_folder),
                 threads=config.threads,
                 show_progress=False,
             )
             normalized_paths = [Path(path) for path in paths or []]
             downloaded_files.extend(normalized_paths)
-            local_path = str(normalized_paths[0]) if normalized_paths else ""
-            statuses[granule.identity] = ("DOWNLOADED", local_path)
-            message = f"Downloaded {granule.file_name}"
+            for granule in batch:
+                complete_path = local_complete_path(config, granule)
+                if complete_path is not None:
+                    statuses[granule.identity] = ("DOWNLOADED", str(complete_path))
+                else:
+                    statuses[granule.identity] = ("MISSING", "")
+            message = (
+                f"Downloaded {batch[0].file_name}"
+                if len(batch) == 1
+                else f"Finished batch of {len(batch)} files"
+            )
         except Exception as exc:
-            failures.append((granule, str(exc)))
-            statuses[granule.identity] = ("FAILED", str(exc))
-            message = f"FAILED: {granule.file_name}"
+            for granule in batch:
+                complete_path = local_complete_path(config, granule)
+                if complete_path is not None:
+                    statuses[granule.identity] = ("DOWNLOADED", str(complete_path))
+                else:
+                    failures.append((granule, str(exc)))
+                    statuses[granule.identity] = ("FAILED", str(exc))
+            message = (
+                f"FAILED: {batch[0].file_name}"
+                if len(batch) == 1
+                else f"FAILED batch of {len(batch)} files"
+            )
+        completed_attempts += len(batch)
         if progress_callback is not None:
-            progress_callback(index, total, message)
+            progress_callback(completed_attempts, total, message)
 
+    missing_granules = update_statuses_from_local_files(config, preview, statuses)
     report_csv = write_download_report(config, preview, statuses)
+    write_download_manifest(config, preview, statuses)
+    write_download_workflow_manifest(config, preview, statuses)
     return DownloadResult(
         preview=preview,
         downloaded_files=downloaded_files,
         skipped_existing=skipped,
+        skipped_manifest=skipped_manifest,
         failures=failures,
+        missing_granules=missing_granules,
+        stopped=stopped,
         report_csv=report_csv,
     )
 
@@ -716,9 +1089,14 @@ def print_preview_summary(preview: DownloadPreview, report_csv: Path) -> None:
 def print_download_summary(result: DownloadResult) -> None:
     """Print a concise download summary for CLI users."""
     print(f"Granules matched: {len(result.preview.granules)}")
+    print(f"Accounted for: {result.complete_count}")
     print(f"Downloaded files: {len(result.downloaded_files)}")
     print(f"Skipped existing: {len(result.skipped_existing)}")
+    print(f"Skipped manifest-known: {len(result.skipped_manifest)}")
     print(f"Failed files: {len(result.failures)}")
+    print(f"Missing files: {len(result.missing_granules)}")
+    if result.stopped:
+        print("Download stopped before all files were attempted.")
     if result.report_csv:
         print(f"Report CSV: {result.report_csv}")
     for granule, error in result.failures[:10]:
@@ -772,7 +1150,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         result = run_download(config, progress_callback=print_progress)
         print_download_summary(result)
-        return 1 if result.failures else 0
+        return 1 if result.failures or result.missing_granules or result.stopped else 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

@@ -9,11 +9,12 @@ import subprocess
 import sys
 import threading
 import textwrap
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -85,6 +86,26 @@ ensure_isolated_python_environment()
 import yaml
 
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env
+from geeup_project import (
+    GeeUpProject,
+    TilePreset,
+    config_for_project,
+    create_project,
+    ensure_project_structure,
+    load_builtin_tile_presets,
+    load_project,
+    load_project_tile_profiles,
+    prepare_update_dates,
+    save_project_config,
+    save_tile_profile,
+)
+from project_insights import (
+    CleanupCandidate,
+    collect_project_insights,
+    delete_cleanup_candidates,
+    format_bytes as format_insight_bytes,
+    plan_cleanup_candidates,
+)
 from swot_download_tool import (
     COLLECTION_LABELS,
     COLLECTION_LABEL_BY_SHORT_NAME,
@@ -95,10 +116,12 @@ from swot_download_tool import (
     build_download_preview,
     format_size,
     generate_utm_tiles,
+    manifest_downloaded_tiles,
     normalize_utm_tiles,
     run_download,
     write_download_report,
 )
+from utm_map_selector import UTMMapSelectorDialog, load_display_geometry
 
 
 def load_config() -> Dict[str, Any]:
@@ -191,15 +214,36 @@ class LauncherApp:
                 f"{processing_logs}/download_preview.csv",
             )
         )
+        self.download_manifest_var = tk.StringVar(
+            value=download_data.get(
+                "manifest_csv",
+                f"{processing_logs}/download_manifest.csv",
+            )
+        )
         self.download_threads_var = tk.StringVar(
-            value=str(download_data.get("threads", 4))
+            value=str(download_data.get("threads", 6))
+        )
+        self.download_batch_size_var = tk.StringVar(
+            value=str(download_data.get("batch_size", 25))
         )
         self.download_skip_existing_var = tk.BooleanVar(
             value=bool(download_data.get("skip_existing", True))
         )
+        self.download_skip_manifest_existing_var = tk.BooleanVar(
+            value=bool(download_data.get("skip_manifest_existing", True))
+        )
         self.all_utm_tiles = generate_utm_tiles()
         self.download_visible_utm_tiles = list(self.all_utm_tiles)
         self.download_selected_tiles = set(selected_tiles)
+        self.current_project_root_var = tk.StringVar(value="")
+        self.current_project_name_var = tk.StringVar(value="No project")
+        self.project_status_var = tk.StringVar(
+            value="No project is open. Create or open a project before previewing, downloading, or running processing steps."
+        )
+        self.project_created_at = ""
+        self.project_download_history: list[dict[str, Any]] = []
+        self.tile_preset_var = tk.StringVar(value="")
+        self.tile_preset_choices: dict[str, TilePreset] = {}
 
         self.duplicate_input_var = tk.StringVar(
             value=duplicate_data.get("input_folder", raw_downloads)
@@ -333,6 +377,15 @@ class LauncherApp:
         self.extract_skip_existing_var = tk.BooleanVar(
             value=bool(extract_data.get("skip_existing", True))
         )
+        self.extract_skip_manifest_existing_var = tk.BooleanVar(
+            value=bool(extract_data.get("skip_manifest_existing", True))
+        )
+        self.mosaic_manifest_var = tk.StringVar(
+            value=mosaic_data.get("manifest_csv", f"{processing_logs}/mosaic_manifest.csv")
+        )
+        self.mosaic_skip_manifest_existing_var = tk.BooleanVar(
+            value=bool(mosaic_data.get("skip_manifest_existing", True))
+        )
 
         self.status_var = tk.StringVar(
             value="Fill the form, save config, then start a dry run."
@@ -354,19 +407,26 @@ class LauncherApp:
         )
         self.download_progress_var = tk.DoubleVar(value=0.0)
         self.download_progress_text_var = tk.StringVar(value="Progress: not started")
+        self.download_stop_event: threading.Event | None = None
         self.extract_progress_var = tk.DoubleVar(value=0.0)
         self.extract_progress_text_var = tk.StringVar(value="Progress: not started")
         self.mosaic_progress_var = tk.DoubleVar(value=0.0)
         self.mosaic_progress_text_var = tk.StringVar(value="Progress: not started")
+        self.statistics_status_var = tk.StringVar(
+            value="Open a project, then refresh statistics to summarize manifests and local files."
+        )
+        self.statistics_summary_var = tk.StringVar(value="")
+        self.cleanup_candidates: list[CleanupCandidate] = []
 
         self.build_layout()
+        self.try_auto_open_project_from_config()
 
     def build_layout(self) -> None:
         """Create the tabbed launcher layout."""
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(2, weight=1)
+        outer.rowconfigure(3, weight=1)
 
         title = ttk.Label(
             outer,
@@ -385,25 +445,66 @@ class LauncherApp:
         )
         intro.grid(row=1, column=0, sticky="w", pady=(6, 14))
 
+        self.build_project_bar(outer)
+
         notebook = ttk.Notebook(outer)
-        notebook.grid(row=2, column=0, sticky="nsew")
+        notebook.grid(row=3, column=0, sticky="nsew")
 
         download_tab = ttk.Frame(notebook, padding=12)
         duplicate_tab = ttk.Frame(notebook, padding=12)
         extract_tab = ttk.Frame(notebook, padding=12)
         mosaic_tab = ttk.Frame(notebook, padding=12)
         upload_tab = ttk.Frame(notebook, padding=12)
+        statistics_tab = ttk.Frame(notebook, padding=12)
         notebook.add(download_tab, text="Download")
         notebook.add(duplicate_tab, text="Duplicate Removal")
         notebook.add(extract_tab, text="Extraction")
         notebook.add(mosaic_tab, text="Mosaic")
         notebook.add(upload_tab, text="Upload")
+        notebook.add(statistics_tab, text="Statistics")
 
         self.build_download_tab(download_tab)
         self.build_duplicate_tab(duplicate_tab)
         self.build_extract_tab(extract_tab)
         self.build_mosaic_tab(mosaic_tab)
         self.build_upload_tab(upload_tab)
+        self.build_statistics_tab(statistics_tab)
+
+    def build_project_bar(self, parent: ttk.Frame) -> None:
+        """Create project controls above the processing tabs."""
+        project = ttk.LabelFrame(parent, text="Project", padding=10)
+        project.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+        project.columnconfigure(6, weight=1)
+
+        ttk.Button(project, text="New Project", command=self.new_project).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(project, text="Open Project", command=self.open_project).grid(
+            row=0, column=1, sticky="w", padx=(8, 0)
+        )
+        ttk.Button(project, text="Save Project", command=self.save_project_action).grid(
+            row=0, column=2, sticky="w", padx=(8, 0)
+        )
+        ttk.Button(project, text="Save Project As", command=self.save_project_as).grid(
+            row=0, column=3, sticky="w", padx=(8, 0)
+        )
+        ttk.Button(project, text="Prepare Update", command=self.prepare_project_update).grid(
+            row=0, column=4, sticky="w", padx=(8, 0)
+        )
+        ttk.Label(project, textvariable=self.current_project_name_var).grid(
+            row=0, column=5, sticky="w", padx=(12, 0)
+        )
+        ttk.Label(
+            project,
+            textvariable=self.current_project_root_var,
+            foreground="#555555",
+        ).grid(row=1, column=0, columnspan=7, sticky="w", pady=(6, 0))
+        ttk.Label(
+            project,
+            textvariable=self.project_status_var,
+            foreground="#184a8b",
+            justify="left",
+        ).grid(row=2, column=0, columnspan=7, sticky="w", pady=(4, 0))
 
     def build_download_tab(self, parent: ttk.Frame) -> None:
         """Create SWOT Earthdata download controls."""
@@ -491,7 +592,14 @@ class LauncherApp:
             row,
             "Download threads",
             self.download_threads_var,
-            "Per-file earthaccess thread count; use 4 unless you need to reduce network pressure",
+            "Parallel earthaccess workers for each batch; start with 6 to 8 for large runs",
+        )
+        row = self.add_entry_row(
+            form,
+            row,
+            "Batch size",
+            self.download_batch_size_var,
+            "Granules submitted to earthaccess at once; 25 is conservative, 50 can be faster",
         )
         row = self.add_path_row(
             form,
@@ -500,6 +608,14 @@ class LauncherApp:
             self.download_report_var,
             self.browse_download_report_file,
             "CSV report for matched, downloaded, skipped, and failed granules",
+        )
+        row = self.add_path_row(
+            form,
+            row,
+            "Download manifest CSV",
+            self.download_manifest_var,
+            self.browse_download_manifest_file,
+            "Cumulative project memory of granules already downloaded, even if raw files are later deleted",
         )
 
         tiles = ttk.LabelFrame(parent, text="UTM Tiles", padding=12)
@@ -513,7 +629,7 @@ class LauncherApp:
         )
         ttk.Label(
             tiles,
-            text="Select one or more tokens such as UTM30R; use Ctrl/Shift for multi-select",
+            text="Select tokens such as UTM30R; list clicks add to the current set, while the text box or map can remove tiles",
             foreground="#666666",
         ).grid(row=1, column=1, sticky="w", pady=(0, 8))
 
@@ -553,6 +669,33 @@ class LauncherApp:
             text="Clear",
             command=self.clear_download_tiles,
         ).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(
+            selected_frame,
+            text="Open UTM Map Selector",
+            command=self.open_utm_map_selector,
+        ).grid(row=0, column=3, padx=(8, 0))
+
+        ttk.Label(tiles, text="Tile preset").grid(row=4, column=0, sticky="w", pady=(8, 2))
+        preset_frame = ttk.Frame(tiles)
+        preset_frame.grid(row=4, column=1, sticky="ew", pady=(8, 2))
+        preset_frame.columnconfigure(0, weight=1)
+        self.tile_preset_combo = ttk.Combobox(
+            preset_frame,
+            textvariable=self.tile_preset_var,
+            values=[],
+            state="readonly",
+        )
+        self.tile_preset_combo.grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            preset_frame,
+            text="Apply Preset",
+            command=self.apply_tile_preset,
+        ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(
+            preset_frame,
+            text="Save Selected As Preset",
+            command=self.save_selected_tiles_as_preset,
+        ).grid(row=0, column=2, padx=(8, 0))
 
         options = ttk.LabelFrame(parent, text="Options", padding=12)
         options.grid(row=3, column=0, sticky="ew", pady=(14, 0))
@@ -561,12 +704,27 @@ class LauncherApp:
             text="Skip files that already exist in the output folder",
             variable=self.download_skip_existing_var,
         ).grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Checkbutton(
+            options,
+            text="Skip granules already recorded in the project download manifest",
+            variable=self.download_skip_manifest_existing_var,
+        ).grid(row=1, column=0, sticky="w", pady=4)
 
         preview = ttk.LabelFrame(parent, text="Preview", padding=12)
         preview.grid(row=4, column=0, sticky="nsew", pady=(14, 0))
         preview.columnconfigure(0, weight=1)
         preview.rowconfigure(0, weight=1)
-        columns = ("file_name", "utm_tile", "start_time", "end_time", "size_mb", "status")
+        columns = (
+            "file_name",
+            "utm_tile",
+            "start_time",
+            "end_time",
+            "size_mb",
+            "downloaded",
+            "raw_exists",
+            "known_from_manifest",
+            "status",
+        )
         self.download_preview_tree = ttk.Treeview(
             preview,
             columns=columns,
@@ -579,6 +737,9 @@ class LauncherApp:
             "start_time": ("Start", 145),
             "end_time": ("End", 145),
             "size_mb": ("MB", 70),
+            "downloaded": ("Downloaded", 90),
+            "raw_exists": ("Raw exists", 85),
+            "known_from_manifest": ("Manifest", 85),
             "status": ("Status", 110),
         }
         for column, (label, width) in headings.items():
@@ -604,6 +765,9 @@ class LauncherApp:
         )
         ttk.Button(controls, text="Download Matches", command=self.start_download).grid(
             row=0, column=2, sticky="w", padx=(8, 0)
+        )
+        ttk.Button(controls, text="Stop Download", command=self.stop_download).grid(
+            row=0, column=3, sticky="w", padx=(8, 0)
         )
 
         progress = ttk.Frame(parent)
@@ -633,6 +797,7 @@ class LauncherApp:
             lambda *_args: self.refresh_download_tile_list(),
         )
         self.refresh_download_tile_list()
+        self.refresh_tile_presets()
         self.load_download_report_preview(limit=100)
 
     def build_duplicate_tab(self, parent: ttk.Frame) -> None:
@@ -792,6 +957,11 @@ class LauncherApp:
             text="Skip existing valid GeoTIFF outputs",
             variable=self.extract_skip_existing_var,
         ).grid(row=0, column=0, sticky="w", padx=(0, 18), pady=4)
+        ttk.Checkbutton(
+            toggles,
+            text="Skip NetCDFs already recorded in the extraction manifest",
+            variable=self.extract_skip_manifest_existing_var,
+        ).grid(row=1, column=0, sticky="w", padx=(0, 18), pady=4)
 
         notes = ttk.LabelFrame(parent, text="Notebook Workflow", padding=12)
         notes.grid(row=2, column=0, sticky="ew", pady=(14, 0))
@@ -1002,6 +1172,176 @@ class LauncherApp:
         )
         status.grid(row=4, column=0, sticky="w", pady=(14, 0))
 
+    def build_statistics_tab(self, parent: ttk.Frame) -> None:
+        """Create project statistics, plots, and cleanup controls."""
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(2, weight=1)
+
+        status = ttk.Label(
+            parent,
+            textvariable=self.statistics_status_var,
+            foreground="#184a8b",
+            justify="left",
+        )
+        status.grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        actions = ttk.Frame(parent)
+        actions.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        actions.columnconfigure(4, weight=1)
+        ttk.Button(
+            actions,
+            text="Refresh Statistics",
+            command=self.refresh_project_statistics,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            actions,
+            text="Preview Cleanup",
+            command=self.preview_cleanup_candidates,
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="Delete Selected Cleanup Files",
+            command=self.delete_selected_cleanup_files,
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="Delete All Cleanup Candidates",
+            command=self.delete_all_cleanup_files,
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+
+        inner = ttk.Notebook(parent)
+        inner.grid(row=2, column=0, sticky="nsew")
+
+        overview = ttk.Frame(inner, padding=8)
+        tiles = ttk.Frame(inner, padding=8)
+        cleanup = ttk.Frame(inner, padding=8)
+        inner.add(overview, text="Overview")
+        inner.add(tiles, text="Tiles And Dates")
+        inner.add(cleanup, text="Cleanup")
+
+        overview.columnconfigure(0, weight=1)
+        overview.rowconfigure(0, weight=1)
+        overview.rowconfigure(1, weight=0)
+        self.stats_metrics_tree = ttk.Treeview(
+            overview,
+            columns=("metric", "value"),
+            show="headings",
+            height=12,
+        )
+        self.stats_metrics_tree.heading("metric", text="Metric")
+        self.stats_metrics_tree.heading("value", text="Value")
+        self.stats_metrics_tree.column("metric", width=310, anchor="w")
+        self.stats_metrics_tree.column("value", width=180, anchor="w")
+        self.stats_metrics_tree.grid(row=0, column=0, sticky="nsew")
+        metrics_scroll = ttk.Scrollbar(
+            overview,
+            orient="vertical",
+            command=self.stats_metrics_tree.yview,
+        )
+        metrics_scroll.grid(row=0, column=1, sticky="ns")
+        self.stats_metrics_tree.configure(yscrollcommand=metrics_scroll.set)
+
+        charts = ttk.LabelFrame(overview, text="Plots", padding=8)
+        charts.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        charts.columnconfigure(0, weight=1)
+        charts.columnconfigure(1, weight=1)
+        self.stats_stage_chart_canvas = tk.Canvas(
+            charts,
+            height=150,
+            borderwidth=1,
+            relief="solid",
+            highlightthickness=0,
+            background="white",
+        )
+        self.stats_stage_chart_canvas.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self.stats_tile_chart_canvas = tk.Canvas(
+            charts,
+            height=150,
+            borderwidth=1,
+            relief="solid",
+            highlightthickness=0,
+            background="white",
+        )
+        self.stats_tile_chart_canvas.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+        tiles.columnconfigure(0, weight=1)
+        tiles.columnconfigure(1, weight=1)
+        tiles.rowconfigure(0, weight=1)
+        tile_frame = ttk.LabelFrame(tiles, text="Files By UTM Tile", padding=8)
+        tile_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        tile_frame.columnconfigure(0, weight=1)
+        tile_frame.rowconfigure(0, weight=1)
+        self.stats_tile_tree = ttk.Treeview(
+            tile_frame,
+            columns=("tile", "count"),
+            show="headings",
+            height=16,
+        )
+        self.stats_tile_tree.heading("tile", text="Tile")
+        self.stats_tile_tree.heading("count", text="Count")
+        self.stats_tile_tree.column("tile", width=120, anchor="w")
+        self.stats_tile_tree.column("count", width=80, anchor="e")
+        self.stats_tile_tree.grid(row=0, column=0, sticky="nsew")
+
+        date_frame = ttk.LabelFrame(tiles, text="Files By Date", padding=8)
+        date_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        date_frame.columnconfigure(0, weight=1)
+        date_frame.rowconfigure(0, weight=1)
+        self.stats_date_tree = ttk.Treeview(
+            date_frame,
+            columns=("date", "count"),
+            show="headings",
+            height=16,
+        )
+        self.stats_date_tree.heading("date", text="Date")
+        self.stats_date_tree.heading("count", text="Count")
+        self.stats_date_tree.column("date", width=130, anchor="w")
+        self.stats_date_tree.column("count", width=80, anchor="e")
+        self.stats_date_tree.grid(row=0, column=0, sticky="nsew")
+
+        cleanup.columnconfigure(0, weight=1)
+        cleanup.rowconfigure(1, weight=1)
+        ttk.Label(
+            cleanup,
+            text=(
+                "Cleanup candidates are local intermediate files with downstream manifest proof. "
+                "Preview first, then delete selected rows or all candidates."
+            ),
+            foreground="#555555",
+            justify="left",
+            wraplength=780,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.cleanup_tree = ttk.Treeview(
+            cleanup,
+            columns=("stage", "size", "reason", "path"),
+            show="headings",
+            height=16,
+            selectmode="extended",
+        )
+        self.cleanup_tree.heading("stage", text="Level")
+        self.cleanup_tree.heading("size", text="Size")
+        self.cleanup_tree.heading("reason", text="Reason")
+        self.cleanup_tree.heading("path", text="File")
+        self.cleanup_tree.column("stage", width=90, anchor="w")
+        self.cleanup_tree.column("size", width=90, anchor="e")
+        self.cleanup_tree.column("reason", width=300, anchor="w")
+        self.cleanup_tree.column("path", width=420, anchor="w")
+        self.cleanup_tree.grid(row=1, column=0, sticky="nsew")
+        cleanup_scroll = ttk.Scrollbar(
+            cleanup,
+            orient="vertical",
+            command=self.cleanup_tree.yview,
+        )
+        cleanup_scroll.grid(row=1, column=1, sticky="ns")
+        self.cleanup_tree.configure(yscrollcommand=cleanup_scroll.set)
+
+        ttk.Label(
+            parent,
+            textvariable=self.statistics_summary_var,
+            foreground="#555555",
+            justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+
     def build_mosaic_tab(self, parent: ttk.Frame) -> None:
         """Create the SWOT GeoTIFF mosaic controls."""
         parent.columnconfigure(0, weight=1)
@@ -1080,6 +1420,13 @@ class LauncherApp:
             self.mosaic_report_var,
             "CSV report path for planned, created, skipped, and invalid groups",
         )
+        row = self.add_entry_row(
+            form,
+            row,
+            "Mosaic manifest CSV",
+            self.mosaic_manifest_var,
+            "Cumulative mosaic status; records source signatures for incremental updates",
+        )
 
         toggles = ttk.LabelFrame(parent, text="Options", padding=12)
         toggles.grid(row=3, column=0, sticky="ew", pady=(14, 0))
@@ -1101,9 +1448,14 @@ class LauncherApp:
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=(0, 18), pady=4)
         ttk.Checkbutton(
             toggles,
+            text="Skip mosaics already recorded with the same source set",
+            variable=self.mosaic_skip_manifest_existing_var,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=(0, 18), pady=4)
+        ttk.Checkbutton(
+            toggles,
             text="Set Upload origin folder to mosaic output after successful run",
             variable=self.mosaic_set_upload_folder_var,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=(0, 18), pady=4)
+        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=(0, 18), pady=4)
 
         notes = ttk.LabelFrame(parent, text="Grouping", padding=12)
         notes.grid(row=4, column=0, sticky="ew", pady=(14, 0))
@@ -1267,6 +1619,353 @@ class LauncherApp:
         if selected:
             self.download_report_var.set(selected)
 
+    def browse_download_manifest_file(self) -> None:
+        """Let the user choose the cumulative download manifest CSV path."""
+        selected = filedialog.asksaveasfilename(
+            title="Choose the download manifest CSV path",
+            initialfile=Path(self.download_manifest_var.get() or "download_manifest.csv").name,
+            initialdir=str(Path(self.download_manifest_var.get() or PROJECT_ROOT).parent),
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if selected:
+            self.download_manifest_var.set(selected)
+
+    def new_project(self) -> None:
+        """Create a new GeeUp project from the current GUI settings."""
+        root = filedialog.askdirectory(
+            title="Choose a folder for the new GeeUp project",
+            initialdir=str(PROJECT_ROOT),
+        )
+        if not root:
+            return
+        default_name = Path(root).name or "GeeUp Project"
+        name = simpledialog.askstring(
+            "New GeeUp project",
+            "Project name:",
+            initialvalue=default_name,
+            parent=self.root,
+        )
+        if name is None:
+            return
+        try:
+            project = create_project(root, name, self.build_config())
+        except OSError as exc:
+            messagebox.showerror(
+                "Could not create project",
+                f"Failed to create the GeeUp project folders:\n{exc}",
+            )
+            return
+        self.apply_project(project, write_config=True)
+        messagebox.showinfo("Project created", f"Created project:\n{project.project_file}")
+
+    def open_project(self) -> None:
+        """Open a GeeUp project.yaml file and populate the GUI."""
+        selected = filedialog.askopenfilename(
+            title="Open GeeUp project.yaml",
+            initialdir=str(PROJECT_ROOT),
+            filetypes=[("GeeUp project", "project.yaml"), ("YAML files", "*.yaml"), ("All files", "*.*")],
+        )
+        if not selected:
+            return
+        try:
+            project = load_project(selected)
+            ensure_project_structure(project.root)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            messagebox.showerror(
+                "Could not open project",
+                f"Failed to open the GeeUp project:\n{exc}",
+            )
+            return
+        self.apply_project(project, write_config=True)
+        messagebox.showinfo("Project opened", f"Opened project:\n{project.project_file}")
+
+    def save_project_action(self) -> None:
+        """Save the current GUI state to the active project."""
+        root = self.current_project_root_var.get().strip()
+        if not root:
+            self.save_project_as()
+            return
+        data = self.build_config()
+        self.write_config_data(data)
+        try:
+            path = save_project_config(
+                root,
+                self.current_project_name_var.get(),
+                data,
+                self.project_download_history,
+                created_at=self.project_created_at,
+            )
+        except OSError as exc:
+            messagebox.showerror(
+                "Could not save project",
+                f"Failed to save the GeeUp project:\n{exc}",
+            )
+            return
+        self.project_status_var.set(f"Saved project to {path}")
+        messagebox.showinfo("Project saved", f"Saved project:\n{path}")
+
+    def save_project_as(self) -> None:
+        """Save current settings as a new project root."""
+        root = filedialog.askdirectory(
+            title="Choose a folder for the GeeUp project",
+            initialdir=self.current_project_root_var.get() or str(PROJECT_ROOT),
+        )
+        if not root:
+            return
+        default_name = (
+            self.current_project_name_var.get()
+            if self.current_project_root_var.get().strip()
+            else Path(root).name
+        )
+        name = simpledialog.askstring(
+            "Save GeeUp project as",
+            "Project name:",
+            initialvalue=default_name or "GeeUp Project",
+            parent=self.root,
+        )
+        if name is None:
+            return
+        try:
+            ensure_project_structure(root)
+            data = config_for_project(self.build_config(), root)
+            path = save_project_config(root, name, data, [], created_at="")
+            project = load_project(path)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            messagebox.showerror(
+                "Could not save project",
+                f"Failed to save the GeeUp project:\n{exc}",
+            )
+            return
+        self.apply_project(project, write_config=True)
+        messagebox.showinfo("Project saved", f"Saved project:\n{path}")
+
+    def write_config_data(self, data: Dict[str, Any]) -> None:
+        """Write the active config.yaml mirror."""
+        with CONFIG_PATH.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=False)
+
+    def apply_project(self, project: GeeUpProject, write_config: bool = False) -> None:
+        """Apply a loaded project to the GUI and optionally refresh config.yaml."""
+        project.config = config_for_project(project.config, project.root)
+        self.current_project_name_var.set(project.name)
+        self.current_project_root_var.set(str(project.root))
+        self.project_created_at = project.created_at
+        self.project_download_history = [dict(row) for row in project.download_history]
+        self.apply_config_to_ui(project.config)
+        self.refresh_tile_presets()
+        self.project_status_var.set(f"Project open: {project.name}")
+        if write_config:
+            data = self.build_config()
+            self.write_config_data(data)
+
+    def try_auto_open_project_from_config(self) -> None:
+        """Auto-open the project whose root is stored in the active config mirror."""
+        root_text = str(self.data.get("processing", {}).get("root", "")).strip()
+        if not root_text:
+            return
+        project_file = Path(root_text) / "project.yaml"
+        if not project_file.exists():
+            return
+        try:
+            project = load_project(project_file)
+            ensure_project_structure(project.root)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            self.project_status_var.set(
+                f"config.yaml points at a project folder, but it could not be opened: {exc}"
+            )
+            return
+        self.apply_project(project, write_config=True)
+        self.project_status_var.set(
+            f"Project auto-opened from config.yaml: {project.name}"
+        )
+
+    def require_active_project(self, action: str = "continue") -> bool:
+        """Require an explicitly active GUI project before writing or running tools."""
+        if self.current_project_root_var.get().strip():
+            return True
+        message = (
+            f"Create or open a GeeUp project before you {action}.\n\n"
+            "The GUI may still show paths from config.yaml, including paths from a previous session, "
+            "but no project is currently active. Opening a project makes the output folders, "
+            "download manifest, reports, and Earth Engine target explicit."
+        )
+        self.project_status_var.set("No project open. Create or open a project before running workflow steps.")
+        messagebox.showwarning("No project open", message)
+        return False
+
+    def prepare_project_update(self) -> None:
+        """Set the Download date range from project download history."""
+        if not self.require_active_project("prepare an update"):
+            return
+        start, end = prepare_update_dates(self.project_download_history, today=date.today())
+        self.download_end_date_var.set(end)
+        if start:
+            self.download_start_date_var.set(start)
+            self.download_status_var.set(
+                f"Prepared project update window from {start} through {end}."
+            )
+            self.project_status_var.set(
+                f"Prepared update from the last successful download end date: {start}"
+            )
+            return
+        self.project_status_var.set(
+            "No successful project download history yet; set the start date manually."
+        )
+        messagebox.showinfo(
+            "No download history",
+            "This project has no successful download history yet. The end date was set to today; choose the start date manually.",
+        )
+
+    def apply_config_to_ui(self, data: Dict[str, Any]) -> None:
+        """Populate existing Tkinter variables from a config dictionary."""
+        self.data = data or {}
+        processing_data = self.data.get("processing", {})
+        download_data = self.data.get("download", {})
+        duplicate_data = self.data.get("duplicates", {})
+        extract_data = self.data.get("extract", {})
+        metadata_data = self.data.get("metadata", {})
+        mosaic_data = self.data.get("mosaic", {})
+        gdal_data = self.data.get("gdal", {})
+        upload_data = self.data.get("upload", {})
+        execution_data = self.data.get("execution", {})
+        chrome_data = self.data.get("chrome", {})
+
+        processing_root = processing_data.get("root", DEFAULT_PROCESSING_PATHS["root"])
+        raw_downloads = processing_data.get(
+            "raw_downloads", DEFAULT_PROCESSING_PATHS["raw_downloads"]
+        )
+        extracted_geotiffs = processing_data.get(
+            "extracted_geotiffs", DEFAULT_PROCESSING_PATHS["extracted_geotiffs"]
+        )
+        mosaic_outputs = processing_data.get(
+            "mosaics", DEFAULT_PROCESSING_PATHS["mosaics"]
+        )
+        processing_logs = processing_data.get("logs", DEFAULT_PROCESSING_PATHS["logs"])
+
+        self.processing_root_var.set(processing_root)
+        self.processing_raw_downloads_var.set(raw_downloads)
+        self.processing_extracted_geotiffs_var.set(extracted_geotiffs)
+        self.processing_mosaics_var.set(mosaic_outputs)
+        self.processing_logs_var.set(processing_logs)
+
+        download_short_name = str(
+            download_data.get("collection_short_name", DEFAULT_COLLECTION_SHORT_NAME)
+        ).strip()
+        download_label = str(
+            download_data.get(
+                "collection_version_label",
+                COLLECTION_LABEL_BY_SHORT_NAME.get(download_short_name, DEFAULT_COLLECTION_LABEL),
+            )
+        ).strip()
+        if download_label not in COLLECTION_LABELS:
+            download_label = COLLECTION_LABEL_BY_SHORT_NAME.get(
+                download_short_name,
+                DEFAULT_COLLECTION_LABEL,
+            )
+        try:
+            selected_tiles = normalize_utm_tiles(download_data.get("utm_tiles", []))
+        except ValueError:
+            selected_tiles = []
+        self.download_collection_var.set(download_label)
+        self.download_start_date_var.set(str(download_data.get("start_date", "")))
+        self.download_end_date_var.set(str(download_data.get("end_date", "")))
+        self.download_output_var.set(download_data.get("output_folder", raw_downloads))
+        max_granules = download_data.get("max_granules")
+        self.download_max_granules_var.set(
+            "" if max_granules in (None, "") else str(max_granules)
+        )
+        self.download_report_var.set(
+            download_data.get("report_csv", f"{processing_logs}/download_preview.csv")
+        )
+        self.download_manifest_var.set(
+            download_data.get("manifest_csv", f"{processing_logs}/download_manifest.csv")
+        )
+        self.download_threads_var.set(str(download_data.get("threads", 6)))
+        self.download_batch_size_var.set(str(download_data.get("batch_size", 25)))
+        self.download_skip_existing_var.set(bool(download_data.get("skip_existing", True)))
+        self.download_skip_manifest_existing_var.set(
+            bool(download_data.get("skip_manifest_existing", True))
+        )
+        self.download_selected_tiles = set(selected_tiles)
+        self.download_selected_tiles_var.set(", ".join(selected_tiles))
+        self.refresh_download_tile_list()
+
+        self.duplicate_input_var.set(duplicate_data.get("input_folder", raw_downloads))
+        self.duplicate_moved_folder_var.set(
+            duplicate_data.get("moved_folder_name", "moved")
+        )
+        self.duplicate_log_folder_var.set(duplicate_data.get("log_folder", processing_logs))
+        self.duplicate_recursive_var.set(bool(duplicate_data.get("recursive", False)))
+
+        self.extract_input_var.set(extract_data.get("input_folder", raw_downloads))
+        self.extract_output_var.set(extract_data.get("output_folder", extracted_geotiffs))
+        self.extract_crs_mode_var.set(
+            EXTRACT_CRS_LABEL_BY_VALUE.get(
+                extract_data.get("target_crs_mode", "original"),
+                "Original projection",
+            )
+        )
+        self.extract_year_selection_var.set(str(extract_data.get("year_selection", "all")))
+        limit_files = extract_data.get("limit_files")
+        self.extract_limit_files_var.set("" if limit_files in (None, "") else str(limit_files))
+        self.extract_manifest_var.set(
+            extract_data.get("manifest_csv", f"{processing_logs}/extract_manifest.csv")
+        )
+        self.extract_errors_var.set(
+            extract_data.get("errors_csv", f"{processing_logs}/extract_errors.csv")
+        )
+        self.extract_skip_existing_var.set(bool(extract_data.get("skip_existing", True)))
+        self.extract_skip_manifest_existing_var.set(
+            bool(extract_data.get("skip_manifest_existing", True))
+        )
+
+        self.folder_var.set(self.data.get("input_folder", mosaic_outputs))
+        self.destination_var.set(self.data.get("destination_parent", ""))
+        self.batch_size_var.set(str(upload_data.get("batch_size", 50)))
+        self.max_active_var.set(str(upload_data.get("max_active_ingestions", 0)))
+        self.prefix_var.set(upload_data.get("prefix", ""))
+        self.suffix_var.set(upload_data.get("suffix", ""))
+        self.pyramiding_var.set(
+            upload_data.get("pyramiding_policy", {}).get("default", "") or ""
+        )
+        self.profile_dir_var.set(chrome_data.get("user_data_dir", "./chrome-profile"))
+        self.retry_attempts_var.set(str(upload_data.get("retry_attempts", 3)))
+        self.retry_wait_var.set(str(upload_data.get("retry_wait_seconds", 3.0)))
+        self.gdal_python_var.set(gdal_data.get("python", str(DEFAULT_GDAL_PYTHON)))
+        self.recursive_var.set(bool(upload_data.get("recursive", False)))
+        self.fail_fast_var.set(bool(upload_data.get("fail_fast", False)))
+        self.headless_var.set(bool(chrome_data.get("headless", False)))
+
+        self.mosaic_input_var.set(mosaic_data.get("input_folder", extracted_geotiffs))
+        self.mosaic_output_var.set(mosaic_data.get("output_folder", mosaic_outputs))
+        self.mosaic_grouping_mode_var.set(
+            MOSAIC_GROUPING_LABEL_BY_VALUE.get(
+                mosaic_data.get("grouping_mode", "utm_zone"),
+                "Original projection / split by UTM zone",
+            )
+        )
+        self.mosaic_target_crs_label_var.set(mosaic_data.get("target_crs_label", ""))
+        self.mosaic_report_var.set(
+            mosaic_data.get("report_csv", f"{processing_logs}/mosaic_report.csv")
+        )
+        self.mosaic_manifest_var.set(
+            mosaic_data.get("manifest_csv", f"{processing_logs}/mosaic_manifest.csv")
+        )
+        self.mosaic_recursive_var.set(bool(mosaic_data.get("recursive", False)))
+        self.mosaic_overwrite_var.set(bool(mosaic_data.get("overwrite", False)))
+        self.mosaic_skip_manifest_existing_var.set(
+            bool(mosaic_data.get("skip_manifest_existing", True))
+        )
+        self.mosaic_write_world_file_var.set(bool(mosaic_data.get("write_world_file", True)))
+
+        self.resume_var.set(bool(execution_data.get("resume", True)))
+        self.dry_run_var.set(bool(execution_data.get("dry_run", True)))
+        self.metadata_enabled_var.set(bool(metadata_data.get("enabled", True)))
+        self.metadata_require_match_var.set(bool(metadata_data.get("require_match", True)))
+        self.metadata_add_end_time_var.set(bool(metadata_data.get("add_end_time", True)))
+        self.load_download_report_preview(limit=100)
+
     def browse_gdal_python(self) -> None:
         """Let the user choose the Python executable from the GDAL conda env."""
         selected = filedialog.askopenfilename(
@@ -1386,18 +2085,17 @@ class LauncherApp:
                 self.download_tile_listbox.selection_set(tk.END)
 
     def on_download_tile_select(self, _event: tk.Event | None = None) -> None:
-        """Update selected tile state from the current listbox selection."""
+        """Add the current listbox selection to the selected tile state."""
         if not hasattr(self, "download_tile_listbox"):
             return
         selected_indices = set(self.download_tile_listbox.curselection())
         for index, tile in enumerate(self.download_visible_utm_tiles):
             if index in selected_indices:
                 self.download_selected_tiles.add(tile)
-            else:
-                self.download_selected_tiles.discard(tile)
         self.download_selected_tiles_var.set(
             ", ".join(sorted(self.download_selected_tiles))
         )
+        self.refresh_download_tile_list()
 
     def apply_download_tiles_from_text(self) -> None:
         """Parse the selected-tile text box and apply it to the listbox."""
@@ -1415,6 +2113,134 @@ class LauncherApp:
         self.download_selected_tiles.clear()
         self.download_selected_tiles_var.set("")
         self.refresh_download_tile_list()
+
+    def set_download_tiles(self, tiles: list[str]) -> None:
+        """Set the Download tab's canonical selected UTM tiles."""
+        normalized = normalize_utm_tiles(tiles)
+        self.download_selected_tiles = set(normalized)
+        self.download_selected_tiles_var.set(", ".join(normalized))
+        self.refresh_download_tile_list()
+
+    def refresh_tile_presets(self) -> None:
+        """Refresh built-in and project tile preset choices."""
+        choices: dict[str, TilePreset] = {}
+        for name, preset in load_builtin_tile_presets().items():
+            choices[f"Continent: {name}"] = preset
+        project_root = self.current_project_root_var.get().strip()
+        if project_root:
+            for name, preset in load_project_tile_profiles(project_root).items():
+                choices[f"Project: {name}"] = preset
+        self.tile_preset_choices = choices
+        values = sorted(choices)
+        if hasattr(self, "tile_preset_combo"):
+            self.tile_preset_combo.configure(values=values)
+        current = self.tile_preset_var.get()
+        if current not in choices:
+            self.tile_preset_var.set(values[0] if values else "")
+
+    def apply_tile_preset(self) -> None:
+        """Apply a selected tile preset to the manual UTM selector."""
+        self.refresh_tile_presets()
+        label = self.tile_preset_var.get()
+        preset = self.tile_preset_choices.get(label)
+        if preset is None:
+            messagebox.showerror(
+                "No tile preset selected",
+                "Please choose a continent or project tile preset first.",
+            )
+            return
+        self.set_download_tiles(preset.tiles)
+        self.download_status_var.set(
+            f"Applied tile preset '{preset.name}' with {len(preset.tiles)} tile(s)."
+        )
+
+    def open_utm_map_selector(self) -> None:
+        """Open the visual UTM tile selector dialog."""
+        try:
+            selected_tiles = self.current_download_tiles()
+        except ValueError as exc:
+            messagebox.showerror("Invalid UTM tiles", str(exc))
+            return
+        try:
+            geometry = load_display_geometry()
+        except (OSError, ValueError, KeyError) as exc:
+            messagebox.showerror(
+                "UTM map geometry unavailable",
+                (
+                    "Could not load the visual UTM selector geometry. "
+                    "Regenerate it with build_spatial_presets.py.\n\n"
+                    f"{exc}"
+                ),
+            )
+            return
+        self.refresh_tile_presets()
+        coverage_tiles = self.current_manifest_coverage_tiles()
+        UTMMapSelectorDialog(
+            self.root,
+            geometry,
+            selected_tiles,
+            self.apply_utm_map_selection,
+            preset_choices=self.tile_preset_choices,
+            coverage_tiles=coverage_tiles,
+        )
+
+    def current_manifest_coverage_tiles(self) -> list[str]:
+        """Return UTM tiles with at least one downloaded granule in the manifest."""
+        manifest_path = Path(self.download_manifest_var.get().strip() or "")
+        try:
+            return manifest_downloaded_tiles(manifest_path)
+        except OSError:
+            return []
+
+    def apply_utm_map_selection(self, tiles: list[str]) -> None:
+        """Apply visual selector output to the Download tab."""
+        self.set_download_tiles(tiles)
+        self.download_status_var.set(
+            f"Applied {len(tiles)} UTM tile(s) from the map selector."
+        )
+
+    def save_selected_tiles_as_preset(self) -> None:
+        """Save the current manual UTM selection as a project preset."""
+        project_root = self.current_project_root_var.get().strip()
+        if not project_root:
+            messagebox.showerror(
+                "No project open",
+                "Create or open a project before saving tile presets.",
+            )
+            return
+        try:
+            tiles = self.current_download_tiles()
+        except ValueError as exc:
+            messagebox.showerror("Invalid UTM tiles", str(exc))
+            return
+        if not tiles:
+            messagebox.showerror(
+                "No UTM tiles selected",
+                "Select one or more UTM tiles before saving a preset.",
+            )
+            return
+        name = simpledialog.askstring(
+            "Save tile preset",
+            "Preset name:",
+            initialvalue="New tile preset",
+            parent=self.root,
+        )
+        if name is None:
+            return
+        try:
+            path = save_tile_profile(project_root, name, tiles)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(
+                "Could not save tile preset",
+                f"Failed to save the tile preset:\n{exc}",
+            )
+            return
+        self.refresh_tile_presets()
+        label = f"Project: {name.strip() or path.stem}"
+        if label in self.tile_preset_choices:
+            self.tile_preset_var.set(label)
+        self.project_status_var.set(f"Saved tile preset to {path}")
+        messagebox.showinfo("Tile preset saved", f"Saved tile preset:\n{path}")
 
     def current_download_tiles(self) -> list[str]:
         """Return the selected tiles from text/listbox state."""
@@ -1434,7 +2260,8 @@ class LauncherApp:
         max_granules = self.parse_optional_int_or_none(
             self.download_max_granules_var.get()
         )
-        threads = self.parse_int_or_default(self.download_threads_var.get(), 4)
+        threads = self.parse_int_or_default(self.download_threads_var.get(), 6)
+        batch_size = self.parse_int_or_default(self.download_batch_size_var.get(), 25)
         return DownloadConfig(
             collection_short_name=self.selected_download_collection_short_name(),
             collection_version_label=self.download_collection_var.get(),
@@ -1444,8 +2271,11 @@ class LauncherApp:
             utm_tiles=self.current_download_tiles(),
             max_granules=max_granules,
             report_csv=Path(self.download_report_var.get().strip()),
+            manifest_csv=Path(self.download_manifest_var.get().strip()),
             skip_existing=self.download_skip_existing_var.get(),
+            skip_manifest_existing=self.download_skip_manifest_existing_var.get(),
             threads=threads,
+            batch_size=batch_size,
             base_dir=PROJECT_ROOT,
         )
 
@@ -1463,6 +2293,12 @@ class LauncherApp:
                 "Please choose a CSV path for the download preview/report.",
             )
             return False
+        if not self.download_manifest_var.get().strip():
+            messagebox.showerror(
+                "Missing download manifest CSV",
+                "Please choose a CSV path for the cumulative download manifest.",
+            )
+            return False
         try:
             config = self.download_config_from_ui()
             from swot_download_tool import validate_config
@@ -1475,10 +2311,11 @@ class LauncherApp:
         try:
             config.output_folder.mkdir(parents=True, exist_ok=True)
             config.report_csv.parent.mkdir(parents=True, exist_ok=True)
+            config.manifest_csv.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             messagebox.showerror(
                 "Could not create download folders",
-                f"Failed to create download output/report folders:\n{exc}",
+                f"Failed to create download output/report/manifest folders:\n{exc}",
             )
             return False
         return True
@@ -1750,6 +2587,16 @@ class LauncherApp:
                 "Target CRS label may contain only letters, numbers, and underscores.",
             )
             return False
+        try:
+            Path(output_folder).mkdir(parents=True, exist_ok=True)
+            Path(self.mosaic_report_var.get().strip()).parent.mkdir(parents=True, exist_ok=True)
+            Path(self.mosaic_manifest_var.get().strip()).parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Could not create mosaic folders",
+                f"Failed to create mosaic output/report/manifest folders:\n{exc}",
+            )
+            return False
 
         return True
 
@@ -1797,10 +2644,17 @@ class LauncherApp:
                 ),
                 "report_csv": self.download_report_var.get().strip()
                 or f"{DEFAULT_PROCESSING_PATHS['logs']}/download_preview.csv",
+                "manifest_csv": self.download_manifest_var.get().strip()
+                or f"{DEFAULT_PROCESSING_PATHS['logs']}/download_manifest.csv",
                 "skip_existing": self.download_skip_existing_var.get(),
+                "skip_manifest_existing": self.download_skip_manifest_existing_var.get(),
                 "threads": self.parse_int_or_default(
                     self.download_threads_var.get(),
-                    4,
+                    6,
+                ),
+                "batch_size": self.parse_int_or_default(
+                    self.download_batch_size_var.get(),
+                    25,
                 ),
             },
             "duplicates": {
@@ -1825,6 +2679,7 @@ class LauncherApp:
                     self.extract_limit_files_var.get()
                 ),
                 "skip_existing": self.extract_skip_existing_var.get(),
+                "skip_manifest_existing": self.extract_skip_manifest_existing_var.get(),
                 "resampling_alg": "near",
                 "manifest_csv": self.extract_manifest_var.get().strip()
                 or f"{DEFAULT_PROCESSING_PATHS['logs']}/extract_manifest.csv",
@@ -1844,6 +2699,9 @@ class LauncherApp:
                 "write_world_file": self.mosaic_write_world_file_var.get(),
                 "extensions": [".tif", ".tiff"],
                 "report_csv": mosaic_report_csv,
+                "manifest_csv": self.mosaic_manifest_var.get().strip()
+                or str(Path(mosaic_report_csv).with_name("mosaic_manifest.csv")),
+                "skip_manifest_existing": self.mosaic_skip_manifest_existing_var.get(),
                 "mixed_crid_report_csv": mixed_crid_report_csv,
             },
             "chrome": {
@@ -1902,9 +2760,22 @@ class LauncherApp:
                 },
             },
             "artifacts": {
-                "logs_dir": "./logs",
-                "artifacts_dir": "./artifacts",
-                "report_csv": "./reports/upload_report.csv",
+                "logs_dir": self.processing_logs_var.get().strip()
+                or f"{DEFAULT_PROCESSING_PATHS['logs']}",
+                "artifacts_dir": str(
+                    Path(
+                        self.processing_logs_var.get().strip()
+                        or f"{DEFAULT_PROCESSING_PATHS['logs']}"
+                    )
+                    / "upload_artifacts"
+                ),
+                "report_csv": str(
+                    Path(
+                        self.processing_logs_var.get().strip()
+                        or f"{DEFAULT_PROCESSING_PATHS['logs']}"
+                    )
+                    / "upload_report.csv"
+                ),
             },
         }
 
@@ -1917,8 +2788,11 @@ class LauncherApp:
         validate_mosaic: bool = False,
         validate_duplicates: bool = False,
         validate_extract: bool = False,
+        require_project: bool = True,
     ) -> bool:
         """Save config.yaml from the current form values."""
+        if require_project and not self.require_active_project("save or run this workflow step"):
+            return False
         if validate_download and not self.validate_download():
             return False
         if validate_duplicates and not self.validate_duplicate_removal():
@@ -1930,8 +2804,23 @@ class LauncherApp:
         if validate_mosaic and not self.validate_mosaic():
             return False
         data = self.build_config(dry_run_override=dry_run_override)
-        with CONFIG_PATH.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=False)
+        self.write_config_data(data)
+        project_root = self.current_project_root_var.get().strip()
+        if project_root:
+            try:
+                save_project_config(
+                    project_root,
+                    self.current_project_name_var.get(),
+                    data,
+                    self.project_download_history,
+                    created_at=self.project_created_at,
+                )
+            except OSError as exc:
+                messagebox.showerror(
+                    "Could not save project",
+                    f"Saved config.yaml, but failed to save the active project:\n{exc}",
+                )
+                return False
         self.download_status_var.set(f"Saved config to {CONFIG_PATH}")
         self.status_var.set(f"Saved config to {CONFIG_PATH}")
         self.mosaic_status_var.set(f"Saved config to {CONFIG_PATH}")
@@ -2103,14 +2992,26 @@ class LauncherApp:
         self.download_status_var.set("Started SWOT download. Searching CMR...")
         self.download_progress_var.set(0.0)
         self.download_progress_text_var.set("Progress: starting")
+        self.download_stop_event = threading.Event()
         thread = threading.Thread(
             target=self.run_download_process,
-            args=(config,),
+            args=(config, self.download_stop_event),
             daemon=True,
         )
         thread.start()
 
-    def run_download_process(self, config: DownloadConfig) -> None:
+    def stop_download(self) -> None:
+        """Request the background download loop to stop after the current file."""
+        if self.download_stop_event is None:
+            self.download_status_var.set("No active download to stop.")
+            return
+        self.download_stop_event.set()
+        self.download_status_var.set(
+            "Stop requested. The current file will finish or fail, then the download loop will stop."
+        )
+        self.download_progress_text_var.set("Progress: stop requested")
+
+    def run_download_process(self, config: DownloadConfig, stop_event: threading.Event) -> None:
         """Run search and downloads off the Tkinter UI thread."""
         try:
             result = run_download(
@@ -2122,6 +3023,7 @@ class LauncherApp:
                     total,
                     message,
                 ),
+                stop_event=stop_event,
             )
         except Exception as exc:
             self.root.after(0, self.finish_download_process_error, exc)
@@ -2130,6 +3032,7 @@ class LauncherApp:
 
     def finish_download_process_error(self, exc: Exception) -> None:
         """Show a failed download preview or run."""
+        self.download_stop_event = None
         self.download_status_var.set(f"Download module failed: {exc}")
         messagebox.showerror(
             "Download module failed",
@@ -2138,38 +3041,110 @@ class LauncherApp:
 
     def finish_download_process(self, result: Any) -> None:
         """Update the UI after a download run exits."""
+        self.download_stop_event = None
         self.load_download_report_preview(limit=300)
         self.download_progress_var.set(100.0)
-        if not result.failures:
+        matched_count = len(result.preview.granules)
+        missing_count = len(result.missing_granules)
+        complete_count = result.complete_count
+        if result.all_complete and not result.failures and not result.stopped:
             self.apply_download_handoff_to_processing()
+            self.record_project_download_history(result)
             self.download_progress_text_var.set("Progress: download complete")
             self.download_status_var.set(
-                f"Download finished. Downloaded {len(result.downloaded_files)} file(s), skipped {len(result.skipped_existing)} existing file(s)."
+                f"Download finished and verified. All {matched_count} matched granule(s) are accounted for locally or in the manifest."
             )
             messagebox.showinfo(
                 "Download finished",
                 (
+                    f"Matched granules: {matched_count}\n"
+                    f"Accounted for: {complete_count}\n"
                     f"Downloaded files: {len(result.downloaded_files)}\n"
                     f"Skipped existing: {len(result.skipped_existing)}\n"
+                    f"Skipped manifest-known: {len(result.skipped_manifest)}\n"
+                    "Missing files: 0\n"
                     f"Report CSV:\n{result.report_csv}\n\n"
-                    "The output folder is now set as the input for Duplicate Removal and Extraction."
+                    "All matched granules are accounted for. The output folder is now set as the input for Duplicate Removal and Extraction."
                 ),
             )
             return
 
-        self.download_progress_text_var.set("Progress: download finished with failures")
+        self.record_project_download_history(result)
+        if result.stopped:
+            self.download_progress_text_var.set("Progress: download stopped")
+            title = "Download stopped"
+            summary = (
+                f"Download stopped. Accounted for: {complete_count}/{matched_count}. "
+                f"Missing files: {missing_count}. Restart with skip-existing enabled to continue."
+            )
+        else:
+            self.download_progress_text_var.set("Progress: download finished with missing files")
+            title = "Download verification found missing files"
+            summary = (
+                f"Download finished but not all matched files are present. "
+                f"Accounted for: {complete_count}/{matched_count}. Missing files: {missing_count}."
+            )
         self.download_status_var.set(
-            f"Download finished with {len(result.failures)} failed granule(s). Review the report CSV."
+            f"{summary} Review the report CSV."
         )
         messagebox.showwarning(
-            "Download finished with failures",
+            title,
             (
+                f"Matched granules: {matched_count}\n"
+                f"Accounted for: {complete_count}\n"
+                f"Missing files: {missing_count}\n"
                 f"Downloaded files: {len(result.downloaded_files)}\n"
                 f"Skipped existing: {len(result.skipped_existing)}\n"
+                f"Skipped manifest-known: {len(result.skipped_manifest)}\n"
                 f"Failed granules: {len(result.failures)}\n"
+                f"Stopped by user: {'yes' if result.stopped else 'no'}\n"
                 f"Report CSV:\n{result.report_csv}"
             ),
         )
+
+    def record_project_download_history(self, result: Any) -> None:
+        """Append a project download-history entry after a download run."""
+        project_root = self.current_project_root_var.get().strip()
+        if not project_root:
+            return
+        entry = {
+            "timestamp": datetime.now().replace(microsecond=0).isoformat(),
+            "status": (
+                "success"
+                if result.all_complete and not result.failures and not result.stopped
+                else "stopped" if result.stopped else "failed"
+            ),
+            "collection_short_name": self.selected_download_collection_short_name(),
+            "collection_version_label": self.download_collection_var.get(),
+            "utm_tiles": self.download_tiles_for_config(),
+            "start_date": self.download_start_date_var.get().strip(),
+            "end_date": self.download_end_date_var.get().strip(),
+            "matched_count": len(result.preview.granules),
+            "downloaded_count": len(result.downloaded_files),
+            "skipped_count": len(result.skipped_existing),
+            "skipped_manifest_count": len(result.skipped_manifest),
+            "failed_count": len(result.failures),
+            "missing_count": len(result.missing_granules),
+            "complete_count": result.complete_count,
+            "stopped": result.stopped,
+            "report_csv": str(result.report_csv or ""),
+            "manifest_csv": self.download_manifest_var.get().strip(),
+        }
+        self.project_download_history.append(entry)
+        data = self.build_config()
+        self.write_config_data(data)
+        try:
+            save_project_config(
+                project_root,
+                self.current_project_name_var.get(),
+                data,
+                self.project_download_history,
+                created_at=self.project_created_at,
+            )
+        except OSError as exc:
+            self.project_status_var.set(f"Could not update project download history: {exc}")
+            return
+        self.project_status_var.set("Recorded download history in the active project.")
 
     def apply_download_handoff_to_processing(self) -> None:
         """Point the next processing steps at the download output folder."""
@@ -2358,6 +3333,9 @@ class LauncherApp:
                             row.get("start_time", ""),
                             row.get("end_time", ""),
                             row.get("size_mb", ""),
+                            row.get("downloaded", ""),
+                            row.get("raw_exists", ""),
+                            row.get("known_from_manifest", ""),
                             row.get("status", ""),
                         ),
                     )
@@ -2365,6 +3343,228 @@ class LauncherApp:
         except OSError:
             return count
         return count
+
+    def clear_treeview(self, tree: ttk.Treeview) -> None:
+        """Remove all rows from a Treeview."""
+        for item in tree.get_children():
+            tree.delete(item)
+
+    def refresh_project_statistics(self) -> None:
+        """Refresh project statistics from manifests, reports, and local files."""
+        if not self.require_active_project("refresh project statistics"):
+            return
+        try:
+            insights = collect_project_insights(self.build_config())
+        except Exception as exc:
+            self.statistics_status_var.set(f"Could not refresh project statistics: {exc}")
+            messagebox.showerror(
+                "Could not refresh statistics",
+                f"Failed to read project manifests or folders:\n{exc}",
+            )
+            return
+
+        self.clear_treeview(self.stats_metrics_tree)
+        for metric, value in insights.metrics.items():
+            self.stats_metrics_tree.insert("", tk.END, values=(metric, value))
+        if insights.stage_status_counts:
+            self.stats_metrics_tree.insert("", tk.END, values=("", ""))
+            self.stats_metrics_tree.insert("", tk.END, values=("Stage status counts", ""))
+            for stage, status, count in insights.stage_status_counts:
+                self.stats_metrics_tree.insert(
+                    "",
+                    tk.END,
+                    values=(f"{stage}: {status}", str(count)),
+                )
+
+        self.clear_treeview(self.stats_tile_tree)
+        for tile, count in insights.tile_counts:
+            self.stats_tile_tree.insert("", tk.END, values=(tile, str(count)))
+
+        self.clear_treeview(self.stats_date_tree)
+        for date_text, count in insights.date_counts:
+            self.stats_date_tree.insert("", tk.END, values=(date_text, str(count)))
+
+        self.cleanup_candidates = list(insights.cleanup_candidates)
+        self.populate_cleanup_tree(self.cleanup_candidates)
+
+        stage_totals: Dict[str, int] = {}
+        for stage, _status, count in insights.stage_status_counts:
+            if stage == "workflow":
+                continue
+            stage_totals[stage] = stage_totals.get(stage, 0) + count
+        self.draw_bar_chart(
+            self.stats_stage_chart_canvas,
+            list(stage_totals.items()),
+            "Rows by processing stage",
+        )
+        self.draw_bar_chart(
+            self.stats_tile_chart_canvas,
+            insights.tile_counts[:12],
+            "Top UTM tiles by recorded files",
+        )
+
+        coverage = insights.metrics.get("Date coverage", "") or "not available"
+        cleanup_size = insights.metrics.get("Cleanup candidate size", "0 B")
+        self.statistics_summary_var.set(
+            f"Date coverage: {coverage}. Cleanup preview: {len(self.cleanup_candidates)} files, {cleanup_size}."
+        )
+        self.statistics_status_var.set("Project statistics refreshed.")
+
+    def draw_bar_chart(
+        self,
+        canvas: tk.Canvas,
+        values: Sequence[tuple[str, int]],
+        title: str,
+    ) -> None:
+        """Draw a small horizontal bar chart without external plotting dependencies."""
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 340)
+        height = int(str(canvas.cget("height")) or "150")
+        canvas.create_text(8, 8, anchor="nw", text=title, font=("Segoe UI", 9, "bold"))
+        if not values:
+            canvas.create_text(8, 42, anchor="nw", text="No data yet", fill="#666666")
+            return
+
+        top = 32
+        left = 92
+        right_pad = 42
+        row_height = max(14, min(22, (height - top - 8) // max(1, len(values))))
+        bar_height = max(8, row_height - 5)
+        max_value = max(count for _label, count in values) or 1
+        palette = ["#2878b5", "#d95f02", "#4d9221", "#7b3294", "#c51b7d", "#5c5c5c"]
+
+        for index, (label, count) in enumerate(values):
+            y = top + index * row_height
+            if y + bar_height > height - 4:
+                break
+            short_label = label if len(label) <= 12 else f"{label[:11]}..."
+            canvas.create_text(8, y + bar_height / 2, anchor="w", text=short_label)
+            available = max(20, width - left - right_pad)
+            bar_width = int(available * (count / max_value))
+            canvas.create_rectangle(
+                left,
+                y,
+                left + bar_width,
+                y + bar_height,
+                fill=palette[index % len(palette)],
+                outline="",
+            )
+            canvas.create_text(
+                left + bar_width + 5,
+                y + bar_height / 2,
+                anchor="w",
+                text=str(count),
+            )
+
+    def preview_cleanup_candidates(self, notify: bool = True) -> None:
+        """Load conservative cleanup candidates into the Statistics cleanup table."""
+        if not self.require_active_project("preview cleanup candidates"):
+            return
+        try:
+            self.cleanup_candidates = plan_cleanup_candidates(self.build_config())
+        except Exception as exc:
+            self.statistics_status_var.set(f"Could not preview cleanup candidates: {exc}")
+            messagebox.showerror(
+                "Could not preview cleanup",
+                f"Failed to inspect project manifests:\n{exc}",
+            )
+            return
+        self.populate_cleanup_tree(self.cleanup_candidates)
+        total_size = sum(candidate.size_bytes for candidate in self.cleanup_candidates)
+        self.statistics_summary_var.set(
+            f"Cleanup preview: {len(self.cleanup_candidates)} files, {format_insight_bytes(total_size)}."
+        )
+        self.statistics_status_var.set("Cleanup preview refreshed.")
+        if notify and not self.cleanup_candidates:
+            messagebox.showinfo(
+                "No cleanup candidates",
+                "No local intermediate files currently have downstream manifest proof for cleanup.",
+            )
+
+    def populate_cleanup_tree(self, candidates: Sequence[CleanupCandidate]) -> None:
+        """Show cleanup candidates in the cleanup table."""
+        self.clear_treeview(self.cleanup_tree)
+        for index, candidate in enumerate(candidates):
+            self.cleanup_tree.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    candidate.stage,
+                    format_insight_bytes(candidate.size_bytes),
+                    candidate.reason,
+                    str(candidate.path),
+                ),
+            )
+
+    def selected_cleanup_candidates(self) -> list[CleanupCandidate]:
+        """Return cleanup candidates selected in the cleanup table."""
+        selected: list[CleanupCandidate] = []
+        for item in self.cleanup_tree.selection():
+            try:
+                index = int(item)
+            except ValueError:
+                continue
+            if 0 <= index < len(self.cleanup_candidates):
+                selected.append(self.cleanup_candidates[index])
+        return selected
+
+    def delete_selected_cleanup_files(self) -> None:
+        """Delete selected cleanup candidates after confirmation."""
+        candidates = self.selected_cleanup_candidates()
+        if not candidates:
+            messagebox.showinfo(
+                "No cleanup rows selected",
+                "Select one or more cleanup rows first, or use Delete All Cleanup Candidates.",
+            )
+            return
+        self.delete_cleanup_files(candidates, "selected cleanup files")
+
+    def delete_all_cleanup_files(self) -> None:
+        """Delete all currently previewed cleanup candidates after confirmation."""
+        if not self.cleanup_candidates:
+            self.preview_cleanup_candidates(notify=False)
+        if not self.cleanup_candidates:
+            messagebox.showinfo(
+                "No cleanup candidates",
+                "No cleanup candidates are currently available.",
+            )
+            return
+        self.delete_cleanup_files(self.cleanup_candidates, "all cleanup candidates")
+
+    def delete_cleanup_files(
+        self,
+        candidates: Sequence[CleanupCandidate],
+        label: str,
+    ) -> None:
+        """Delete a cleanup candidate set after an explicit confirmation."""
+        total_size = sum(candidate.size_bytes for candidate in candidates)
+        confirmed = messagebox.askyesno(
+            "Delete cleanup files",
+            (
+                f"Delete {len(candidates)} {label} "
+                f"({format_insight_bytes(total_size)})?\n\n"
+                "Only files listed in the cleanup preview will be deleted. "
+                "This cannot be undone."
+            ),
+        )
+        if not confirmed:
+            return
+        deleted, bytes_deleted, errors = delete_cleanup_candidates(candidates)
+        self.preview_cleanup_candidates(notify=False)
+        self.refresh_project_statistics()
+        message = (
+            f"Deleted {deleted} files and freed {format_insight_bytes(bytes_deleted)}."
+        )
+        if errors:
+            self.statistics_status_var.set(f"{message} {len(errors)} files could not be deleted.")
+            messagebox.showwarning(
+                "Cleanup finished with warnings",
+                f"{message}\n\nSome files could not be deleted:\n" + "\n".join(errors[:10]),
+            )
+            return
+        self.statistics_status_var.set(message)
+        messagebox.showinfo("Cleanup finished", message)
 
     def update_extraction_progress(self, current: int, total: int, message: str) -> None:
         """Update Extraction progress widgets from subprocess progress events."""
