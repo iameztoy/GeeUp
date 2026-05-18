@@ -1,6 +1,6 @@
 # SWOT Processing Guide
 
-This document keeps the processing-specific behavior that is too detailed for the main README.
+This document keeps the processing-specific behavior that is too detailed for the main README. For installation, first launch, and day-to-day GUI usage, see [GETTING_STARTED.md](./GETTING_STARTED.md).
 
 ## Processing Order
 
