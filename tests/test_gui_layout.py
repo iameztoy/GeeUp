@@ -40,7 +40,7 @@ def find_notebook(widget: tk.Widget) -> ttk.Notebook:
 def collect_label_texts(widget: tk.Widget) -> set[str]:
     texts: set[str] = set()
     for child in widget.winfo_children():
-        if isinstance(child, (ttk.Label, ttk.Checkbutton)):
+        if isinstance(child, (ttk.Label, ttk.Checkbutton, ttk.LabelFrame)):
             text = child.cget("text")
             if isinstance(text, str):
                 texts.add(text)
@@ -146,6 +146,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Selected upload tiles", collect_label_texts(upload_tab))
             self.assertIn("Apply Upload Tiles", collect_button_texts(upload_tab))
             self.assertIn("Clear Upload Tiles", collect_button_texts(upload_tab))
+            self.assertIn("Execution", collect_label_texts(upload_tab))
             self.assertIn("Run Dry Run", collect_button_texts(upload_tab))
             self.assertIn("Run Real Upload", collect_button_texts(upload_tab))
             self.assertIn("Refresh Statistics", collect_button_texts(statistics_tab))

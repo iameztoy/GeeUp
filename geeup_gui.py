@@ -1239,23 +1239,8 @@ class LauncherApp:
             variable=self.metadata_add_end_time_var,
         ).grid(row=4, column=0, sticky="w", padx=(0, 18), pady=4)
 
-        notes = ttk.LabelFrame(parent, text="Notes", padding=12)
-        notes.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-        ttk.Label(
-            notes,
-            text=(
-                "1. Run buttons save the active project settings before launching.\n"
-                "2. By default the tool starts normal Chrome in attach mode, then Selenium attaches to it.\n"
-                "3. On the first real run, Chrome may ask you to sign in manually.\n"
-                "4. Keep the dedicated Chrome profile for future runs.\n"
-                "5. To upload mosaics, set Origin folder to the Mosaic tab output folder.\n"
-                "6. Real uploads still ask for final confirmation in the console unless you later change that in config."
-            ),
-            justify="left",
-        ).grid(row=0, column=0, sticky="w")
-
-        buttons = ttk.Frame(parent)
-        buttons.grid(row=3, column=0, sticky="ew", pady=(16, 0))
+        buttons = ttk.LabelFrame(parent, text="Execution", padding=12)
+        buttons.grid(row=2, column=0, sticky="ew", pady=(14, 0))
         buttons.columnconfigure(0, weight=1)
 
         ttk.Button(
@@ -1269,6 +1254,27 @@ class LauncherApp:
         ttk.Button(
             buttons, text="Run Real Upload", command=self.save_and_run_real
         ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(
+            buttons,
+            text="Use Apply Upload Tiles only to update the optional UTM filter; use Run Dry Run or Run Real Upload to execute.",
+            foreground="#555555",
+            wraplength=900,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        notes = ttk.LabelFrame(parent, text="Notes", padding=12)
+        notes.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        ttk.Label(
+            notes,
+            text=(
+                "1. Run buttons save the active project settings before launching.\n"
+                "2. By default the tool starts normal Chrome in attach mode, then Selenium attaches to it.\n"
+                "3. On the first real run, Chrome may ask you to sign in manually.\n"
+                "4. Keep the dedicated Chrome profile for future runs.\n"
+                "5. To upload mosaics, set Origin folder to the Mosaic tab output folder.\n"
+                "6. Real uploads still ask for final confirmation in the console unless you later change that in config."
+            ),
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
 
         self.upload_tile_filter_var.trace_add(
             "write",

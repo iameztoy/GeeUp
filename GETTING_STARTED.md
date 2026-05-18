@@ -191,9 +191,12 @@ Typical steps:
 1. Set the origin folder.
 2. Set the destination ImageCollection asset path.
 3. Choose upload scope: all files, or selected UTM/source tiles only.
-4. Run `Run Dry Run`.
-5. Review `00_logs\upload_report.csv`.
-6. Run `Run Real Upload`.
+4. If selected-tile scope is active, choose or type upload tiles and click `Apply Upload Tiles`.
+5. In the `Execution` box, run `Run Dry Run`.
+6. Review `00_logs\upload_report.csv`.
+7. In the `Execution` box, run `Run Real Upload`.
+
+`Apply Upload Tiles` only updates the optional UTM filter. It does not start an upload.
 
 Before planning uploads, GeeUp can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the local upload report is incomplete.
 
@@ -302,4 +305,3 @@ The GUI consumes the generated JSON files. It does not require geopandas, shapel
 - [SWOT_PROCESSING_GUIDE.md](./SWOT_PROCESSING_GUIDE.md): detailed behavior, manifests, processing rules, mosaics, upload filtering, and cleanup logic.
 - [TROUBLESHOOTING.md](./TROUBLESHOOTING.md): common errors and fixes.
 - [config.example.yaml](./config.example.yaml): complete configuration template.
-
