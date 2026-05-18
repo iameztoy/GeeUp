@@ -75,6 +75,7 @@ class ProjectTests(unittest.TestCase):
             self.assertEqual(config["artifacts"]["logs_dir"], str(root / "00_logs"))
             self.assertEqual(config["artifacts"]["artifacts_dir"], str(root / "00_logs" / "upload_artifacts"))
             self.assertEqual(config["artifacts"]["report_csv"], str(root / "00_logs" / "upload_report.csv"))
+            self.assertEqual(config["artifacts"]["ee_asset_inventory_csv"], str(root / "00_logs" / "ee_asset_inventory.csv"))
             self.assertEqual(config["input_folder"], str(root / "03_mosaics"))
 
     def test_project_tile_profiles_round_trip(self) -> None:

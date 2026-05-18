@@ -45,6 +45,12 @@ download:
   # Optional safety cap for testing. Leave null to retrieve all matches.
   max_granules: null
 
+  # Product-version handling after the remote search:
+  # - best: list all remote matches but download only the best CRID/product
+  #   counter for each SWOT observation.
+  # - all: download every matching remote file.
+  product_version_filter: best
+
   # Preview and final download status report.
   report_csv: "C:/path/to/SWOT_Processing/00_logs/download_preview.csv"
 
@@ -181,6 +187,17 @@ upload:
   batch_size: 50
   max_active_ingestions: 2
 
+  # all: upload every GeoTIFF in the origin folder.
+  # selected_utm: upload only files whose output UTM tile or mosaic source
+  # tiles intersect upload.utm_tiles.
+  scope: "all"
+  utm_tiles: []
+
+  # Before planning uploads, list existing assets in destination_parent with
+  # ee.data.listAssets and mark matches as EE_VERIFIED_EXISTS in the report.
+  ee_sync_before_upload: true
+  ee_asset_inventory_page_size: 1000
+
   # Asset naming:
   # final_name = prefix + sanitized(file_stem) + suffix
   prefix: ""
@@ -276,3 +293,4 @@ artifacts:
   logs_dir: "C:/path/to/SWOT_Processing/00_logs"
   artifacts_dir: "C:/path/to/SWOT_Processing/00_logs/upload_artifacts"
   report_csv: "C:/path/to/SWOT_Processing/00_logs/upload_report.csv"
+  ee_asset_inventory_csv: "C:/path/to/SWOT_Processing/00_logs/ee_asset_inventory.csv"

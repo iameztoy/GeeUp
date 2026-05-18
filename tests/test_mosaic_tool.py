@@ -142,6 +142,7 @@ class MosaicPlanningTests(unittest.TestCase):
             self.assertEqual(parsed.properties["swot_cycle_id"], "035")
             self.assertEqual(parsed.properties["swot_pass_id"], "225")
             self.assertEqual(parsed.properties["swot_coordinate_system"], "UTM36M")
+            self.assertFalse(plan.groups[0].output_file.stem.endswith("_mosaic"))
 
     def test_common_crs_output_name_remains_swot_parseable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -180,7 +181,7 @@ class MosaicPlanningTests(unittest.TestCase):
             )
             plan = build_mosaic_plan(config)
 
-            self.assertIn("_MIXD_01_mosaic.tif", plan.groups[0].output_file.name)
+            self.assertIn("_MIXD_01.tif", plan.groups[0].output_file.name)
             parsed = parse_swot_l2_hr_raster_metadata(plan.groups[0].output_file.name)
 
             self.assertIsNotNone(parsed)

@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlparse
 
 import yaml
 
-from swot_metadata import parse_swot_l2_hr_raster_metadata
+from swot_metadata import parse_swot_l2_hr_raster_metadata, swot_product_rank
 from workflow_manifest import upsert_workflow_manifest, workflow_manifest_path
 
 
@@ -42,6 +42,18 @@ COLLECTION_LABELS = {
 COLLECTION_LABEL_BY_SHORT_NAME = {
     value: label for label, value in COLLECTION_LABELS.items()
 }
+PRODUCT_FILTER_BEST = "best"
+PRODUCT_FILTER_ALL = "all"
+DEFAULT_PRODUCT_VERSION_FILTER = PRODUCT_FILTER_BEST
+DEFAULT_PRODUCT_VERSION_FILTER_LABEL = "Best product version only"
+PRODUCT_VERSION_FILTER_LABELS = {
+    "Best product version only": PRODUCT_FILTER_BEST,
+    "All matching files": PRODUCT_FILTER_ALL,
+}
+PRODUCT_VERSION_FILTER_LABEL_BY_VALUE = {
+    value: label for label, value in PRODUCT_VERSION_FILTER_LABELS.items()
+}
+EXCLUDED_OLDER_VERSION_STATUS = "EXCLUDED_OLDER_VERSION"
 MGRS_LATITUDE_BANDS = "CDEFGHJKLMNPQRSTUVWX"
 UTM_TILE_RE = re.compile(r"^UTM(?P<zone>0[1-9]|[1-5]\d|60)(?P<band>[C-HJ-NP-X])$")
 _AUTHENTICATED = False
@@ -71,6 +83,7 @@ class DownloadConfig:
     skip_manifest_existing: bool = True
     threads: int = 6
     batch_size: int = 25
+    product_version_filter: str = DEFAULT_PRODUCT_VERSION_FILTER
     base_dir: Path = Path.cwd()
 
 
@@ -95,6 +108,10 @@ class DownloadGranule:
     end_time: str = ""
     size_mb: Optional[float] = None
     links: List[str] = field(default_factory=list)
+    selected_for_download: bool = True
+    duplicate_filter_status: str = "selected"
+    preferred_file_name: str = ""
+    duplicate_reason: str = ""
     source: Any = field(default=None, repr=False, compare=False)
 
 
@@ -114,6 +131,36 @@ class DownloadPreview:
     def missing_size_count(self) -> int:
         """Return how many granules have no reliable size metadata."""
         return sum(1 for granule in self.granules if granule.size_mb is None)
+
+    @property
+    def selected_granules(self) -> List[DownloadGranule]:
+        """Return granules selected for download after product-version filtering."""
+        return [granule for granule in self.granules if granule.selected_for_download]
+
+    @property
+    def excluded_granules(self) -> List[DownloadGranule]:
+        """Return remote matches excluded by product-version filtering."""
+        return [granule for granule in self.granules if not granule.selected_for_download]
+
+    @property
+    def selected_known_size_mb(self) -> float:
+        """Return known size for selected granules."""
+        return sum(granule.size_mb or 0.0 for granule in self.selected_granules)
+
+    @property
+    def excluded_known_size_mb(self) -> float:
+        """Return known size for excluded granules."""
+        return sum(granule.size_mb or 0.0 for granule in self.excluded_granules)
+
+    @property
+    def selected_missing_size_count(self) -> int:
+        """Return selected granules without size metadata."""
+        return sum(1 for granule in self.selected_granules if granule.size_mb is None)
+
+    @property
+    def excluded_missing_size_count(self) -> int:
+        """Return excluded granules without size metadata."""
+        return sum(1 for granule in self.excluded_granules if granule.size_mb is None)
 
 
 @dataclass
@@ -156,6 +203,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "skip_manifest_existing": True,
         "threads": 6,
         "batch_size": 25,
+        "product_version_filter": DEFAULT_PRODUCT_VERSION_FILTER,
     },
 }
 
@@ -197,6 +245,19 @@ def normalize_optional_int(value: Any) -> Optional[int]:
         return None
     parsed = int(value)
     return parsed if parsed > 0 else None
+
+
+def normalize_product_version_filter(value: Any) -> str:
+    """Normalize the product-version filter mode."""
+    text = str(value or DEFAULT_PRODUCT_VERSION_FILTER).strip()
+    if text in PRODUCT_VERSION_FILTER_LABELS:
+        return PRODUCT_VERSION_FILTER_LABELS[text]
+    lowered = text.lower().replace("-", "_").replace(" ", "_")
+    if lowered in {"best", "best_only", "best_product_version_only", "highest", "preferred"}:
+        return PRODUCT_FILTER_BEST
+    if lowered in {"all", "none", "all_matching_files", "download_all"}:
+        return PRODUCT_FILTER_ALL
+    raise ValueError("download.product_version_filter must be 'best' or 'all'.")
 
 
 def normalize_utm_tiles(value: Any) -> List[str]:
@@ -288,6 +349,9 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> DownloadConfig:
         skip_manifest_existing=bool(download_data.get("skip_manifest_existing", True)),
         threads=int(download_data.get("threads", 6) or 6),
         batch_size=int(download_data.get("batch_size", 25) or 25),
+        product_version_filter=normalize_product_version_filter(
+            download_data.get("product_version_filter", DEFAULT_PRODUCT_VERSION_FILTER)
+        ),
         base_dir=base_dir,
     )
     validate_config(config)
@@ -316,6 +380,7 @@ def validate_config(config: DownloadConfig) -> None:
         raise ValueError("download.threads must be at least 1.")
     if config.batch_size < 1:
         raise ValueError("download.batch_size must be at least 1.")
+    normalize_product_version_filter(config.product_version_filter)
 
 
 def build_granule_patterns(utm_tiles: Sequence[str]) -> List[str]:
@@ -618,6 +683,83 @@ def normalize_granule(granule: Any) -> DownloadGranule:
     )
 
 
+def product_duplicate_key(granule: DownloadGranule) -> Optional[Tuple[str, ...]]:
+    """Return a stable key for files that differ only by product version."""
+    metadata = parse_swot_l2_hr_raster_metadata(granule.file_name)
+    if metadata is None:
+        return None
+    fields = metadata.fields
+    return (
+        fields.get("descriptor", ""),
+        fields.get("cycle_id", ""),
+        fields.get("pass_id", ""),
+        fields.get("scene_id", ""),
+        fields.get("range_beginning", ""),
+        fields.get("range_ending", ""),
+        fields.get("filename_suffix", ""),
+    )
+
+
+def product_preference_key(granule: DownloadGranule) -> Tuple[int, int, int, int, int, str]:
+    """Return the product-version preference key for one granule."""
+    metadata = parse_swot_l2_hr_raster_metadata(granule.file_name)
+    if metadata is None:
+        return (0, -1, -1, -1, -1, granule.file_name.lower())
+    fields = metadata.fields
+    return (*swot_product_rank(fields.get("crid", ""), fields.get("product_counter", "")), granule.file_name.lower())
+
+
+def reset_product_filter_fields(granules: Sequence[DownloadGranule]) -> None:
+    """Reset product filter fields before applying a mode."""
+    for granule in granules:
+        granule.selected_for_download = True
+        granule.duplicate_filter_status = "selected"
+        granule.preferred_file_name = ""
+        granule.duplicate_reason = ""
+
+
+def apply_product_version_filter(
+    granules: Sequence[DownloadGranule],
+    mode: str,
+) -> List[DownloadGranule]:
+    """Mark older product versions as excluded while preserving all preview rows."""
+    filter_mode = normalize_product_version_filter(mode)
+    reset_product_filter_fields(granules)
+    if filter_mode == PRODUCT_FILTER_ALL:
+        for granule in granules:
+            granule.duplicate_filter_status = "all_matching_files"
+        return list(granules)
+
+    grouped: Dict[Tuple[str, ...], List[DownloadGranule]] = {}
+    for granule in granules:
+        key = product_duplicate_key(granule)
+        if key is None:
+            granule.duplicate_filter_status = "selected_unparsed"
+            continue
+        grouped.setdefault(key, []).append(granule)
+
+    for group in grouped.values():
+        if len(group) == 1:
+            group[0].duplicate_filter_status = "selected_single_version"
+            continue
+        preferred = max(group, key=product_preference_key)
+        for granule in group:
+            granule.preferred_file_name = preferred.file_name
+            if granule is preferred:
+                granule.selected_for_download = True
+                granule.duplicate_filter_status = "selected_best_version"
+                granule.duplicate_reason = (
+                    f"Kept best CRID/product counter among {len(group)} remote version(s)."
+                )
+            else:
+                granule.selected_for_download = False
+                granule.duplicate_filter_status = "excluded_older_version"
+                granule.duplicate_reason = (
+                    f"Superseded by {preferred.file_name} for the same SWOT observation."
+                )
+    return list(granules)
+
+
 def build_download_preview(
     config: DownloadConfig,
     earthaccess_module: Any = None,
@@ -634,6 +776,7 @@ def build_download_preview(
         (normalize_granule(granule) for granule in raw_granules),
         key=lambda granule: granule.file_name.lower(),
     )
+    apply_product_version_filter(granules, config.product_version_filter)
     return DownloadPreview(query=query, granules=granules)
 
 
@@ -714,6 +857,10 @@ MANIFEST_COLUMNS = [
     "raw_exists",
     "local_path",
     "last_status",
+    "selected_for_download",
+    "duplicate_filter_status",
+    "preferred_file_name",
+    "duplicate_reason",
     "first_seen",
     "last_seen",
     "last_downloaded",
@@ -783,7 +930,7 @@ def write_download_manifest(
         raw_path = local_complete_path(config, granule)
         raw_exists = raw_path is not None
         status_downloaded = status in {"DOWNLOADED", "SKIPPED_EXISTING", "LOCAL_COMPLETE", "SKIPPED_MANIFEST"}
-        downloaded = status_downloaded or manifest_row_downloaded(existing)
+        downloaded = status_downloaded or manifest_row_downloaded(existing) or raw_exists
         last_downloaded = existing.get("last_downloaded", "")
         if status in {"DOWNLOADED", "SKIPPED_EXISTING", "LOCAL_COMPLETE"}:
             last_downloaded = timestamp
@@ -800,6 +947,10 @@ def write_download_manifest(
             "raw_exists": "yes" if raw_exists else "no",
             "local_path": str(raw_path or local_path or existing.get("local_path", "")),
             "last_status": status,
+            "selected_for_download": "yes" if granule.selected_for_download else "no",
+            "duplicate_filter_status": granule.duplicate_filter_status,
+            "preferred_file_name": granule.preferred_file_name,
+            "duplicate_reason": granule.duplicate_reason,
             "first_seen": existing.get("first_seen") or timestamp,
             "last_seen": timestamp,
             "last_downloaded": last_downloaded,
@@ -852,6 +1003,9 @@ def update_statuses_from_local_files(
     for granule in preview.granules:
         complete_path = local_complete_path(config, granule)
         current_status, current_path = statuses.get(granule.identity, ("", ""))
+        if not granule.selected_for_download or current_status == EXCLUDED_OLDER_VERSION_STATUS:
+            statuses[granule.identity] = (EXCLUDED_OLDER_VERSION_STATUS, current_path)
+            continue
         if complete_path is not None:
             if current_status in {"DOWNLOADED", "SKIPPED_EXISTING"}:
                 statuses[granule.identity] = (current_status, str(complete_path))
@@ -879,6 +1033,9 @@ def preview_statuses_from_existing(
     statuses: Dict[str, Tuple[str, str]] = {}
     manifest = read_download_manifest(effective_manifest_csv(config))
     for granule in preview.granules:
+        if not granule.selected_for_download:
+            statuses[granule.identity] = (EXCLUDED_OLDER_VERSION_STATUS, "")
+            continue
         existing = existing_download_path(config, granule)
         if existing is not None:
             status = "SKIPPED_EXISTING" if config.skip_existing else "LOCAL_COMPLETE"
@@ -913,6 +1070,10 @@ def write_download_report(
         "downloaded",
         "raw_exists",
         "known_from_manifest",
+        "selected_for_download",
+        "duplicate_filter_status",
+        "preferred_file_name",
+        "duplicate_reason",
         "local_path",
         "granule_id",
         "links",
@@ -942,6 +1103,10 @@ def write_download_report(
                     "downloaded": downloaded,
                     "raw_exists": "yes" if raw_exists else "no",
                     "known_from_manifest": "yes" if known_from_manifest else "no",
+                    "selected_for_download": "yes" if granule.selected_for_download else "no",
+                    "duplicate_filter_status": granule.duplicate_filter_status,
+                    "preferred_file_name": granule.preferred_file_name,
+                    "duplicate_reason": granule.duplicate_reason,
                     "local_path": local_path,
                     "granule_id": granule.identity,
                     "links": " ".join(granule.links),
@@ -971,6 +1136,9 @@ def run_download(
     skipped_manifest: List[DownloadGranule] = []
     manifest = read_download_manifest(effective_manifest_csv(config))
     for granule in preview.granules:
+        if not granule.selected_for_download:
+            statuses[granule.identity] = (EXCLUDED_OLDER_VERSION_STATUS, "")
+            continue
         existing = existing_download_path(config, granule)
         if config.skip_existing and existing is not None:
             skipped.append(existing)
@@ -1081,14 +1249,26 @@ def print_preview_summary(preview: DownloadPreview, report_csv: Path) -> None:
     print(f"Collection: {preview.query.collection_short_name}")
     print(f"Temporal: {preview.query.temporal[0]} to {preview.query.temporal[1]}")
     print(f"Patterns: {', '.join(preview.query.granule_patterns)}")
-    print(f"Granules: {len(preview.granules)}")
-    print(f"Known size: {format_size(preview.total_known_size_mb, preview.missing_size_count)}")
+    print(f"Granules matched: {len(preview.granules)}")
+    print(f"Selected for download: {len(preview.selected_granules)}")
+    print(f"Excluded older versions: {len(preview.excluded_granules)}")
+    print(
+        "Selected known size: "
+        f"{format_size(preview.selected_known_size_mb, preview.selected_missing_size_count)}"
+    )
+    if preview.excluded_granules:
+        print(
+            "Excluded known size: "
+            f"{format_size(preview.excluded_known_size_mb, preview.excluded_missing_size_count)}"
+        )
     print(f"Report CSV: {report_csv}")
 
 
 def print_download_summary(result: DownloadResult) -> None:
     """Print a concise download summary for CLI users."""
     print(f"Granules matched: {len(result.preview.granules)}")
+    print(f"Selected for download: {len(result.preview.selected_granules)}")
+    print(f"Excluded older versions: {len(result.preview.excluded_granules)}")
     print(f"Accounted for: {result.complete_count}")
     print(f"Downloaded files: {len(result.downloaded_files)}")
     print(f"Skipped existing: {len(result.skipped_existing)}")

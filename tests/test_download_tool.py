@@ -1,10 +1,13 @@
 import tempfile
 import threading
 import unittest
+import csv
 from pathlib import Path
 
 from swot_download_tool import (
     DownloadConfig,
+    EXCLUDED_OLDER_VERSION_STATUS,
+    PRODUCT_FILTER_ALL,
     build_download_preview,
     build_granule_patterns,
     dedupe_granules,
@@ -169,6 +172,75 @@ class DownloadToolTests(unittest.TestCase):
             self.assertEqual(preview.total_known_size_mb, 12.5)
             self.assertEqual(preview.missing_size_count, 1)
             self.assertEqual(sorted(g.utm_tile for g in preview.granules), ["UTM29R", "UTM30R"])
+
+    def test_preview_filters_to_best_product_version_but_reports_excluded_rows(self) -> None:
+        old_name = granule_name(utm="UTM30R", crid="PID0", counter="01")
+        best_name = granule_name(utm="UTM30R", crid="PGD0", counter="02")
+        earthaccess = FakeEarthaccess(
+            [
+                FakeGranule(old_name, concept_id="OLD", size_mb=0.5),
+                FakeGranule(best_name, concept_id="BEST", size_mb=0.6),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = DownloadConfig(
+                output_folder=root,
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                utm_tiles=["UTM30R"],
+                report_csv=root / "report.csv",
+                manifest_csv=root / "manifest.csv",
+            )
+
+            preview = build_download_preview(config, earthaccess_module=earthaccess)
+            write_download_report(config, preview)
+            result = run_download(config, earthaccess_module=earthaccess)
+
+            with (root / "report.csv").open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            excluded = [row for row in rows if row["status"] == EXCLUDED_OLDER_VERSION_STATUS]
+
+            self.assertEqual(len(preview.granules), 2)
+            self.assertEqual([granule.file_name for granule in preview.selected_granules], [best_name])
+            self.assertEqual([granule.file_name for granule in preview.excluded_granules], [old_name])
+            self.assertEqual(preview.selected_known_size_mb, 0.6)
+            self.assertEqual(preview.excluded_known_size_mb, 0.5)
+            self.assertEqual(earthaccess.downloaded, [best_name])
+            self.assertTrue(result.all_complete)
+            self.assertEqual(len(result.missing_granules), 0)
+            self.assertEqual(len(excluded), 1)
+            self.assertEqual(excluded[0]["selected_for_download"], "no")
+            self.assertEqual(excluded[0]["preferred_file_name"], best_name)
+            self.assertIn(EXCLUDED_OLDER_VERSION_STATUS, (root / "manifest.csv").read_text(encoding="utf-8"))
+
+    def test_all_product_version_mode_downloads_every_match(self) -> None:
+        old_name = granule_name(utm="UTM30R", crid="PID0", counter="01")
+        best_name = granule_name(utm="UTM30R", crid="PGD0", counter="02")
+        earthaccess = FakeEarthaccess(
+            [
+                FakeGranule(old_name, concept_id="OLD", size_mb=None),
+                FakeGranule(best_name, concept_id="BEST", size_mb=None),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = DownloadConfig(
+                output_folder=root,
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                utm_tiles=["UTM30R"],
+                report_csv=root / "report.csv",
+                product_version_filter=PRODUCT_FILTER_ALL,
+            )
+
+            preview = build_download_preview(config, earthaccess_module=earthaccess)
+            result = run_download(config, earthaccess_module=earthaccess)
+
+            self.assertEqual(len(preview.selected_granules), 2)
+            self.assertEqual(preview.excluded_granules, [])
+            self.assertEqual(earthaccess.downloaded, [best_name, old_name])
+            self.assertTrue(result.all_complete)
 
     def test_existing_file_skip_logic_and_run_download(self) -> None:
         existing_name = granule_name(utm="UTM30R")

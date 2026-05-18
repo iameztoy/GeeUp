@@ -1,4 +1,5 @@
 import csv
+import subprocess
 import tkinter as tk
 from tkinter import ttk
 import tempfile
@@ -7,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ee_uploader_gui import LauncherApp
+from geeup_gui import LauncherApp
 from geeup_project import create_project, load_project_tile_profiles
 
 
@@ -103,6 +104,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Open Project", collect_button_texts(app.root))
             self.assertIn("Save Project", collect_button_texts(app.root))
             self.assertIn("Prepare Update", collect_button_texts(app.root))
+            self.assertNotIn("Save Config", collect_button_texts(app.root))
             (
                 download_tab,
                 duplicate_tab,
@@ -112,6 +114,7 @@ class GuiLayoutTests(unittest.TestCase):
                 statistics_tab,
             ) = notebook.winfo_children()
             self.assertIn("Collection", collect_label_texts(download_tab))
+            self.assertIn("Product version filter", collect_label_texts(download_tab))
             self.assertIn("Start date", collect_label_texts(download_tab))
             self.assertIn("End date", collect_label_texts(download_tab))
             self.assertIn("Batch size", collect_label_texts(download_tab))
@@ -139,6 +142,12 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Write .tfw world files beside mosaic GeoTIFFs", collect_label_texts(mosaic_tab))
             self.assertNotIn("Compression", collect_label_texts(mosaic_tab))
             self.assertNotIn("GDAL Python", collect_label_texts(upload_tab))
+            self.assertIn("Upload scope", collect_label_texts(upload_tab))
+            self.assertIn("Selected upload tiles", collect_label_texts(upload_tab))
+            self.assertIn("Apply Upload Tiles", collect_button_texts(upload_tab))
+            self.assertIn("Clear Upload Tiles", collect_button_texts(upload_tab))
+            self.assertIn("Run Dry Run", collect_button_texts(upload_tab))
+            self.assertIn("Run Real Upload", collect_button_texts(upload_tab))
             self.assertIn("Refresh Statistics", collect_button_texts(statistics_tab))
             self.assertIn("Preview Cleanup", collect_button_texts(statistics_tab))
             self.assertIn("Delete Selected Cleanup Files", collect_button_texts(statistics_tab))
@@ -156,7 +165,7 @@ class GuiLayoutTests(unittest.TestCase):
             root = tk.Tk()
             root.withdraw()
             try:
-                with mock.patch("ee_uploader_gui.load_config", return_value=project.config):
+                with mock.patch("geeup_gui.load_config", return_value=project.config):
                     app = LauncherApp(root)
 
                 self.assertEqual(app.current_project_name_var.get(), "Auto Project")
@@ -171,9 +180,9 @@ class GuiLayoutTests(unittest.TestCase):
             root = tk.Tk()
             root.withdraw()
             try:
-                with mock.patch("ee_uploader_gui.load_config", return_value=config):
+                with mock.patch("geeup_gui.load_config", return_value=config):
                     app = LauncherApp(root)
-                with mock.patch("ee_uploader_gui.messagebox.showwarning") as warning:
+                with mock.patch("geeup_gui.messagebox.showwarning") as warning:
                     saved = app.save_config(notify=False, validate_upload=False)
 
                 self.assertFalse(saved)
@@ -188,9 +197,9 @@ class GuiLayoutTests(unittest.TestCase):
         try:
             app = LauncherApp(root)
             app.set_download_tiles(["UTM34M", "UTM35M"])
-            with mock.patch("ee_uploader_gui.load_display_geometry", return_value=object()):
-                with mock.patch("ee_uploader_gui.manifest_downloaded_tiles", return_value=["UTM33M"]):
-                    with mock.patch("ee_uploader_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("geeup_gui.load_display_geometry", return_value=object()):
+                with mock.patch("geeup_gui.manifest_downloaded_tiles", return_value=["UTM33M"]):
+                    with mock.patch("geeup_gui.UTMMapSelectorDialog") as dialog:
                         app.open_utm_map_selector()
 
             args, kwargs = dialog.call_args
@@ -206,8 +215,8 @@ class GuiLayoutTests(unittest.TestCase):
         try:
             app = LauncherApp(root)
             app.set_download_tiles(["UTM34M", "UTM35M"])
-            with mock.patch("ee_uploader_gui.load_display_geometry", return_value=object()):
-                with mock.patch("ee_uploader_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("geeup_gui.load_display_geometry", return_value=object()):
+                with mock.patch("geeup_gui.UTMMapSelectorDialog") as dialog:
                     app.open_utm_map_selector()
 
             args, kwargs = dialog.call_args
@@ -227,6 +236,76 @@ class GuiLayoutTests(unittest.TestCase):
 
             self.assertEqual(app.current_download_tiles(), ["UTM34M", "UTM35M"])
             self.assertIn("UTM34M", app.download_selected_tiles_var.get())
+        finally:
+            root.destroy()
+
+    def test_finished_real_duplicate_removal_refreshes_statistics(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            result = subprocess.CompletedProcess(
+                args=["duplicate"],
+                returncode=0,
+                stdout="done",
+                stderr="",
+            )
+            with mock.patch("geeup_gui.messagebox.showinfo"):
+                with mock.patch.object(app, "refresh_project_statistics_if_active") as refresh:
+                    app.finish_duplicate_process(result, dry_run=False)
+
+            refresh.assert_called_once_with("duplicate removal")
+        finally:
+            root.destroy()
+
+    def test_finished_dry_run_duplicate_removal_does_not_refresh_statistics(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            result = subprocess.CompletedProcess(
+                args=["duplicate"],
+                returncode=0,
+                stdout="done",
+                stderr="",
+            )
+            with mock.patch("geeup_gui.messagebox.showinfo"):
+                with mock.patch.object(app, "refresh_project_statistics_if_active") as refresh:
+                    app.finish_duplicate_process(result, dry_run=True)
+
+            refresh.assert_not_called()
+        finally:
+            root.destroy()
+
+    def test_upload_report_poll_refreshes_when_report_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = Path(temp) / "upload_report.csv"
+            report.write_text("final_status\nCOMPLETED\n", encoding="utf-8")
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                app = LauncherApp(root)
+                with mock.patch.object(app, "refresh_project_statistics_if_active") as refresh:
+                    app.poll_upload_statistics_report(str(report), None, 0)
+
+                refresh.assert_called_once_with("upload report")
+            finally:
+                root.destroy()
+
+    def test_upload_tile_selection_is_saved_to_config(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            app.upload_scope_var.set("Selected UTM/source tiles only")
+            app.upload_selected_tiles_var.set("UTM34M, UTM35M")
+
+            config = app.build_config()
+
+            self.assertEqual(config["upload"]["scope"], "selected_utm")
+            self.assertEqual(config["upload"]["utm_tiles"], ["UTM34M", "UTM35M"])
+            self.assertTrue(config["upload"]["ee_sync_before_upload"])
+            self.assertTrue(config["artifacts"]["ee_asset_inventory_csv"].endswith("ee_asset_inventory.csv"))
         finally:
             root.destroy()
 
@@ -253,8 +332,8 @@ class GuiLayoutTests(unittest.TestCase):
             app = LauncherApp(root)
             app.tile_preset_var.set("Continent: Africa")
             app.apply_tile_preset()
-            with mock.patch("ee_uploader_gui.load_display_geometry", return_value=object()):
-                with mock.patch("ee_uploader_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("geeup_gui.load_display_geometry", return_value=object()):
+                with mock.patch("geeup_gui.UTMMapSelectorDialog") as dialog:
                     app.open_utm_map_selector()
 
             args, _kwargs = dialog.call_args
@@ -346,8 +425,8 @@ class GuiLayoutTests(unittest.TestCase):
                 app.apply_project(project, write_config=False)
                 app.set_download_tiles(["UTM34K", "UTM34L"])
 
-                with mock.patch("ee_uploader_gui.simpledialog.askstring", return_value="Okavango Delta"):
-                    with mock.patch("ee_uploader_gui.messagebox.showinfo"):
+                with mock.patch("geeup_gui.simpledialog.askstring", return_value="Okavango Delta"):
+                    with mock.patch("geeup_gui.messagebox.showinfo"):
                         app.save_selected_tiles_as_preset()
 
                 presets = load_project_tile_profiles(project.root)

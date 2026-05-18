@@ -147,6 +147,7 @@ def config_for_project(base_config: Mapping[str, Any], root: str | Path) -> Dict
     artifacts["logs_dir"] = logs
     artifacts["artifacts_dir"] = str(paths["upload_artifacts"])
     artifacts["report_csv"] = str(paths["logs"] / "upload_report.csv")
+    artifacts["ee_asset_inventory_csv"] = str(paths["logs"] / "ee_asset_inventory.csv")
     config["artifacts"] = artifacts
 
     config["input_folder"] = mosaics

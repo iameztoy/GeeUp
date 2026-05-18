@@ -1,4 +1,4 @@
-"""Simple desktop GUI for configuring and launching the Earth Engine uploader."""
+"""Desktop GUI for GeeUp SWOT download, processing, and upload workflows."""
 
 from __future__ import annotations
 
@@ -49,6 +49,13 @@ EXTRACT_CRS_LABELS = {
 EXTRACT_CRS_LABEL_BY_VALUE = {
     value: label for label, value in EXTRACT_CRS_LABELS.items()
 }
+UPLOAD_SCOPE_LABELS = {
+    "All files in origin folder": "all",
+    "Selected UTM/source tiles only": "selected_utm",
+}
+UPLOAD_SCOPE_LABEL_BY_VALUE = {
+    value: label for label, value in UPLOAD_SCOPE_LABELS.items()
+}
 
 
 def in_isolated_python_environment() -> bool:
@@ -75,7 +82,7 @@ def ensure_isolated_python_environment() -> None:
               .\\.venv\\Scripts\\Activate.ps1
               python -m pip install --upgrade pip
               python -m pip install -r requirements.txt
-              python ee_uploader_gui.py
+              python geeup_gui.py
             """
         ).strip()
     )
@@ -111,7 +118,11 @@ from swot_download_tool import (
     COLLECTION_LABEL_BY_SHORT_NAME,
     DEFAULT_COLLECTION_LABEL,
     DEFAULT_COLLECTION_SHORT_NAME,
+    DEFAULT_PRODUCT_VERSION_FILTER,
+    DEFAULT_PRODUCT_VERSION_FILTER_LABEL,
     DownloadConfig,
+    PRODUCT_VERSION_FILTER_LABELS,
+    PRODUCT_VERSION_FILTER_LABEL_BY_VALUE,
     authenticate as authenticate_earthdata,
     build_download_preview,
     format_size,
@@ -148,6 +159,7 @@ class LauncherApp:
         metadata_data = self.data.get("metadata", {})
         mosaic_data = self.data.get("mosaic", {})
         gdal_data = self.data.get("gdal", {})
+        upload_data = self.data.get("upload", {})
 
         processing_root = processing_data.get("root", DEFAULT_PROCESSING_PATHS["root"])
         raw_downloads = processing_data.get(
@@ -186,11 +198,21 @@ class LauncherApp:
                 download_short_name,
                 DEFAULT_COLLECTION_LABEL,
             )
+        download_product_filter = str(
+            download_data.get("product_version_filter", DEFAULT_PRODUCT_VERSION_FILTER)
+        ).strip()
+        download_product_filter_label = PRODUCT_VERSION_FILTER_LABEL_BY_VALUE.get(
+            download_product_filter,
+            download_product_filter
+            if download_product_filter in PRODUCT_VERSION_FILTER_LABELS
+            else DEFAULT_PRODUCT_VERSION_FILTER_LABEL,
+        )
         try:
             selected_tiles = normalize_utm_tiles(download_data.get("utm_tiles", []))
         except ValueError:
             selected_tiles = []
         self.download_collection_var = tk.StringVar(value=download_label)
+        self.download_product_filter_var = tk.StringVar(value=download_product_filter_label)
         self.download_start_date_var = tk.StringVar(
             value=str(download_data.get("start_date", ""))
         )
@@ -244,6 +266,7 @@ class LauncherApp:
         self.project_download_history: list[dict[str, Any]] = []
         self.tile_preset_var = tk.StringVar(value="")
         self.tile_preset_choices: dict[str, TilePreset] = {}
+        self.upload_stats_poll_after_id: str | None = None
 
         self.duplicate_input_var = tk.StringVar(
             value=duplicate_data.get("input_folder", raw_downloads)
@@ -287,6 +310,21 @@ class LauncherApp:
         self.destination_var = tk.StringVar(
             value=self.data.get("destination_parent", "")
         )
+        upload_scope = str(upload_data.get("scope", "all")).strip()
+        self.upload_scope_var = tk.StringVar(
+            value=UPLOAD_SCOPE_LABEL_BY_VALUE.get(
+                upload_scope,
+                "All files in origin folder",
+            )
+        )
+        try:
+            upload_tiles = normalize_utm_tiles(upload_data.get("utm_tiles", []))
+        except ValueError:
+            upload_tiles = []
+        self.upload_tile_filter_var = tk.StringVar(value="")
+        self.upload_selected_tiles_var = tk.StringVar(value=", ".join(upload_tiles))
+        self.upload_visible_utm_tiles = list(self.all_utm_tiles)
+        self.upload_selected_tiles = set(upload_tiles)
         self.batch_size_var = tk.StringVar(
             value=str(self.data.get("upload", {}).get("batch_size", 50))
         )
@@ -388,7 +426,7 @@ class LauncherApp:
         )
 
         self.status_var = tk.StringVar(
-            value="Fill the form, save config, then start a dry run."
+            value="Open a project, then run a dry run or real upload."
         )
         self.download_status_var = tk.StringVar(
             value="Authenticate, choose dates and UTM tiles, then preview matching SWOT granules."
@@ -558,6 +596,14 @@ class LauncherApp:
             list(COLLECTION_LABELS.keys()),
             "Default is the active Version D 100 m product; Version C remains available for compatibility",
         )
+        row = self.add_combo_row(
+            form,
+            row,
+            "Product version filter",
+            self.download_product_filter_var,
+            list(PRODUCT_VERSION_FILTER_LABELS.keys()),
+            "Best version skips older CRID/product-counter revisions after preview while keeping them in the report",
+        )
         row = self.add_entry_row(
             form,
             row,
@@ -723,6 +769,8 @@ class LauncherApp:
             "downloaded",
             "raw_exists",
             "known_from_manifest",
+            "selected_for_download",
+            "duplicate_filter_status",
             "status",
         )
         self.download_preview_tree = ttk.Treeview(
@@ -740,6 +788,8 @@ class LauncherApp:
             "downloaded": ("Downloaded", 90),
             "raw_exists": ("Raw exists", 85),
             "known_from_manifest": ("Manifest", 85),
+            "selected_for_download": ("Selected", 75),
+            "duplicate_filter_status": ("Version filter", 145),
             "status": ("Status", 110),
         }
         for column, (label, width) in headings.items():
@@ -757,17 +807,14 @@ class LauncherApp:
         controls = ttk.Frame(parent)
         controls.grid(row=5, column=0, sticky="ew", pady=(14, 0))
         controls.columnconfigure(0, weight=1)
-        ttk.Button(controls, text="Save Config", command=self.save_download_config).grid(
+        ttk.Button(controls, text="Preview Search", command=self.preview_download).grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Button(controls, text="Preview Search", command=self.preview_download).grid(
+        ttk.Button(controls, text="Download Matches", command=self.start_download).grid(
             row=0, column=1, sticky="w", padx=(8, 0)
         )
-        ttk.Button(controls, text="Download Matches", command=self.start_download).grid(
-            row=0, column=2, sticky="w", padx=(8, 0)
-        )
         ttk.Button(controls, text="Stop Download", command=self.stop_download).grid(
-            row=0, column=3, sticky="w", padx=(8, 0)
+            row=0, column=2, sticky="w", padx=(8, 0)
         )
 
         progress = ttk.Frame(parent)
@@ -856,19 +903,16 @@ class LauncherApp:
         buttons.grid(row=3, column=0, sticky="ew", pady=(16, 0))
         buttons.columnconfigure(0, weight=1)
 
-        ttk.Button(buttons, text="Save Config", command=self.save_duplicate_config).grid(
-            row=0, column=0, sticky="w"
-        )
         ttk.Button(
             buttons,
             text="Plan Duplicate Removal",
             command=self.plan_duplicate_removal,
-        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ).grid(row=0, column=0, sticky="w")
         ttk.Button(
             buttons,
             text="Run Duplicate Removal",
             command=self.run_duplicate_removal,
-        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
 
         status = ttk.Label(
             parent,
@@ -979,14 +1023,11 @@ class LauncherApp:
         buttons.grid(row=3, column=0, sticky="ew", pady=(16, 0))
         buttons.columnconfigure(0, weight=1)
 
-        ttk.Button(buttons, text="Save Config", command=self.save_extract_config).grid(
+        ttk.Button(buttons, text="Plan Extraction", command=self.plan_extraction).grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Button(buttons, text="Plan Extraction", command=self.plan_extraction).grid(
-            row=0, column=1, sticky="w", padx=(8, 0)
-        )
         ttk.Button(buttons, text="Run Extraction", command=self.run_extraction).grid(
-            row=0, column=2, sticky="w", padx=(8, 0)
+            row=0, column=1, sticky="w", padx=(8, 0)
         )
 
         progress = ttk.Frame(parent)
@@ -1036,6 +1077,74 @@ class LauncherApp:
             self.destination_var,
             "Example: projects/MY_PROJECT/assets/MY_COLLECTION",
         )
+        ttk.Label(form, text="Upload scope").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Combobox(
+            form,
+            textvariable=self.upload_scope_var,
+            values=list(UPLOAD_SCOPE_LABELS),
+            state="readonly",
+        ).grid(row=row, column=1, sticky="ew", pady=4)
+        ttk.Label(
+            form,
+            text="All files is the default; selected mode uses output UTM or mosaic source UTM tiles.",
+            foreground="#555555",
+        ).grid(row=row + 1, column=1, sticky="w", pady=(0, 4))
+        row += 2
+
+        upload_tiles = ttk.LabelFrame(form, text="Upload UTM Tiles", padding=8)
+        upload_tiles.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(4, 8))
+        upload_tiles.columnconfigure(1, weight=1)
+        upload_tiles.columnconfigure(3, weight=1)
+        ttk.Label(upload_tiles, text="Filter").grid(row=0, column=0, sticky="w")
+        ttk.Entry(upload_tiles, textvariable=self.upload_tile_filter_var).grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(8, 8),
+        )
+        list_frame = ttk.Frame(upload_tiles)
+        list_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(4, 0))
+        list_frame.columnconfigure(0, weight=1)
+        self.upload_tile_listbox = tk.Listbox(
+            list_frame,
+            height=5,
+            selectmode=tk.MULTIPLE,
+            exportselection=False,
+        )
+        self.upload_tile_listbox.grid(row=0, column=0, sticky="nsew")
+        upload_scroll = ttk.Scrollbar(
+            list_frame,
+            orient="vertical",
+            command=self.upload_tile_listbox.yview,
+        )
+        upload_scroll.grid(row=0, column=1, sticky="ns")
+        self.upload_tile_listbox.configure(yscrollcommand=upload_scroll.set)
+        self.upload_tile_listbox.bind("<<ListboxSelect>>", self.on_upload_tile_select)
+        ttk.Label(upload_tiles, text="Selected upload tiles").grid(
+            row=0,
+            column=2,
+            sticky="w",
+            padx=(8, 0),
+        )
+        selected_upload_frame = ttk.Frame(upload_tiles)
+        selected_upload_frame.grid(row=0, column=3, rowspan=2, sticky="nsew")
+        selected_upload_frame.columnconfigure(0, weight=1)
+        ttk.Entry(
+            selected_upload_frame,
+            textvariable=self.upload_selected_tiles_var,
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            selected_upload_frame,
+            text="Apply Upload Tiles",
+            command=self.apply_upload_tiles_from_text,
+        ).grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(
+            selected_upload_frame,
+            text="Clear Upload Tiles",
+            command=self.clear_upload_tiles,
+        ).grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        row += 1
+
         row = self.add_entry_row(
             form,
             row,
@@ -1135,7 +1244,7 @@ class LauncherApp:
         ttk.Label(
             notes,
             text=(
-                "1. Save config before running.\n"
+                "1. Run buttons save the active project settings before launching.\n"
                 "2. By default the tool starts normal Chrome in attach mode, then Selenium attaches to it.\n"
                 "3. On the first real run, Chrome may ask you to sign in manually.\n"
                 "4. Keep the dedicated Chrome profile for future runs.\n"
@@ -1149,20 +1258,23 @@ class LauncherApp:
         buttons.grid(row=3, column=0, sticky="ew", pady=(16, 0))
         buttons.columnconfigure(0, weight=1)
 
-        ttk.Button(buttons, text="Save Config", command=self.save_upload_config).grid(
-            row=0, column=0, sticky="w"
-        )
         ttk.Button(
             buttons,
             text="Open Chrome For Manual Login",
             command=self.open_manual_login_browser,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            buttons, text="Run Dry Run", command=self.save_and_run_dry_run
         ).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Button(
-            buttons, text="Save And Run Dry Run", command=self.save_and_run_dry_run
+            buttons, text="Run Real Upload", command=self.save_and_run_real
         ).grid(row=0, column=2, sticky="w", padx=(8, 0))
-        ttk.Button(
-            buttons, text="Save And Run Real Upload", command=self.save_and_run_real
-        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+
+        self.upload_tile_filter_var.trace_add(
+            "write",
+            lambda *_args: self.refresh_upload_tile_list(),
+        )
+        self.refresh_upload_tile_list()
 
         status = ttk.Label(
             parent,
@@ -1214,9 +1326,11 @@ class LauncherApp:
 
         overview = ttk.Frame(inner, padding=8)
         tiles = ttk.Frame(inner, padding=8)
+        mosaics = ttk.Frame(inner, padding=8)
         cleanup = ttk.Frame(inner, padding=8)
         inner.add(overview, text="Overview")
         inner.add(tiles, text="Tiles And Dates")
+        inner.add(mosaics, text="Mosaics")
         inner.add(cleanup, text="Cleanup")
 
         overview.columnconfigure(0, weight=1)
@@ -1298,6 +1412,49 @@ class LauncherApp:
         self.stats_date_tree.column("date", width=130, anchor="w")
         self.stats_date_tree.column("count", width=80, anchor="e")
         self.stats_date_tree.grid(row=0, column=0, sticky="nsew")
+
+        mosaics.columnconfigure(0, weight=1)
+        mosaics.columnconfigure(1, weight=1)
+        mosaics.rowconfigure(0, weight=1)
+        mosaic_grid_frame = ttk.LabelFrame(
+            mosaics,
+            text="Completed Mosaics By Output Tile/Grid",
+            padding=8,
+        )
+        mosaic_grid_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        mosaic_grid_frame.columnconfigure(0, weight=1)
+        mosaic_grid_frame.rowconfigure(0, weight=1)
+        self.stats_mosaic_output_grid_tree = ttk.Treeview(
+            mosaic_grid_frame,
+            columns=("grid", "count"),
+            show="headings",
+            height=16,
+        )
+        self.stats_mosaic_output_grid_tree.heading("grid", text="Tile/Grid")
+        self.stats_mosaic_output_grid_tree.heading("count", text="Count")
+        self.stats_mosaic_output_grid_tree.column("grid", width=150, anchor="w")
+        self.stats_mosaic_output_grid_tree.column("count", width=80, anchor="e")
+        self.stats_mosaic_output_grid_tree.grid(row=0, column=0, sticky="nsew")
+
+        mosaic_source_frame = ttk.LabelFrame(
+            mosaics,
+            text="Completed Mosaics By Source UTM Tile",
+            padding=8,
+        )
+        mosaic_source_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        mosaic_source_frame.columnconfigure(0, weight=1)
+        mosaic_source_frame.rowconfigure(0, weight=1)
+        self.stats_mosaic_source_tile_tree = ttk.Treeview(
+            mosaic_source_frame,
+            columns=("tile", "count"),
+            show="headings",
+            height=16,
+        )
+        self.stats_mosaic_source_tile_tree.heading("tile", text="Source tile")
+        self.stats_mosaic_source_tile_tree.heading("count", text="Count")
+        self.stats_mosaic_source_tile_tree.column("tile", width=150, anchor="w")
+        self.stats_mosaic_source_tile_tree.column("count", width=80, anchor="e")
+        self.stats_mosaic_source_tile_tree.grid(row=0, column=0, sticky="nsew")
 
         cleanup.columnconfigure(0, weight=1)
         cleanup.rowconfigure(1, weight=1)
@@ -1473,14 +1630,11 @@ class LauncherApp:
         buttons.grid(row=5, column=0, sticky="ew", pady=(16, 0))
         buttons.columnconfigure(0, weight=1)
 
-        ttk.Button(buttons, text="Save Config", command=self.save_mosaic_config).grid(
+        ttk.Button(buttons, text="Plan Mosaics", command=self.plan_mosaics).grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Button(buttons, text="Plan Mosaics", command=self.plan_mosaics).grid(
-            row=0, column=1, sticky="w", padx=(8, 0)
-        )
         ttk.Button(buttons, text="Run Mosaic", command=self.run_mosaics).grid(
-            row=0, column=2, sticky="w", padx=(8, 0)
+            row=0, column=1, sticky="w", padx=(8, 0)
         )
 
     def add_entry_row(
@@ -1863,11 +2017,21 @@ class LauncherApp:
                 download_short_name,
                 DEFAULT_COLLECTION_LABEL,
             )
+        download_product_filter = str(
+            download_data.get("product_version_filter", DEFAULT_PRODUCT_VERSION_FILTER)
+        ).strip()
+        download_product_filter_label = PRODUCT_VERSION_FILTER_LABEL_BY_VALUE.get(
+            download_product_filter,
+            download_product_filter
+            if download_product_filter in PRODUCT_VERSION_FILTER_LABELS
+            else DEFAULT_PRODUCT_VERSION_FILTER_LABEL,
+        )
         try:
             selected_tiles = normalize_utm_tiles(download_data.get("utm_tiles", []))
         except ValueError:
             selected_tiles = []
         self.download_collection_var.set(download_label)
+        self.download_product_filter_var.set(download_product_filter_label)
         self.download_start_date_var.set(str(download_data.get("start_date", "")))
         self.download_end_date_var.set(str(download_data.get("end_date", "")))
         self.download_output_var.set(download_data.get("output_folder", raw_downloads))
@@ -1922,6 +2086,19 @@ class LauncherApp:
 
         self.folder_var.set(self.data.get("input_folder", mosaic_outputs))
         self.destination_var.set(self.data.get("destination_parent", ""))
+        self.upload_scope_var.set(
+            UPLOAD_SCOPE_LABEL_BY_VALUE.get(
+                str(upload_data.get("scope", "all")).strip(),
+                "All files in origin folder",
+            )
+        )
+        try:
+            upload_tiles = normalize_utm_tiles(upload_data.get("utm_tiles", []))
+        except ValueError:
+            upload_tiles = []
+        self.upload_selected_tiles = set(upload_tiles)
+        self.upload_selected_tiles_var.set(", ".join(upload_tiles))
+        self.refresh_upload_tile_list()
         self.batch_size_var.set(str(upload_data.get("batch_size", 50)))
         self.max_active_var.set(str(upload_data.get("max_active_ingestions", 0)))
         self.prefix_var.set(upload_data.get("prefix", ""))
@@ -2070,6 +2247,13 @@ class LauncherApp:
             DEFAULT_COLLECTION_SHORT_NAME,
         )
 
+    def selected_download_product_filter(self) -> str:
+        """Return the config value for the selected product-version filter."""
+        return PRODUCT_VERSION_FILTER_LABELS.get(
+            self.download_product_filter_var.get(),
+            DEFAULT_PRODUCT_VERSION_FILTER,
+        )
+
     def refresh_download_tile_list(self) -> None:
         """Refresh the filtered UTM listbox while preserving selected tiles."""
         if not hasattr(self, "download_tile_listbox"):
@@ -2120,6 +2304,67 @@ class LauncherApp:
         self.download_selected_tiles = set(normalized)
         self.download_selected_tiles_var.set(", ".join(normalized))
         self.refresh_download_tile_list()
+
+    def selected_upload_scope(self) -> str:
+        """Return the config value for the selected Upload scope."""
+        return UPLOAD_SCOPE_LABELS.get(self.upload_scope_var.get(), "all")
+
+    def refresh_upload_tile_list(self) -> None:
+        """Refresh the filtered Upload UTM listbox while preserving selection."""
+        if not hasattr(self, "upload_tile_listbox"):
+            return
+        self.upload_tile_listbox.delete(0, tk.END)
+        needle = self.upload_tile_filter_var.get().strip().upper()
+        self.upload_visible_utm_tiles = [
+            tile for tile in self.all_utm_tiles if needle in tile
+        ]
+        for tile in self.upload_visible_utm_tiles:
+            self.upload_tile_listbox.insert(tk.END, tile)
+            if tile in self.upload_selected_tiles:
+                self.upload_tile_listbox.selection_set(tk.END)
+
+    def on_upload_tile_select(self, _event: tk.Event | None = None) -> None:
+        """Add the current Upload listbox selection to the selected tile state."""
+        if not hasattr(self, "upload_tile_listbox"):
+            return
+        selected_indices = set(self.upload_tile_listbox.curselection())
+        for index, tile in enumerate(self.upload_visible_utm_tiles):
+            if index in selected_indices:
+                self.upload_selected_tiles.add(tile)
+        self.upload_selected_tiles_var.set(
+            ", ".join(sorted(self.upload_selected_tiles))
+        )
+        self.refresh_upload_tile_list()
+
+    def apply_upload_tiles_from_text(self) -> None:
+        """Parse the Upload selected-tile text box and apply it to the listbox."""
+        try:
+            tiles = normalize_utm_tiles(self.upload_selected_tiles_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Invalid upload UTM tiles", str(exc))
+            return
+        self.upload_selected_tiles = set(tiles)
+        self.upload_selected_tiles_var.set(", ".join(tiles))
+        self.refresh_upload_tile_list()
+
+    def clear_upload_tiles(self) -> None:
+        """Clear Upload UTM tile selection."""
+        self.upload_selected_tiles.clear()
+        self.upload_selected_tiles_var.set("")
+        self.refresh_upload_tile_list()
+
+    def current_upload_tiles(self) -> list[str]:
+        """Return normalized selected Upload tiles."""
+        tiles = normalize_utm_tiles(self.upload_selected_tiles_var.get())
+        self.upload_selected_tiles = set(tiles)
+        return tiles
+
+    def upload_tiles_for_config(self) -> list[str]:
+        """Return upload tiles without blocking unrelated config writes."""
+        try:
+            return self.current_upload_tiles()
+        except ValueError:
+            return sorted(self.upload_selected_tiles)
 
     def refresh_tile_presets(self) -> None:
         """Refresh built-in and project tile preset choices."""
@@ -2276,6 +2521,7 @@ class LauncherApp:
             skip_manifest_existing=self.download_skip_manifest_existing_var.get(),
             threads=threads,
             batch_size=batch_size,
+            product_version_filter=self.selected_download_product_filter(),
             base_dir=PROJECT_ROOT,
         )
 
@@ -2490,6 +2736,23 @@ class LauncherApp:
                 "Please enter the Earth Engine destination collection.",
             )
             return False
+        if self.upload_scope_var.get() not in UPLOAD_SCOPE_LABELS:
+            messagebox.showerror(
+                "Invalid upload scope",
+                "Please choose a valid Upload scope.",
+            )
+            return False
+        try:
+            upload_tiles = self.current_upload_tiles()
+        except ValueError as exc:
+            messagebox.showerror("Invalid upload UTM tiles", str(exc))
+            return False
+        if self.selected_upload_scope() == "selected_utm" and not upload_tiles:
+            messagebox.showerror(
+                "Missing upload UTM tiles",
+                "Choose at least one UTM tile or switch Upload scope back to all files.",
+            )
+            return False
 
         try:
             batch_size = int(self.batch_size_var.get())
@@ -2634,6 +2897,7 @@ class LauncherApp:
             "download": {
                 "collection_short_name": self.selected_download_collection_short_name(),
                 "collection_version_label": self.download_collection_var.get(),
+                "product_version_filter": self.selected_download_product_filter(),
                 "output_folder": self.download_output_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["raw_downloads"],
                 "start_date": self.download_start_date_var.get().strip(),
@@ -2716,6 +2980,10 @@ class LauncherApp:
             "upload": {
                 "batch_size": batch_size,
                 "max_active_ingestions": max_active,
+                "scope": self.selected_upload_scope(),
+                "utm_tiles": self.upload_tiles_for_config(),
+                "ee_sync_before_upload": True,
+                "ee_asset_inventory_page_size": 1000,
                 "prefix": self.prefix_var.get(),
                 "suffix": self.suffix_var.get(),
                 "replacement_rules": {" ": "_"},
@@ -2776,6 +3044,13 @@ class LauncherApp:
                     )
                     / "upload_report.csv"
                 ),
+                "ee_asset_inventory_csv": str(
+                    Path(
+                        self.processing_logs_var.get().strip()
+                        or f"{DEFAULT_PROCESSING_PATHS['logs']}"
+                    )
+                    / "ee_asset_inventory.csv"
+                ),
             },
         }
 
@@ -2818,16 +3093,17 @@ class LauncherApp:
             except OSError as exc:
                 messagebox.showerror(
                     "Could not save project",
-                    f"Saved config.yaml, but failed to save the active project:\n{exc}",
+                    f"Saved the CLI config mirror, but failed to save the active project:\n{exc}",
                 )
                 return False
-        self.download_status_var.set(f"Saved config to {CONFIG_PATH}")
-        self.status_var.set(f"Saved config to {CONFIG_PATH}")
-        self.mosaic_status_var.set(f"Saved config to {CONFIG_PATH}")
-        self.duplicate_status_var.set(f"Saved config to {CONFIG_PATH}")
-        self.extract_status_var.set(f"Saved config to {CONFIG_PATH}")
+        message = "Saved active project settings."
+        self.download_status_var.set(message)
+        self.status_var.set(message)
+        self.mosaic_status_var.set(message)
+        self.duplicate_status_var.set(message)
+        self.extract_status_var.set(message)
         if notify:
-            messagebox.showinfo("Config saved", f"Saved:\n{CONFIG_PATH}")
+            messagebox.showinfo("Project settings saved", message)
         return True
 
     def save_download_config(self) -> bool:
@@ -2964,15 +3240,27 @@ class LauncherApp:
         self.load_download_report_preview(limit=300)
         self.download_progress_var.set(100.0)
         self.download_progress_text_var.set("Progress: preview complete")
-        size_text = format_size(preview.total_known_size_mb, preview.missing_size_count)
+        selected_count = len(preview.selected_granules)
+        excluded_count = len(preview.excluded_granules)
+        selected_size_text = format_size(
+            preview.selected_known_size_mb,
+            preview.selected_missing_size_count,
+        )
+        excluded_size_text = format_size(
+            preview.excluded_known_size_mb,
+            preview.excluded_missing_size_count,
+        )
         self.download_status_var.set(
-            f"Preview found {len(preview.granules)} granules. Estimated size: {size_text}. Report: {report_csv}"
+            f"Preview found {len(preview.granules)} granules; {selected_count} selected for download and {excluded_count} older version(s) excluded. Selected size: {selected_size_text}. Report: {report_csv}"
         )
         messagebox.showinfo(
             "Download preview finished",
             (
                 f"Matched granules: {len(preview.granules)}\n"
-                f"Estimated size: {size_text}\n"
+                f"Selected for download: {selected_count}\n"
+                f"Excluded older versions: {excluded_count}\n"
+                f"Estimated selected size: {selected_size_text}\n"
+                f"Estimated excluded size: {excluded_size_text}\n"
                 f"Report CSV:\n{report_csv}"
             ),
         )
@@ -3045,36 +3333,43 @@ class LauncherApp:
         self.load_download_report_preview(limit=300)
         self.download_progress_var.set(100.0)
         matched_count = len(result.preview.granules)
+        selected_count = len(result.preview.selected_granules)
+        excluded_count = len(result.preview.excluded_granules)
         missing_count = len(result.missing_granules)
         complete_count = result.complete_count
         if result.all_complete and not result.failures and not result.stopped:
             self.apply_download_handoff_to_processing()
             self.record_project_download_history(result)
+            self.refresh_project_statistics_if_active("download")
             self.download_progress_text_var.set("Progress: download complete")
             self.download_status_var.set(
-                f"Download finished and verified. All {matched_count} matched granule(s) are accounted for locally or in the manifest."
+                f"Download finished and verified. All {selected_count} selected granule(s) are accounted for; {excluded_count} older version(s) were recorded but not downloaded."
             )
             messagebox.showinfo(
                 "Download finished",
                 (
                     f"Matched granules: {matched_count}\n"
+                    f"Selected for download: {selected_count}\n"
+                    f"Excluded older versions: {excluded_count}\n"
                     f"Accounted for: {complete_count}\n"
                     f"Downloaded files: {len(result.downloaded_files)}\n"
                     f"Skipped existing: {len(result.skipped_existing)}\n"
                     f"Skipped manifest-known: {len(result.skipped_manifest)}\n"
                     "Missing files: 0\n"
                     f"Report CSV:\n{result.report_csv}\n\n"
-                    "All matched granules are accounted for. The output folder is now set as the input for Duplicate Removal and Extraction."
+                    "All selected granules are accounted for. Excluded older versions remain listed in the report/manifest for audit. The output folder is now set as the input for Duplicate Removal and Extraction."
                 ),
             )
             return
 
         self.record_project_download_history(result)
+        self.refresh_project_statistics_if_active("download")
         if result.stopped:
             self.download_progress_text_var.set("Progress: download stopped")
             title = "Download stopped"
             summary = (
-                f"Download stopped. Accounted for: {complete_count}/{matched_count}. "
+                f"Download stopped. Accounted for: {complete_count}/{matched_count} matched; "
+                f"{selected_count} selected, {excluded_count} excluded. "
                 f"Missing files: {missing_count}. Restart with skip-existing enabled to continue."
             )
         else:
@@ -3082,7 +3377,8 @@ class LauncherApp:
             title = "Download verification found missing files"
             summary = (
                 f"Download finished but not all matched files are present. "
-                f"Accounted for: {complete_count}/{matched_count}. Missing files: {missing_count}."
+                f"Accounted for: {complete_count}/{matched_count}. "
+                f"{selected_count} selected, {excluded_count} excluded. Missing files: {missing_count}."
             )
         self.download_status_var.set(
             f"{summary} Review the report CSV."
@@ -3091,6 +3387,8 @@ class LauncherApp:
             title,
             (
                 f"Matched granules: {matched_count}\n"
+                f"Selected for download: {selected_count}\n"
+                f"Excluded older versions: {excluded_count}\n"
                 f"Accounted for: {complete_count}\n"
                 f"Missing files: {missing_count}\n"
                 f"Downloaded files: {len(result.downloaded_files)}\n"
@@ -3116,10 +3414,13 @@ class LauncherApp:
             ),
             "collection_short_name": self.selected_download_collection_short_name(),
             "collection_version_label": self.download_collection_var.get(),
+            "product_version_filter": self.selected_download_product_filter(),
             "utm_tiles": self.download_tiles_for_config(),
             "start_date": self.download_start_date_var.get().strip(),
             "end_date": self.download_end_date_var.get().strip(),
             "matched_count": len(result.preview.granules),
+            "selected_count": len(result.preview.selected_granules),
+            "excluded_older_version_count": len(result.preview.excluded_granules),
             "downloaded_count": len(result.downloaded_files),
             "skipped_count": len(result.skipped_existing),
             "skipped_manifest_count": len(result.skipped_manifest),
@@ -3235,12 +3536,16 @@ class LauncherApp:
             self.duplicate_status_var.set(
                 f"Duplicate removal {action} successfully. Input: {self.duplicate_input_var.get().strip()}"
             )
+            if not dry_run:
+                self.refresh_project_statistics_if_active("duplicate removal")
             messagebox.showinfo("Duplicate removal finished", output_tail)
             return
 
         self.duplicate_status_var.set(
             f"Duplicate removal finished with exit code {result.returncode}. Check the console output."
         )
+        if not dry_run:
+            self.refresh_project_statistics_if_active("duplicate removal")
         messagebox.showwarning("Duplicate removal finished with warnings", output_tail)
 
     def parse_progress_line(self, line: str) -> Optional[Tuple[str, int, int, str]]:
@@ -3336,6 +3641,8 @@ class LauncherApp:
                             row.get("downloaded", ""),
                             row.get("raw_exists", ""),
                             row.get("known_from_manifest", ""),
+                            row.get("selected_for_download", ""),
+                            row.get("duplicate_filter_status", ""),
                             row.get("status", ""),
                         ),
                     )
@@ -3349,18 +3656,30 @@ class LauncherApp:
         for item in tree.get_children():
             tree.delete(item)
 
-    def refresh_project_statistics(self) -> None:
+    def refresh_project_statistics_if_active(self, source: str) -> None:
+        """Refresh statistics silently when a project is open."""
+        if self.current_project_root_var.get().strip():
+            self.refresh_project_statistics(notify=False, source=source)
+
+    def refresh_project_statistics(
+        self,
+        notify: bool = True,
+        source: str = "",
+    ) -> None:
         """Refresh project statistics from manifests, reports, and local files."""
-        if not self.require_active_project("refresh project statistics"):
+        if not self.current_project_root_var.get().strip():
+            if notify:
+                self.require_active_project("refresh project statistics")
             return
         try:
             insights = collect_project_insights(self.build_config())
         except Exception as exc:
             self.statistics_status_var.set(f"Could not refresh project statistics: {exc}")
-            messagebox.showerror(
-                "Could not refresh statistics",
-                f"Failed to read project manifests or folders:\n{exc}",
-            )
+            if notify:
+                messagebox.showerror(
+                    "Could not refresh statistics",
+                    f"Failed to read project manifests or folders:\n{exc}",
+                )
             return
 
         self.clear_treeview(self.stats_metrics_tree)
@@ -3383,6 +3702,14 @@ class LauncherApp:
         self.clear_treeview(self.stats_date_tree)
         for date_text, count in insights.date_counts:
             self.stats_date_tree.insert("", tk.END, values=(date_text, str(count)))
+
+        self.clear_treeview(self.stats_mosaic_output_grid_tree)
+        for grid, count in insights.mosaic_output_grid_counts:
+            self.stats_mosaic_output_grid_tree.insert("", tk.END, values=(grid, str(count)))
+
+        self.clear_treeview(self.stats_mosaic_source_tile_tree)
+        for tile, count in insights.mosaic_source_tile_counts:
+            self.stats_mosaic_source_tile_tree.insert("", tk.END, values=(tile, str(count)))
 
         self.cleanup_candidates = list(insights.cleanup_candidates)
         self.populate_cleanup_tree(self.cleanup_candidates)
@@ -3408,7 +3735,8 @@ class LauncherApp:
         self.statistics_summary_var.set(
             f"Date coverage: {coverage}. Cleanup preview: {len(self.cleanup_candidates)} files, {cleanup_size}."
         )
-        self.statistics_status_var.set("Project statistics refreshed.")
+        suffix = f" after {source}" if source else ""
+        self.statistics_status_var.set(f"Project statistics refreshed{suffix}.")
 
     def draw_bar_chart(
         self,
@@ -3668,6 +3996,7 @@ class LauncherApp:
         if result.returncode == 0:
             if not dry_run:
                 self.apply_extraction_handoff_to_mosaic()
+                self.refresh_project_statistics_if_active("extraction")
             self.extract_progress_var.set(100.0)
             action = "planned" if dry_run else "finished"
             if dry_run:
@@ -3681,6 +4010,8 @@ class LauncherApp:
         self.extract_status_var.set(
             f"Extraction finished with exit code {result.returncode}. Check the CSV reports and console output."
         )
+        if not dry_run:
+            self.refresh_project_statistics_if_active("extraction")
         messagebox.showwarning("Extraction finished with warnings", output_tail)
 
     def apply_extraction_handoff_to_mosaic(self) -> None:
@@ -3725,6 +4056,8 @@ class LauncherApp:
 
     def launch_uploader(self, dry_run: bool) -> None:
         """Start the CLI uploader in a new console window when possible."""
+        upload_report_path = self.current_upload_report_path()
+        upload_report_mtime = self.file_mtime_ns(upload_report_path)
         uploader_command = [
             sys.executable,
             str(UPLOADER_SCRIPT),
@@ -3746,6 +4079,7 @@ class LauncherApp:
             return
 
         run_type = "dry run" if dry_run else "real upload"
+        self.start_upload_statistics_watcher(upload_report_path, upload_report_mtime)
         self.status_var.set(
             f"Started {run_type} in a separate console window. That window now stays open after the run finishes."
         )
@@ -3756,6 +4090,65 @@ class LauncherApp:
                 "A separate console window should open for logs and prompts.\n"
                 "It will now stay open after the run finishes, so you can read the result."
             ),
+        )
+
+    def current_upload_report_path(self) -> Path:
+        """Return the configured upload report path."""
+        artifacts = self.build_config().get("artifacts", {})
+        if not isinstance(artifacts, dict):
+            return Path("")
+        return Path(str(artifacts.get("report_csv", "")))
+
+    def file_mtime_ns(self, path: Path) -> int | None:
+        """Return file modification time in nanoseconds when available."""
+        try:
+            return path.stat().st_mtime_ns if path.exists() and path.is_file() else None
+        except OSError:
+            return None
+
+    def start_upload_statistics_watcher(
+        self,
+        report_path: Path,
+        previous_mtime: int | None,
+    ) -> None:
+        """Watch the upload report for changes while the separate console runs."""
+        if self.upload_stats_poll_after_id is not None:
+            try:
+                self.root.after_cancel(self.upload_stats_poll_after_id)
+            except tk.TclError:
+                pass
+            self.upload_stats_poll_after_id = None
+        if not str(report_path):
+            return
+        self.upload_stats_poll_after_id = self.root.after(
+            10000,
+            self.poll_upload_statistics_report,
+            str(report_path),
+            previous_mtime,
+            1440,
+        )
+
+    def poll_upload_statistics_report(
+        self,
+        report_path_text: str,
+        previous_mtime: int | None,
+        remaining_polls: int,
+    ) -> None:
+        """Refresh Statistics when the upload report changes."""
+        report_path = Path(report_path_text)
+        current_mtime = self.file_mtime_ns(report_path)
+        if current_mtime is not None and current_mtime != previous_mtime:
+            self.refresh_project_statistics_if_active("upload report")
+            previous_mtime = current_mtime
+        if remaining_polls <= 0:
+            self.upload_stats_poll_after_id = None
+            return
+        self.upload_stats_poll_after_id = self.root.after(
+            30000,
+            self.poll_upload_statistics_report,
+            report_path_text,
+            previous_mtime,
+            remaining_polls - 1,
         )
 
     def plan_mosaics(self) -> None:
@@ -3844,6 +4237,8 @@ class LauncherApp:
         if result.returncode == 0:
             if not dry_run and self.mosaic_set_upload_folder_var.get():
                 self.folder_var.set(self.mosaic_output_var.get().strip())
+            if not dry_run:
+                self.refresh_project_statistics_if_active("mosaic")
             self.mosaic_progress_var.set(100.0)
             if dry_run:
                 self.mosaic_progress_text_var.set("Progress: dry run complete")
@@ -3856,6 +4251,8 @@ class LauncherApp:
         self.mosaic_status_var.set(
             f"Mosaic command finished with exit code {result.returncode}. Check the report and console output."
         )
+        if not dry_run:
+            self.refresh_project_statistics_if_active("mosaic")
         messagebox.showwarning("Mosaic finished with warnings", output_tail)
 
     def open_manual_login_browser(self) -> None:
@@ -3944,3 +4341,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

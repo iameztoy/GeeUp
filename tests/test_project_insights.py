@@ -79,6 +79,17 @@ class ProjectInsightsTests(unittest.TestCase):
                         "downloaded": "yes",
                         "raw_exists": "yes",
                         "last_status": "DOWNLOADED",
+                    },
+                    {
+                        "granule_id": "G0",
+                        "file_name": "SWOT_L2_HR_Raster_100m_UTM34M_old.nc",
+                        "utm_tile": "UTM34M",
+                        "start_time": "2026-01-02T00:00:00Z",
+                        "size_mb": "0.5",
+                        "downloaded": "no",
+                        "raw_exists": "no",
+                        "last_status": "EXCLUDED_OLDER_VERSION",
+                        "duplicate_filter_status": "excluded_older_version",
                     }
                 ],
             )
@@ -121,6 +132,17 @@ class ProjectInsightsTests(unittest.TestCase):
                         "local_file": str(mosaic),
                         "asset_id": "projects/example/assets/mosaic",
                         "final_status": "COMPLETED",
+                    },
+                    {
+                        "local_file": str(mosaic),
+                        "asset_id": "projects/example/assets/mosaic_existing",
+                        "final_status": "EE_VERIFIED_EXISTS",
+                    },
+                    {
+                        "local_file": str(mosaic),
+                        "asset_id": "projects/example/assets/mosaic_filtered",
+                        "final_status": "FILTERED_UTM_TILE",
+                        "upload_selected": "no",
                     }
                 ],
             )
@@ -131,9 +153,59 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertEqual(insights.metrics["Raw NetCDF files on disk"], "1")
             self.assertEqual(insights.metrics["Duplicate files moved"], "1")
             self.assertEqual(insights.metrics["Date coverage"], "2026-01-02 to 2026-01-02")
-            self.assertEqual(insights.metrics["Known cumulative download size"], "1.5 MB")
-            self.assertIn(("UTM34M", 2), insights.tile_counts)
+            self.assertEqual(insights.metrics["Known cumulative download size"], "2.0 MB")
+            self.assertEqual(insights.metrics["Remote matches excluded as older versions"], "1")
+            self.assertEqual(insights.metrics["EE-verified existing assets recorded"], "1")
+            self.assertEqual(insights.metrics["Upload rows filtered by UTM selection"], "1")
+            self.assertIn(("UTM34M", 3), insights.tile_counts)
+            self.assertIn(("UTM34M", 1), insights.mosaic_output_grid_counts)
+            self.assertIn(("UTM34M", 1), insights.mosaic_source_tile_counts)
             self.assertEqual([candidate.stage for candidate in candidates], ["extracted", "mosaic", "raw"])
+
+    def test_common_crs_mosaic_reports_source_tile_participation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            src1 = (
+                root
+                / "02_extracted_geotiffs"
+                / "SWOT_L2_HR_Raster_100m_UTM34M_001_002_0001_20260102T000000_20260102T010000_PGC0_01.tif"
+            )
+            src2 = (
+                root
+                / "02_extracted_geotiffs"
+                / "SWOT_L2_HR_Raster_100m_UTM35M_001_002_0001_20260102T000000_20260102T010000_PGC0_01.tif"
+            )
+            mosaic = (
+                root
+                / "03_mosaics"
+                / "SWOT_L2_HR_Raster_100m_LAEA_001_002_MOSA_20260102T000000_20260102T010000_PGC0_01.tif"
+            )
+            for path in (src1, src2, mosaic):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"12345")
+            write_csv(
+                root / "00_logs" / "mosaic_manifest.csv",
+                [
+                    {
+                        "status": "MOSAIC_CREATED",
+                        "output_file": str(mosaic),
+                        "input_count": "2",
+                        "start_date": "2026-01-02",
+                        "coordinate_system": "LAEA",
+                        "input_files": json.dumps([str(src1), str(src2)]),
+                        "output_exists": "yes",
+                        "stale": "false",
+                    }
+                ],
+            )
+
+            insights = collect_project_insights(config)
+
+            self.assertEqual(insights.metrics["Completed common-CRS/non-UTM mosaics"], "1")
+            self.assertIn(("LAEA", 1), insights.mosaic_output_grid_counts)
+            self.assertIn(("UTM34M", 1), insights.mosaic_source_tile_counts)
+            self.assertIn(("UTM35M", 1), insights.mosaic_source_tile_counts)
 
     def test_delete_cleanup_candidates_removes_only_candidate_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

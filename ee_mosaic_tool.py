@@ -488,7 +488,7 @@ def build_output_stem(sources: Sequence[MosaicSource], key: MosaicGroupKey) -> s
         f"{range_beginning}_"
         f"{range_ending}_"
         f"{crid}_"
-        "01_mosaic"
+        "01"
     )
 
 

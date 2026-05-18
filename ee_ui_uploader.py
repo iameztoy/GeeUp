@@ -112,6 +112,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "upload": {
         "batch_size": 50,
         "max_active_ingestions": 2,
+        "scope": "all",
+        "utm_tiles": [],
+        "ee_sync_before_upload": True,
+        "ee_asset_inventory_page_size": 1000,
         "prefix": "",
         "suffix": "",
         "replacement_rules": {},
@@ -149,6 +153,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "logs_dir": "./logs",
         "artifacts_dir": "./artifacts",
         "report_csv": "./reports/upload_report.csv",
+        "ee_asset_inventory_csv": "./reports/ee_asset_inventory.csv",
     },
 }
 
@@ -156,6 +161,13 @@ REPORT_COLUMNS = [
     "local_file",
     "asset_id",
     "batch_number",
+    "upload_selected",
+    "upload_filter_status",
+    "output_grid",
+    "source_utm_tiles",
+    "ee_asset_exists",
+    "ee_verified_at",
+    "verification_source",
     "submit_time",
     "detected_task_name",
     "final_status",
@@ -172,6 +184,7 @@ RESUME_SKIP_STATUSES = {
     "RUNNING",
     "COMPLETED",
     "SKIPPED_ALREADY_EXISTS",
+    "EE_VERIFIED_EXISTS",
 }
 
 TERMINAL_STATUSES = {
@@ -181,6 +194,8 @@ TERMINAL_STATUSES = {
     "UNKNOWN_AFTER_CLICK",
     "SKIPPED_ALREADY_EXISTS",
     "PLANNED_DRY_RUN",
+    "FILTERED_UTM_TILE",
+    "EE_VERIFIED_EXISTS",
 }
 
 ACTIVE_STATUSES = {
@@ -190,6 +205,16 @@ ACTIVE_STATUSES = {
 }
 
 UNKNOWN_AFTER_CLICK_STATUS = "UNKNOWN_AFTER_CLICK"
+UPLOAD_SCOPE_ALL = "all"
+UPLOAD_SCOPE_SELECTED_UTM = "selected_utm"
+VALID_UPLOAD_SCOPES = {UPLOAD_SCOPE_ALL, UPLOAD_SCOPE_SELECTED_UTM}
+FILTER_STATUS_SELECTED_ALL = "selected_all"
+FILTER_STATUS_SELECTED_UTM = "selected_utm_match"
+FILTER_STATUS_FILTERED_UTM = "filtered_no_matching_utm"
+FILTER_STATUS_FILTERED_UNKNOWN = "filtered_no_utm_provenance"
+FILTERED_UTM_STATUS = "FILTERED_UTM_TILE"
+EE_VERIFIED_EXISTS_STATUS = "EE_VERIFIED_EXISTS"
+UTM_TILE_RE = re.compile(r"^UTM(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])$")
 FATAL_BROWSER_SESSION_MESSAGE = (
     "Browser/WebDriver session ended. Stop the run and restart Chrome before continuing."
 )
@@ -311,6 +336,10 @@ class UploadConfig:
 
     batch_size: int = 50
     max_active_ingestions: int = 2
+    scope: str = UPLOAD_SCOPE_ALL
+    utm_tiles: List[str] = field(default_factory=list)
+    ee_sync_before_upload: bool = True
+    ee_asset_inventory_page_size: int = 1000
     prefix: str = ""
     suffix: str = ""
     replacement_rules: Dict[str, str] = field(default_factory=dict)
@@ -347,6 +376,7 @@ class ArtifactConfig:
     logs_dir: Path
     artifacts_dir: Path
     report_csv: Path
+    ee_asset_inventory_csv: Path
 
 
 @dataclass
@@ -361,6 +391,7 @@ class AppConfig:
     metadata: MetadataConfig
     execution: ExecutionConfig
     artifacts: ArtifactConfig
+    mosaic_manifest_csv: Optional[Path]
     base_dir: Path
 
 
@@ -372,6 +403,22 @@ class UploadItem:
     asset_name: str
     asset_id: str
     batch_number: int = 0
+    upload_selected: bool = True
+    upload_filter_status: str = FILTER_STATUS_SELECTED_ALL
+    output_grid: str = ""
+    source_utm_tiles: List[str] = field(default_factory=list)
+    ee_asset_exists: bool = False
+    ee_verified_at: str = ""
+    verification_source: str = ""
+
+
+@dataclass(frozen=True)
+class AssetInventoryRecord:
+    """One Earth Engine asset listed from a destination collection."""
+
+    asset_id: str
+    asset_type: str
+    asset_name: str = ""
 
 
 @dataclass
@@ -437,7 +484,12 @@ class ReportManager:
                     "output_path": row.get("asset_id", ""),
                     "start_time": row.get("metadata_start_time", ""),
                     "end_time": row.get("metadata_end_time", ""),
-                    "output_exists": "unknown",
+                    "output_exists": (
+                        "yes"
+                        if row.get("final_status", "") == EE_VERIFIED_EXISTS_STATUS
+                        or row.get("ee_asset_exists", "").lower() == "yes"
+                        else "unknown"
+                    ),
                     "raw_exists": "yes" if local_file.exists() else "no",
                     "message": row.get("error_message", ""),
                 }
@@ -484,6 +536,110 @@ def resolve_path(value: str | Path | None, base_dir: Path) -> Path:
     return path if path.is_absolute() else (base_dir / path).resolve()
 
 
+def normalize_utm_tile_token(value: str) -> str:
+    """Normalize one UTM/MGRS tile token, returning blank when invalid."""
+    match = UTM_TILE_RE.match(str(value or "").strip().upper())
+    if match is None:
+        return ""
+    return f"UTM{int(match.group('zone')):02d}{match.group('band')}"
+
+
+def normalize_utm_tile_list(value: Any) -> List[str]:
+    """Normalize an upload UTM tile list from YAML or text."""
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        raw_tiles = re.split(r"[\s,;]+", value.strip())
+    elif isinstance(value, (list, tuple, set)):
+        raw_tiles = [str(item) for item in value]
+    else:
+        raise ValueError("upload.utm_tiles must be a list or comma-separated string.")
+
+    tiles: List[str] = []
+    seen: set[str] = set()
+    invalid: List[str] = []
+    for raw_tile in raw_tiles:
+        tile = normalize_utm_tile_token(raw_tile)
+        if not raw_tile:
+            continue
+        if not tile:
+            invalid.append(str(raw_tile).strip())
+            continue
+        if tile not in seen:
+            seen.add(tile)
+            tiles.append(tile)
+    if invalid:
+        raise ValueError(f"Invalid upload UTM tile token(s): {', '.join(invalid)}")
+    return tiles
+
+
+def parse_csv_path_list(value: str) -> List[str]:
+    """Parse a JSON list or conservative delimited path list from a CSV cell."""
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed if item]
+    return [part.strip() for part in re.split(r"[;|]", text) if part.strip()]
+
+
+def source_tiles_from_file_name(file_name: str | Path) -> List[str]:
+    """Return source UTM tile tokens parsed from one SWOT-style filename."""
+    parsed = parse_swot_l2_hr_raster_metadata(file_name)
+    if parsed is None:
+        return []
+    tile = normalize_utm_tile_token(parsed.fields.get("coordinate_system", ""))
+    return [tile] if tile else []
+
+
+def normalize_asset_record(asset: Dict[str, Any]) -> AssetInventoryRecord:
+    """Normalize Earth Engine listAssets output across API versions."""
+    asset_id = str(asset.get("id") or asset.get("name") or "")
+    asset_type = str(asset.get("type") or "").upper()
+    return AssetInventoryRecord(
+        asset_id=asset_id,
+        asset_type=asset_type,
+        asset_name=Path(asset_id).name,
+    )
+
+
+def infer_project_from_asset(asset_id: str) -> Optional[str]:
+    """Infer the Cloud project from a modern Earth Engine asset id."""
+    match = re.match(r"^projects/([^/]+)/assets(?:/|$)", str(asset_id or ""))
+    return match.group(1) if match else None
+
+
+def import_ee():
+    """Import the Earth Engine API only when inventory sync is needed."""
+    try:
+        import ee  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "The Earth Engine Python API is not installed. Install requirements and run "
+            "earthengine authenticate before using upload verification."
+        ) from exc
+    return ee
+
+
+def initialize_earth_engine(ee: Any, asset_parent: str) -> None:
+    """Initialize Earth Engine for asset inventory listing."""
+    project = infer_project_from_asset(asset_parent)
+    try:
+        if project:
+            ee.Initialize(project=project)
+        else:
+            ee.Initialize()
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not initialize Earth Engine for upload verification. Run "
+            "earthengine authenticate, then retry the upload."
+        ) from exc
+
+
 def load_config_file(config_path: Path) -> AppConfig:
     """Load YAML or JSON configuration from disk."""
     suffix = config_path.suffix.lower()
@@ -503,7 +659,11 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
     metadata_data = data.get("metadata", {})
     execution_data = data.get("execution", {})
     artifact_data = data.get("artifacts", {})
+    mosaic_data = data.get("mosaic", {})
     pyramiding_data = upload_data.get("pyramiding_policy", {})
+    upload_scope = str(upload_data.get("scope", UPLOAD_SCOPE_ALL)).strip().lower()
+    if upload_scope not in VALID_UPLOAD_SCOPES:
+        upload_scope = UPLOAD_SCOPE_ALL
 
     config = AppConfig(
         earth_engine_url=str(data.get("earth_engine_url", DEFAULT_CONFIG["earth_engine_url"])),
@@ -521,6 +681,13 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
         upload=UploadConfig(
             batch_size=int(upload_data.get("batch_size", 50)),
             max_active_ingestions=int(upload_data.get("max_active_ingestions", 2)),
+            scope=upload_scope,
+            utm_tiles=normalize_utm_tile_list(upload_data.get("utm_tiles", [])),
+            ee_sync_before_upload=bool(upload_data.get("ee_sync_before_upload", True)),
+            ee_asset_inventory_page_size=max(
+                1,
+                int(upload_data.get("ee_asset_inventory_page_size", 1000)),
+            ),
             prefix=str(upload_data.get("prefix", "")),
             suffix=str(upload_data.get("suffix", "")),
             replacement_rules=dict(upload_data.get("replacement_rules", {})),
@@ -558,6 +725,15 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
             logs_dir=resolve_path(artifact_data.get("logs_dir", "./logs"), base_dir),
             artifacts_dir=resolve_path(artifact_data.get("artifacts_dir", "./artifacts"), base_dir),
             report_csv=resolve_path(artifact_data.get("report_csv", "./reports/upload_report.csv"), base_dir),
+            ee_asset_inventory_csv=resolve_path(
+                artifact_data.get("ee_asset_inventory_csv", "./reports/ee_asset_inventory.csv"),
+                base_dir,
+            ),
+        ),
+        mosaic_manifest_csv=(
+            resolve_path(mosaic_data.get("manifest_csv"), base_dir)
+            if mosaic_data.get("manifest_csv")
+            else None
         ),
         base_dir=base_dir,
     )
@@ -577,6 +753,10 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("batch_size must be 1 or greater.")
     if config.upload.max_active_ingestions < 0:
         raise ValueError("max_active_ingestions cannot be negative.")
+    if config.upload.scope not in VALID_UPLOAD_SCOPES:
+        raise ValueError(f"upload.scope must be one of: {', '.join(sorted(VALID_UPLOAD_SCOPES))}.")
+    if config.upload.scope == UPLOAD_SCOPE_SELECTED_UTM and not config.upload.utm_tiles:
+        raise ValueError("upload.utm_tiles must contain at least one tile when upload.scope is selected_utm.")
     if config.chrome.connection_mode not in {"attach", "webdriver"}:
         raise ValueError("chrome.connection_mode must be either 'attach' or 'webdriver'.")
     if config.chrome.remote_debugging_port < 1:
@@ -758,6 +938,8 @@ class EarthEngineUIUploader:
         self.report.load()
         self.resume_skipped_assets: List[str] = []
         self.tracked_items: Dict[str, UploadItem] = {}
+        self.ee_inventory_synced = False
+        self.ee_existing_asset_ids: set[str] = set()
 
         self.config.artifacts.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.config.artifacts.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -815,6 +997,7 @@ class EarthEngineUIUploader:
 
     def build_upload_plan(self) -> List[UploadItem]:
         """Scan the input folder and build the list of uploads."""
+        self.sync_earth_engine_inventory()
         files = self.collect_input_files()
         if not files:
             self.logger.warning("No matching GeoTIFF files were found in %s", self.config.input_folder)
@@ -822,12 +1005,46 @@ class EarthEngineUIUploader:
 
         planned: List[UploadItem] = []
         seen_asset_ids: Dict[str, Path] = {}
+        source_tile_lookup = self.load_mosaic_source_tile_lookup()
 
         for file_path in files:
             asset_name = self.build_asset_name(file_path.stem)
             asset_id = f"{self.config.destination_parent}/{asset_name}"
+            item = UploadItem(
+                local_file=file_path,
+                asset_name=asset_name,
+                asset_id=asset_id,
+            )
+            self.apply_upload_filter_metadata(item, source_tile_lookup)
+            if not item.upload_selected:
+                self.report.upsert(
+                    self.make_report_row(
+                        item=item,
+                        submit_time="",
+                        detected_task_name="",
+                        final_status=FILTERED_UTM_STATUS,
+                        error_message="Excluded by upload UTM/source-tile selection.",
+                    )
+                )
+                continue
+            if self.ee_inventory_synced and asset_id in self.ee_existing_asset_ids:
+                item.ee_asset_exists = True
+                item.ee_verified_at = now_iso()
+                item.verification_source = "ee.data.listAssets"
+                self.report.upsert(
+                    self.make_report_row(
+                        item=item,
+                        submit_time="",
+                        detected_task_name="",
+                        final_status=EE_VERIFIED_EXISTS_STATUS,
+                        error_message="Asset exists in the target Earth Engine collection.",
+                    )
+                )
+                self.resume_skipped_assets.append(asset_id)
+                self.logger.info("Earth Engine verified skip: %s", asset_id)
+                continue
             existing_status = self.report.get_status(asset_id)
-            if self.config.execution.resume and existing_status in RESUME_SKIP_STATUSES:
+            if self.should_resume_skip_existing_status(existing_status):
                 self.resume_skipped_assets.append(asset_id)
                 self.logger.info("Resume skip: %s (%s)", asset_id, existing_status)
                 continue
@@ -840,13 +1057,7 @@ class EarthEngineUIUploader:
                     f"Duplicate asset ID: {asset_id}"
                 )
             seen_asset_ids[asset_id] = file_path
-            planned.append(
-                UploadItem(
-                    local_file=file_path,
-                    asset_name=asset_name,
-                    asset_id=asset_id,
-                )
-            )
+            planned.append(item)
 
         for batch_index, batch in enumerate(chunked(planned, self.config.upload.batch_size), start=1):
             for item in batch:
@@ -858,6 +1069,157 @@ class EarthEngineUIUploader:
             len(self.resume_skipped_assets),
         )
         return planned
+
+    def should_resume_skip_existing_status(self, existing_status: str) -> bool:
+        """Return whether a previous report status should skip this upload."""
+        status = str(existing_status or "").strip().upper()
+        if not self.config.execution.resume or status not in RESUME_SKIP_STATUSES:
+            return False
+        if not self.ee_inventory_synced:
+            return True
+        if status in ACTIVE_STATUSES:
+            return True
+        if status == EE_VERIFIED_EXISTS_STATUS:
+            return True
+        return False
+
+    def sync_earth_engine_inventory(self) -> None:
+        """List target Earth Engine assets and cache them for resume decisions."""
+        if not self.config.upload.ee_sync_before_upload:
+            return
+        ee = import_ee()
+        initialize_earth_engine(ee, self.config.destination_parent)
+        records = self.list_earth_engine_assets(ee)
+        self.write_asset_inventory(records)
+        self.ee_inventory_synced = True
+        self.ee_existing_asset_ids = {
+            record.asset_id for record in records if record.asset_type in {"IMAGE", ""}
+        }
+        self.logger.info(
+            "Earth Engine inventory sync listed %s asset(s) under %s.",
+            len(records),
+            self.config.destination_parent,
+        )
+
+    def list_earth_engine_assets(self, ee: Any) -> List[AssetInventoryRecord]:
+        """Return direct child assets from the configured destination parent."""
+        records: List[AssetInventoryRecord] = []
+        params: Dict[str, str] = {
+            "parent": self.config.destination_parent,
+            "pageSize": str(self.config.upload.ee_asset_inventory_page_size),
+            "view": "BASIC",
+        }
+        while True:
+            try:
+                response = ee.data.listAssets(params)
+            except TypeError:
+                list_params = {key: value for key, value in params.items() if key != "parent"}
+                response = ee.data.listAssets(self.config.destination_parent, list_params)
+            records.extend(
+                normalize_asset_record(asset)
+                for asset in response.get("assets", [])
+            )
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+            params["pageToken"] = str(page_token)
+        return records
+
+    def write_asset_inventory(self, records: Sequence[AssetInventoryRecord]) -> None:
+        """Write a compact Earth Engine asset inventory CSV."""
+        path = self.config.artifacts.ee_asset_inventory_csv
+        path.parent.mkdir(parents=True, exist_ok=True)
+        listed_at = now_iso()
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=["asset_id", "asset_name", "asset_type", "parent", "listed_at"],
+            )
+            writer.writeheader()
+            for record in records:
+                writer.writerow(
+                    {
+                        "asset_id": record.asset_id,
+                        "asset_name": record.asset_name,
+                        "asset_type": record.asset_type,
+                        "parent": self.config.destination_parent,
+                        "listed_at": listed_at,
+                    }
+                )
+
+    def load_mosaic_source_tile_lookup(self) -> Dict[str, List[str]]:
+        """Map mosaic outputs to source UTM tiles from the mosaic manifest."""
+        path = self.config.mosaic_manifest_csv
+        if path is None or not path.exists():
+            return {}
+        lookup: Dict[str, List[str]] = {}
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                rows = csv.DictReader(handle)
+                for row in rows:
+                    output = str(row.get("output_file", "") or "").strip()
+                    if not output:
+                        continue
+                    tiles: set[str] = set()
+                    for source in parse_csv_path_list(row.get("input_files", "")):
+                        tiles.update(source_tiles_from_file_name(source))
+                    if not tiles:
+                        continue
+                    sorted_tiles = sorted(tiles)
+                    output_path = Path(output)
+                    lookup[output_path.name] = sorted_tiles
+                    try:
+                        lookup[str(output_path.resolve())] = sorted_tiles
+                    except OSError:
+                        lookup[str(output_path)] = sorted_tiles
+        except OSError as exc:
+            self.logger.warning("Could not read mosaic source-tile manifest %s: %s", path, exc)
+        return lookup
+
+    def apply_upload_filter_metadata(
+        self,
+        item: UploadItem,
+        source_tile_lookup: Dict[str, List[str]],
+    ) -> None:
+        """Attach output-grid/source-tile metadata and filter one upload item."""
+        parsed = parse_swot_l2_hr_raster_metadata(item.local_file)
+        if parsed is not None:
+            item.output_grid = str(parsed.fields.get("coordinate_system", "") or "").upper()
+            item.source_utm_tiles = source_tiles_from_file_name(item.local_file)
+        manifest_tiles = self.lookup_mosaic_source_tiles(item.local_file, source_tile_lookup)
+        if manifest_tiles:
+            item.source_utm_tiles = sorted(set(item.source_utm_tiles).union(manifest_tiles))
+
+        if self.config.upload.scope == UPLOAD_SCOPE_ALL:
+            item.upload_selected = True
+            item.upload_filter_status = FILTER_STATUS_SELECTED_ALL
+            return
+
+        selected_tiles = set(self.config.upload.utm_tiles)
+        item_tiles = set(item.source_utm_tiles)
+        item.upload_selected = bool(item_tiles & selected_tiles)
+        if item.upload_selected:
+            item.upload_filter_status = FILTER_STATUS_SELECTED_UTM
+        elif item_tiles:
+            item.upload_filter_status = FILTER_STATUS_FILTERED_UTM
+        else:
+            item.upload_filter_status = FILTER_STATUS_FILTERED_UNKNOWN
+
+    def lookup_mosaic_source_tiles(
+        self,
+        file_path: Path,
+        source_tile_lookup: Dict[str, List[str]],
+    ) -> List[str]:
+        """Return source UTM tiles for a mosaic output path when known."""
+        keys = [file_path.name]
+        try:
+            keys.append(str(file_path.resolve()))
+        except OSError:
+            keys.append(str(file_path))
+        for key in keys:
+            if key in source_tile_lookup:
+                return list(source_tile_lookup[key])
+        return []
 
     def collect_input_files(self) -> List[Path]:
         """Return sorted GeoTIFF files from the input directory."""
@@ -2552,6 +2914,13 @@ class EarthEngineUIUploader:
             "local_file": str(item.local_file),
             "asset_id": item.asset_id,
             "batch_number": str(item.batch_number),
+            "upload_selected": "yes" if item.upload_selected else "no",
+            "upload_filter_status": item.upload_filter_status,
+            "output_grid": item.output_grid,
+            "source_utm_tiles": json.dumps(item.source_utm_tiles),
+            "ee_asset_exists": "yes" if item.ee_asset_exists else "no",
+            "ee_verified_at": item.ee_verified_at,
+            "verification_source": item.verification_source,
             "submit_time": submit_time,
             "detected_task_name": detected_task_name,
             "final_status": final_status,

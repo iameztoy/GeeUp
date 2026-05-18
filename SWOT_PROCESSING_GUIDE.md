@@ -64,6 +64,8 @@ Tiles can be typed manually, selected in the searchable list, populated from a b
 
 The preview report records matched filenames, UTM tokens, date metadata, known file sizes, local paths, status, raw-file presence, manifest-known status, and Earthdata links. After a successful download, the launcher points Duplicate Removal and Extraction at the same raw-download folder.
 
+The `Product version filter` is applied after the Earthdata search and before downloading. `Best product version only` groups remote matches that represent the same SWOT observation and selects the highest-ranked CRID/product-counter file for download. Older versions remain in `download_preview.csv`, `download_manifest.csv`, and `workflow_manifest.csv` with `EXCLUDED_OLDER_VERSION` so the project still records that they existed and were intentionally not downloaded. Use `All matching files` when you want every remote file and prefer to let Duplicate Removal move older versions later.
+
 For project time-series updates, `Prepare Update` uses the last successful project download end date as the next inclusive start date and sets the end date to today. Existing-file skipping, manifest-known skipping, and duplicate cleanup are still responsible for handling overlap safely.
 
 After a preview or download run, the report is written with `downloaded`, `raw_exists`, and `known_from_manifest` columns. `downloaded=yes` means the matched granule is accounted for either by a complete raw file or by `download_manifest.csv`. `raw_exists=no` and `known_from_manifest=yes` means the project has already downloaded that granule before, even if the raw NetCDF has since been deleted. `no` means the granule is still missing, failed, or was cancelled before it was attempted. The GUI summary reports accounted-for granules versus matched granules.
@@ -79,13 +81,18 @@ Extraction, mosaic, and upload now also contribute to cumulative stage tracking:
 - `extract_manifest.csv` records NetCDF inputs that were written, skipped because the GeoTIFF exists, or skipped because they were already recorded.
 - `mosaic_manifest.csv` records mosaic outputs and the source-file signature used to create or accept them.
 - `upload_report.csv` remains the Earth Engine upload ledger.
+- `ee_asset_inventory.csv` records the latest Earth Engine destination listing used to verify already-uploaded assets.
 - `workflow_manifest.csv` combines download, extract, mosaic, and upload rows into one project-level table.
 
-Use the `Statistics` tab after any major run to audit the active project. It reads the project manifests and local folders to summarize total project files and size, file counts per processing level, duplicate files moved, files per UTM tile, dates covered, recorded downloads, completed extractions, mosaics, upload status, known cumulative download size, and observed SWOT cycles, passes, scenes, CRIDs, and product counters. It also draws lightweight bar plots for stage counts and top UTM tiles.
+Use the `Statistics` tab after any major run to audit the active project. It reads the project manifests and local folders to summarize total project files and size, file counts per processing level, duplicate files moved, files per UTM tile, dates covered, recorded downloads, remote matches excluded as older versions, completed extractions, mosaics, upload status, EE-verified existing assets, UTM-filtered upload rows, known cumulative download size, and observed SWOT cycles, passes, scenes, CRIDs, and product counters. It also draws lightweight bar plots for stage counts and top UTM tiles. The Mosaics statistics view reports completed mosaics by output tile/grid and completed mosaic participation by source UTM tile.
+
+Statistics refresh automatically after completed Download, Duplicate Removal, Extraction, Mosaic, and Cleanup actions. Upload runs in a separate console window, so GeeUp watches the configured `upload_report.csv` and refreshes statistics when that report changes. You can still click `Refresh Statistics` at any time.
 
 The same tab provides conservative cleanup controls. `Preview Cleanup` lists only files with downstream manifest proof: raw NetCDFs that have completed extraction rows, extracted GeoTIFFs that belong to completed non-stale mosaic rows, and mosaic GeoTIFFs that are recorded as uploaded or already present in Earth Engine. Delete selected rows when you want fine control, or delete all previewed candidates when the project stage is complete and storage is the priority.
 
 For common-CRS whole pass/date mosaics, a newly added tile can change an existing mosaic group. GeeUp therefore compares the current source signature with the recorded mosaic manifest. If an output file already exists but the source set changed, the mosaic report marks that row `STALE_EXISTS`; enable overwrite or remove the stale output before rebuilding that mosaic group.
+
+Mosaic-per-tile statistics depend on the output CRS. When extraction keeps the original SWOT tile/grid CRS, the mosaic output grid is a UTM tile token and the output-grid count is the direct "mosaics per tile" count. When extraction reprojects to a common CRS such as `LAEA` or `WGS84`, the mosaic output no longer belongs to one UTM tile. In those cases, use the source UTM tile participation table: it parses each completed mosaic row's `input_files` from `mosaic_manifest.csv` and counts which original SWOT tiles contributed to each common-CRS mosaic.
 
 ## Extraction Outputs
 
@@ -129,6 +136,14 @@ That mode is intended for already reprojected extraction outputs and groups by:
 
 It ignores the original UTM token in the filename, but still validates actual raster compatibility before merging.
 
+In common-CRS mode, do not interpret mosaic outputs as per-UTM-tile products. The output grid is the configured common CRS, while the source-tile statistics and `input_files` manifest column preserve the UTM provenance needed to audit coverage.
+
+## Upload Selection And Verification
+
+Upload defaults to scanning every GeoTIFF in the configured origin folder. When `upload.scope` is `selected_utm`, only files whose output UTM tile or mosaic source UTM tiles intersect `upload.utm_tiles` are eligible. Original-CRS products are matched from the filename coordinate token. Common-CRS mosaics such as `LAEA` and `WGS84` use `mosaic_manifest.csv` `input_files` to recover the original source UTM tiles.
+
+Before upload planning, GeeUp can list the destination Earth Engine collection with `ee.data.listAssets`. Existing asset IDs are written as `EE_VERIFIED_EXISTS` in `upload_report.csv` and skipped. This is more reliable than trusting the local upload report alone after an interrupted run. The latest listing is cached in `ee_asset_inventory.csv`.
+
 ## Mosaic Output Naming
 
 Mosaic output names remain upload-compatible. They use:
@@ -141,13 +156,14 @@ Mosaic output names remain upload-compatible. They use:
 - maximum end timestamp across the group
 - original CRID when consistent, otherwise `MIXD`
 - product counter `01`
-- suffix `_mosaic`
 
 Example:
 
 ```text
-SWOT_L2_HR_Raster_100m_UTM28P_N_x_x_x_034_266_MOSA_20250618T055612_20250618T055713_PID0_01_mosaic.tif
+SWOT_L2_HR_Raster_100m_UTM28P_N_x_x_x_034_266_MOSA_20250618T055612_20250618T055713_PID0_01.tif
 ```
+
+`MOSA` is the scene ID and is the only mosaic marker in new output names. Older outputs with an extra `_mosaic` suffix remain parseable, but GeeUp no longer creates that suffix.
 
 When a mosaic combines different source CRIDs, the filename uses `MIXD` in the CRID position. The main mosaic report records the source CRIDs, source product counters, dominant CRID, preferred CRID by rank, and a `mixed_crid` flag. The focused `mixed_crid_mosaics.csv` report contains only mixed-CRID groups.
 

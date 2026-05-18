@@ -28,7 +28,9 @@ COMPLETED_MOSAIC_STATUSES = {
 UPLOAD_CLEANUP_STATUSES = {
     "COMPLETED",
     "SKIPPED_ALREADY_EXISTS",
+    "EE_VERIFIED_EXISTS",
 }
+UTM_TILE_TOKEN_RE = re.compile(r"^UTM(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])$")
 
 
 @dataclass
@@ -50,6 +52,8 @@ class ProjectInsights:
     stage_status_counts: List[tuple[str, str, int]]
     tile_counts: List[tuple[str, int]]
     date_counts: List[tuple[str, int]]
+    mosaic_output_grid_counts: List[tuple[str, int]]
+    mosaic_source_tile_counts: List[tuple[str, int]]
     cleanup_candidates: List[CleanupCandidate]
 
 
@@ -131,6 +135,17 @@ def parse_json_list(value: str) -> List[str]:
     return [str(item) for item in parsed if item]
 
 
+def parse_path_list(value: str) -> List[str]:
+    """Parse a JSON list or conservative delimited path list from a CSV cell."""
+    parsed = parse_json_list(value)
+    if parsed:
+        return parsed
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return [part.strip() for part in re.split(r"[;|]", text) if part.strip()]
+
+
 def date_from_text(value: str) -> str:
     """Extract YYYY-MM-DD from ISO-like or SWOT timestamp text."""
     text = str(value or "")
@@ -141,6 +156,38 @@ def date_from_text(value: str) -> str:
     if compact:
         return f"{compact.group(1)}-{compact.group(2)}-{compact.group(3)}"
     return ""
+
+
+def normalize_utm_tile_token(value: str) -> str:
+    """Normalize one UTM/MGRS tile token, returning blank when it is not a tile."""
+    match = UTM_TILE_TOKEN_RE.match(str(value or "").strip().upper())
+    if match is None:
+        return ""
+    return f"UTM{int(match.group('zone')):02d}{match.group('band')}"
+
+
+def mosaic_output_grid(row: Mapping[str, str]) -> str:
+    """Return the output CRS/grid token recorded for one mosaic row."""
+    grid = str(row.get("coordinate_system", "") or "").strip().upper()
+    if grid:
+        return grid
+    parsed = parse_swot_l2_hr_raster_metadata(row.get("output_file", ""))
+    if parsed is None:
+        return ""
+    return str(parsed.fields.get("coordinate_system", "") or "").strip().upper()
+
+
+def mosaic_source_tiles(row: Mapping[str, str]) -> List[str]:
+    """Return unique source UTM tiles contributing to one mosaic row."""
+    tiles: set[str] = set()
+    for file_name in parse_path_list(row.get("input_files", "")):
+        parsed = parse_swot_l2_hr_raster_metadata(file_name)
+        if parsed is None:
+            continue
+        tile = normalize_utm_tile_token(parsed.fields.get("coordinate_system", ""))
+        if tile:
+            tiles.add(tile)
+    return sorted(tiles)
 
 
 def add_unique_swot_fields(
@@ -351,14 +398,48 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     cleanup_candidates = plan_cleanup_candidates(config)
     downloaded_rows = [row for row in download_rows if row.get("downloaded", "").lower() == "yes"]
     raw_existing_download_rows = [row for row in download_rows if row.get("raw_exists", "").lower() == "yes"]
+    excluded_download_rows = [
+        row
+        for row in download_rows
+        if row.get("last_status", "") == "EXCLUDED_OLDER_VERSION"
+        or row.get("duplicate_filter_status", "") == "excluded_older_version"
+    ]
     complete_extract_rows = list(completed_extract_rows(extract_rows))
     complete_mosaic_rows = list(completed_mosaic_rows(mosaic_rows))
     stale_mosaic_rows = [row for row in mosaic_rows if row.get("stale", "").lower() == "true"]
     uploaded_rows = [
         row for row in upload_rows if row.get("final_status", "").upper() in UPLOAD_CLEANUP_STATUSES
     ]
+    ee_verified_upload_rows = [
+        row for row in upload_rows if row.get("final_status", "").upper() == "EE_VERIFIED_EXISTS"
+    ]
+    filtered_upload_rows = [
+        row
+        for row in upload_rows
+        if row.get("final_status", "").upper() == "FILTERED_UTM_TILE"
+        or row.get("upload_selected", "").lower() == "no"
+    ]
+    mosaic_output_grid_counter: Counter[str] = Counter()
+    mosaic_source_tile_counter: Counter[str] = Counter()
+    for row in complete_mosaic_rows:
+        output_grid = mosaic_output_grid(row)
+        if output_grid:
+            mosaic_output_grid_counter[output_grid] += 1
+        source_tiles = mosaic_source_tiles(row)
+        if not source_tiles:
+            fallback_tile = normalize_utm_tile_token(output_grid)
+            if fallback_tile:
+                source_tiles = [fallback_tile]
+        for tile in source_tiles:
+            mosaic_source_tile_counter[tile] += 1
+    common_crs_mosaic_count = sum(
+        count
+        for grid, count in mosaic_output_grid_counter.items()
+        if not normalize_utm_tile_token(grid)
+    )
     date_values = sorted(date_counter)
     known_size_mb = sum_float_column(download_rows, "size_mb")
+    excluded_size_mb = sum_float_column(excluded_download_rows, "size_mb")
     raw_count = file_count(raw_folder, ["*.nc"], recursive=False)
     raw_tree_count = file_count(raw_folder, ["*.nc"], recursive=True)
     extracted_count = file_count(extracted_folder, ["*.tif", "*.tiff"], recursive=False)
@@ -391,6 +472,8 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Duplicate files moved"] = str(moved_files)
     metrics["Download manifest rows"] = str(len(download_rows))
     metrics["Downloaded granules recorded"] = str(len(downloaded_rows))
+    metrics["Remote matches excluded as older versions"] = str(len(excluded_download_rows))
+    metrics["Known size excluded by version filter"] = format_bytes(int(excluded_size_mb * 1024 * 1024))
     metrics["Downloaded raw files still present"] = str(len(raw_existing_download_rows))
     metrics["Downloaded raw files no longer present"] = str(max(0, len(downloaded_rows) - len(raw_existing_download_rows)))
     metrics["Known cumulative download size"] = format_bytes(int(known_size_mb * 1024 * 1024))
@@ -399,8 +482,13 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Mosaic manifest rows"] = str(len(mosaic_rows))
     metrics["Completed mosaics recorded"] = str(len(complete_mosaic_rows))
     metrics["Stale mosaic rows"] = str(len(stale_mosaic_rows))
+    metrics["Unique mosaic output grids observed"] = str(len(mosaic_output_grid_counter))
+    metrics["Completed common-CRS/non-UTM mosaics"] = str(common_crs_mosaic_count)
+    metrics["Unique mosaic source UTM tiles observed"] = str(len(mosaic_source_tile_counter))
     metrics["Upload report rows"] = str(len(upload_rows))
     metrics["Uploaded/already-existing assets recorded"] = str(len(uploaded_rows))
+    metrics["EE-verified existing assets recorded"] = str(len(ee_verified_upload_rows))
+    metrics["Upload rows filtered by UTM selection"] = str(len(filtered_upload_rows))
     metrics["Workflow manifest rows"] = str(len(workflow_rows))
     metrics["Unique UTM tiles observed"] = str(len(tile_counter))
     metrics["Unique dates observed"] = str(len(date_counter))
@@ -425,6 +513,8 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         ],
         tile_counts=tile_counter.most_common(50),
         date_counts=sorted(date_counter.items()),
+        mosaic_output_grid_counts=mosaic_output_grid_counter.most_common(50),
+        mosaic_source_tile_counts=mosaic_source_tile_counter.most_common(50),
         cleanup_candidates=cleanup_candidates,
     )
 

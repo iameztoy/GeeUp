@@ -87,7 +87,7 @@ The script can:
 
 ## Project Files
 
-- `ee_uploader_gui.py`: beginner-friendly desktop launcher with Download, Duplicate Removal, Extraction, Mosaic, and Upload tabs
+- `geeup_gui.py`: beginner-friendly desktop launcher with Download, Duplicate Removal, Extraction, Mosaic, and Upload tabs
 - `geeup_project.py`: project, project-history, and reusable tile-preset helpers
 - `swot_download_tool.py`: Earthdata/PO.DAAC search and download module for SWOT L2 HR Raster 100 m data
 - `utm_map_selector.py`: pure Tkinter visual UTM tile selector
@@ -304,7 +304,7 @@ Right now, after finishing step 6, continue to **step 8**.
 
 This section is only explaining what will happen later, when you eventually start a real upload from:
 
-- the desktop launcher with `Save And Run Real Upload`, or
+- the desktop launcher with `Run Real Upload`, or
 - the command `python ee_ui_uploader.py --config config.yaml`
 
 On that first real upload:
@@ -330,7 +330,7 @@ This is the easiest option for most users.
 Run:
 
 ```powershell
-python ee_uploader_gui.py
+python geeup_gui.py
 ```
 
 Default processing folders:
@@ -375,7 +375,6 @@ Extraction tab:
 
 For extraction, click:
 
-- `Save Config`
 - `Plan Extraction`
 - `Run Extraction`
 
@@ -395,6 +394,8 @@ Upload tab:
 
 - origin folder with GeoTIFF files
 - destination image collection
+- upload scope: all files, or selected UTM/source tiles only
+- upload-specific UTM tile selection
 - batch size
 - max active ingestions
 - prefix / suffix
@@ -415,7 +416,6 @@ Use this tab only when the raw download folder contains repeated SWOT granule ve
 
 For mosaicking, click:
 
-- `Save Config`
 - `Plan Mosaics`
 - `Run Mosaic`
 
@@ -423,14 +423,17 @@ After a successful mosaic run, the launcher can set the Upload tab's origin fold
 
 For uploading, click:
 
-- `Save Config`
 - `Open Chrome For Manual Login`
-- `Save And Run Dry Run`
-- or `Save And Run Real Upload`
+- `Run Dry Run`
+- or `Run Real Upload`
 
-The launcher writes `config.yaml` for you and starts the uploader in a separate console window.
-The two run buttons override the run type for that launch, so `Save And Run Dry Run` always performs a dry run and `Save And Run Real Upload` always performs a real upload.
+The launcher saves the active project, writes `config.yaml` as a CLI mirror for you, and starts the uploader in a separate console window.
+The two run buttons override the run type for that launch, so `Run Dry Run` always performs a dry run and `Run Real Upload` always performs a real upload.
 Before clicking either run button, make sure **Origin folder** points to a real folder on your machine that actually contains `.tif` or `.tiff` files. If it still points to the example folder, the run may finish immediately with "No matching GeoTIFF files were found".
+
+The default Upload scope is `All files in origin folder`. Switch to `Selected UTM/source tiles only` when you want to upload only specific tiles. Original-CRS outputs are matched by their filename UTM token. Common-CRS mosaics such as `LAEA` or `WGS84` are matched through `mosaic_manifest.csv`, using the source UTM tiles that contributed to each mosaic.
+
+Before upload planning, GeeUp lists existing child assets in the destination collection with Earth Engine's asset API. Existing matches are written as `EE_VERIFIED_EXISTS` in `00_logs/upload_report.csv` and skipped, even if the local report was incomplete. The inventory snapshot is written to `00_logs/ee_asset_inventory.csv`.
 
 If you previously saw Google's "This browser or app may not be secure" warning, use `Open Chrome For Manual Login` first:
 
@@ -460,7 +463,7 @@ Use projects when each AOI or production workflow should keep its own folders, U
 
 Recommended workflow:
 
-1. Open `python ee_uploader_gui.py`.
+1. Open `python geeup_gui.py`.
 2. Click `New Project` or `Open Project` before previewing, downloading, or running processing steps.
 3. Use one project root per AOI, for example `Okavango_Delta` or `Africa_Full`.
 4. Configure the Download, Duplicate Removal, Extraction, Mosaic, and Upload tabs.
@@ -488,13 +491,15 @@ Project stage tracking:
 - `00_logs/extract_manifest.csv`: cumulative per-NetCDF extraction memory
 - `00_logs/mosaic_manifest.csv`: cumulative per-mosaic output memory, including source-set signatures
 - `00_logs/upload_report.csv`: cumulative Earth Engine upload/report ledger
+- `00_logs/ee_asset_inventory.csv`: latest Earth Engine destination asset listing used for upload verification
 - `00_logs/workflow_manifest.csv`: shared stage ledger for future project statistics and overview tools
 
 Statistics and cleanup:
 
 - The `Statistics` tab summarizes the active project from manifests, reports, and files currently on disk.
-- It reports total project files and size, raw/extracted/mosaic file counts, duplicate files moved, recorded downloads, completed extractions, completed mosaics, upload rows, dates covered, UTM tile counts, SWOT cycles/passes/scenes/CRIDs, known cumulative download size, and folder sizes.
-- The tab includes simple bar plots for processing-stage rows and the top recorded UTM tiles, plus tables for tile and date counts.
+- It reports total project files and size, raw/extracted/mosaic file counts, duplicate files moved, recorded downloads, remote matches excluded as older versions, completed extractions, completed mosaics, upload rows, EE-verified existing assets, UTM-filtered upload rows, dates covered, UTM tile counts, SWOT cycles/passes/scenes/CRIDs, known cumulative download size, and folder sizes.
+- The tab includes simple bar plots for processing-stage rows and the top recorded UTM tiles, plus tables for tile, date, mosaic output grid, and mosaic source-tile counts.
+- Statistics refresh automatically after completed Download, Duplicate Removal, Extraction, Mosaic, and Cleanup actions. Upload runs in a separate console, so the GUI watches the configured `upload_report.csv` and refreshes statistics when that report changes.
 - `Preview Cleanup` lists local intermediate files that have downstream manifest proof: raw NetCDFs after extraction, extracted GeoTIFFs after mosaic, and mosaic GeoTIFFs after successful/already-existing upload.
 - Cleanup deletion is explicit. Use `Delete Selected Cleanup Files` or `Delete All Cleanup Candidates`; GeeUp only deletes the files shown in the preview table.
 
@@ -515,12 +520,16 @@ Project updates:
 
 Download verification and interruption:
 
+- `Product version filter` controls whether GeeUp downloads every remote match or only the best CRID/product-counter version for each SWOT observation.
+- `Best product version only` still writes every remote match to `download_preview.csv` and `download_manifest.csv`; excluded older versions are marked `EXCLUDED_OLDER_VERSION`, `selected_for_download=no`, and linked to the preferred filename.
+- Use `All matching files` when you need a complete archive of every remote file, then run Duplicate Removal afterward if needed.
 - `download_preview.csv` is the current search/run report. `download_manifest.csv` is the cumulative project memory across runs.
 - The report includes `downloaded`, `raw_exists`, and `known_from_manifest` for every matched granule.
 - `downloaded=yes` means the granule is accounted for by a local raw file or by the manifest. `raw_exists=no` and `known_from_manifest=yes` means the raw NetCDF was probably deleted after a previous successful run.
 - A completed run reports whether all matched granules are accounted for or whether files are still missing.
 - Extraction and mosaic stages use the same idea. Existing outputs are skipped when present, and manifest-known outputs can be skipped even if intermediate files were later deleted.
 - For common-CRS whole pass/date mosaics, GeeUp records a source-set signature. If an existing mosaic output is present but the current source set has changed, the mosaic report marks it `STALE_EXISTS` instead of silently reusing a potentially incomplete mosaic.
+- Mosaic statistics distinguish output grid counts from source UTM tile counts. Original-CRS mosaics can be read as mosaics per UTM tile; common-CRS mosaics such as `LAEA` or `WGS84` should be audited with the source UTM tile table because their outputs no longer belong to a single UTM tile.
 - GeeUp downloads granules in batches for better throughput. `Download threads` controls earthaccess parallel workers and `Batch size` controls how many granules are submitted to earthaccess at once.
 - `Stop Download` requests a cooperative stop after the current batch finishes or fails.
 - Restart the same project/date/tile run with `skip_existing` and `skip_manifest_existing` enabled to continue after a stop or interruption.
@@ -543,6 +552,7 @@ Common values to review:
 - `download.start_date`
 - `download.end_date`
 - `download.utm_tiles`
+- `download.product_version_filter`
 - `download.output_folder`
 - `download.report_csv`
 - `download.manifest_csv`
@@ -562,6 +572,10 @@ Common values to review:
 - `mosaic.mixed_crid_report_csv`
 - `upload.batch_size`
 - `upload.max_active_ingestions`
+- `upload.scope`
+- `upload.utm_tiles`
+- `upload.ee_sync_before_upload`
+- `upload.ee_asset_inventory_page_size`
 - `upload.prefix`
 - `upload.suffix`
 - `metadata.enabled`
@@ -576,12 +590,12 @@ Use the Download tab to retrieve SWOT L2 HR Raster 100 m NetCDF files from PO.DA
 
 Recommended workflow:
 
-1. Open `python ee_uploader_gui.py`.
+1. Open `python geeup_gui.py`.
 2. In the Download tab, click `Authenticate`.
 3. Choose the collection. The default is active Version D: `SWOT_L2_HR_Raster_100m_D`.
 4. Enter a start date, end date, and one or more UTM tile tokens such as `UTM30R`.
 5. Set the output folder to your raw downloads folder.
-6. Click `Preview Search` and review the matched granules, estimated size, raw-file status, and manifest-known status.
+6. Click `Preview Search` and review the matched granules, selected/excluded product versions, estimated size, raw-file status, and manifest-known status.
 7. Click `Download Matches`.
 8. Continue with Duplicate Removal if repeated product versions are present, then Extraction.
 
@@ -614,7 +628,7 @@ Output filename convention:
 Recommended workflow:
 
 1. Keep cleaned NetCDF files in your configured raw downloads folder.
-2. Open `python ee_uploader_gui.py`.
+2. Open `python geeup_gui.py`.
 3. In the Extraction tab, set **GDAL Python** to the GDAL conda Python executable.
 4. Set **Input NetCDF folder** and **Output GeoTIFF folder**.
 5. Choose CRS mode: `original`, `africa_laea`, or `wgs84`.
@@ -672,9 +686,11 @@ This is the default `utm_zone` grouping mode and should be used when extraction 
 
 If extraction reprojects all outputs to one common CRS, use `pass_date_common_crs` grouping mode. In that mode, the mosaic tool ignores the original UTM token in the filename and groups the whole cycle/pass/date together, but still validates the actual rasters with GDAL before merging. Set `mosaic.target_crs_label` to `LAEA` or `WGS84` so output filenames clearly describe the common CRS.
 
+When using common-CRS mosaics, per-output UTM tile counts are not meaningful because each output is in the shared target CRS. Use the Statistics tab's source UTM tile table, or the `input_files` column in `mosaic_manifest.csv`, to audit which original UTM tiles contributed to those mosaics.
+
 If extraction keeps the original projection but you want fewer files than exact-token grouping produces, use `utm_zone_hemisphere`. This groups filename tokens such as `UTM30P`, `UTM30Q`, `UTM30R`, and `UTM30S` as `UTM30N`, while keeping southern-hemisphere latitude bands separate as `UTM30S`. GDAL compatibility validation still runs before a mosaic is written.
 
-Each output filename remains compatible with the SWOT metadata parser, using `MOSA` as the scene ID and `_mosaic` as the suffix.
+Each output filename remains compatible with the SWOT metadata parser, using `MOSA` as the scene ID. New mosaic outputs do not add an extra `_mosaic` suffix.
 
 Mosaic outputs are written as uncompressed GDAL GeoTIFFs. When `mosaic.write_world_file` is true, the tool also writes a `.tfw` world file next to each output GeoTIFF; the GeoTIFF still keeps embedded georeferencing.
 
@@ -685,7 +701,7 @@ If all source files in one mosaic group share the same CRID, that CRID is kept i
 Recommended workflow:
 
 1. Use the extraction workflow or another source to create SWOT GeoTIFFs.
-2. Open `python ee_uploader_gui.py`.
+2. Open `python geeup_gui.py`.
 3. In the Mosaic tab, set **GDAL Python** to a valid conda GDAL Python executable.
 4. Set **Mosaic input folder** to the folder containing original GeoTIFF tiles.
 5. Set **Mosaic output folder** to a different folder, such as `.\mosaics`.
@@ -739,7 +755,7 @@ The values stay as strings so leading zeros are preserved. If your files do not 
 
 ## Step 9: Run a Dry Run
 
-If you are using the desktop launcher, click `Save And Run Dry Run`.
+If you are using the desktop launcher, click `Run Dry Run`.
 
 If you are using the manual CLI method, run:
 
@@ -752,14 +768,16 @@ Dry run is the safest first test. It scans files, builds asset IDs, writes the C
 What to expect:
 
 1. The script scans the input folder.
-2. It shows planned file-to-asset mappings in the console.
-3. It previews parsed SWOT metadata in the console and CSV report when filenames match.
-4. It writes `reports/upload_report.csv`.
-5. No browser upload is submitted.
+2. It lists existing Earth Engine assets when upload verification is enabled.
+3. It shows planned file-to-asset mappings in the console.
+4. It records planned, UTM-filtered, and EE-verified-existing rows in the CSV report.
+5. It previews parsed SWOT metadata in the console and CSV report when filenames match.
+6. It writes `reports/upload_report.csv`.
+7. No browser upload is submitted.
 
 ## Step 10: Run a Real Upload
 
-If you are using the desktop launcher, click `Save And Run Real Upload`.
+If you are using the desktop launcher, click `Run Real Upload`.
 
 If you are using the manual CLI method:
 
@@ -813,11 +831,13 @@ Resume mode reads the CSV report file and skips assets already recorded as:
 - `RUNNING`
 - `COMPLETED`
 - `SKIPPED_ALREADY_EXISTS`
+- `EE_VERIFIED_EXISTS`
 
 This means:
 
 - if the script stops halfway, you can rerun it
 - files already submitted in a previous run are skipped
+- files found in the target Earth Engine collection are marked `EE_VERIFIED_EXISTS` and skipped
 - failed items are not automatically protected from retry unless they already resolved into a skip/completed state
 
 Default report path:
@@ -842,6 +862,13 @@ The CSV includes:
 - `local_file`
 - `asset_id`
 - `batch_number`
+- `upload_selected`
+- `upload_filter_status`
+- `output_grid`
+- `source_utm_tiles`
+- `ee_asset_exists`
+- `ee_verified_at`
+- `verification_source`
 - `submit_time`
 - `detected_task_name`
 - `final_status`
@@ -932,17 +959,17 @@ Instead, it finds the file input element in the web page and sends local file pa
 1. Install Python 3.11+ and Google Chrome.
 2. Create and activate the local environment with `python -m venv .venv` and `.\.venv\Scripts\Activate.ps1`.
 3. Run `python -m pip install --upgrade pip` and `python -m pip install -r requirements.txt`.
-4. Run `python ee_uploader_gui.py`.
+4. Run `python geeup_gui.py`.
 5. If you only need upload, choose your origin folder and destination image collection in the Upload tab.
-6. Click `Save And Run Dry Run`.
-7. If the plan looks right, click `Save And Run Real Upload`.
+6. Click `Run Dry Run`.
+7. If the plan looks right, click `Run Real Upload`.
 
 If you need extraction or mosaics first:
 
 1. Install Miniforge.
 2. Create the GDAL environment with `conda env create --prefix .\.conda\swot_gdal --file environment_swot_gdal.yml`.
 3. Verify it with `.\.conda\swot_gdal\python.exe swot_extract_tool.py --check-gdal`.
-4. Open `python ee_uploader_gui.py`.
+4. Open `python geeup_gui.py`.
 5. In the Extraction tab, set **GDAL Python** to `C:\path\to\GeeUp\.conda\swot_gdal\python.exe` or to another local GDAL conda Python executable.
 6. Click `Plan Extraction`, then `Run Extraction`.
 7. Click `Plan Mosaics`, then `Run Mosaic`.
