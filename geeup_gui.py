@@ -1327,7 +1327,7 @@ class LauncherApp:
         status.grid(row=4, column=0, sticky="w", pady=(14, 0))
 
     def build_statistics_tab(self, parent: ttk.Frame) -> None:
-        """Create project statistics, plots, and cleanup controls."""
+        """Create project statistics, plots, and QA controls."""
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(2, weight=1)
 
@@ -1341,27 +1341,12 @@ class LauncherApp:
 
         actions = ttk.Frame(parent)
         actions.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        actions.columnconfigure(4, weight=1)
+        actions.columnconfigure(1, weight=1)
         ttk.Button(
             actions,
             text="Refresh Statistics",
             command=self.refresh_project_statistics,
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(
-            actions,
-            text="Preview Cleanup",
-            command=self.preview_cleanup_candidates,
-        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Button(
-            actions,
-            text="Delete Selected Cleanup Files",
-            command=self.delete_selected_cleanup_files,
-        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
-        ttk.Button(
-            actions,
-            text="Delete All Cleanup Candidates",
-            command=self.delete_all_cleanup_files,
-        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
 
         inner = ttk.Notebook(parent)
         inner.grid(row=2, column=0, sticky="nsew")
@@ -1371,13 +1356,11 @@ class LauncherApp:
         levels = ttk.Frame(inner, padding=8)
         mosaics = ttk.Frame(inner, padding=8)
         uploaded = ttk.Frame(inner, padding=8)
-        cleanup = ttk.Frame(inner, padding=8)
         inner.add(overview, text="Overview")
         inner.add(tiles, text="Tiles And Dates")
         inner.add(levels, text="Processing Levels")
         inner.add(mosaics, text="Mosaics")
         inner.add(uploaded, text="Uploaded")
-        inner.add(cleanup, text="Cleanup")
 
         overview.columnconfigure(0, weight=1)
         overview.rowconfigure(0, weight=1)
@@ -1720,10 +1703,46 @@ class LauncherApp:
         self.stats_upload_errors_tree.column("message", width=360, anchor="w")
         self.stats_upload_errors_tree.grid(row=0, column=0, sticky="nsew")
 
-        cleanup.columnconfigure(0, weight=1)
-        cleanup.rowconfigure(1, weight=1)
         ttk.Label(
-            cleanup,
+            parent,
+            textvariable=self.statistics_summary_var,
+            foreground="#555555",
+            justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+    def build_cleanup_tab(self, parent: ttk.Frame) -> None:
+        """Create conservative intermediate-file cleanup controls."""
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(3, weight=1)
+
+        ttk.Label(
+            parent,
+            textvariable=self.cleanup_status_var,
+            foreground="#184a8b",
+            justify="left",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        actions = ttk.Frame(parent)
+        actions.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        actions.columnconfigure(3, weight=1)
+        ttk.Button(
+            actions,
+            text="Preview Cleanup",
+            command=self.preview_cleanup_candidates,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            actions,
+            text="Delete Selected Cleanup Files",
+            command=self.delete_selected_cleanup_files,
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="Delete All Cleanup Candidates",
+            command=self.delete_all_cleanup_files,
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+
+        ttk.Label(
+            parent,
             text=(
                 "Cleanup candidates are local intermediate files with downstream manifest proof. "
                 "Preview first, then delete selected rows or all candidates."
@@ -1731,9 +1750,14 @@ class LauncherApp:
             foreground="#555555",
             justify="left",
             wraplength=780,
-        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ).grid(row=2, column=0, sticky="w", pady=(0, 8))
+
+        table_frame = ttk.Frame(parent)
+        table_frame.grid(row=3, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
         self.cleanup_tree = ttk.Treeview(
-            cleanup,
+            table_frame,
             columns=("stage", "size", "reason", "path"),
             show="headings",
             height=16,
@@ -1747,21 +1771,14 @@ class LauncherApp:
         self.cleanup_tree.column("size", width=90, anchor="e")
         self.cleanup_tree.column("reason", width=300, anchor="w")
         self.cleanup_tree.column("path", width=420, anchor="w")
-        self.cleanup_tree.grid(row=1, column=0, sticky="nsew")
+        self.cleanup_tree.grid(row=0, column=0, sticky="nsew")
         cleanup_scroll = ttk.Scrollbar(
-            cleanup,
+            table_frame,
             orient="vertical",
             command=self.cleanup_tree.yview,
         )
-        cleanup_scroll.grid(row=1, column=1, sticky="ns")
+        cleanup_scroll.grid(row=0, column=1, sticky="ns")
         self.cleanup_tree.configure(yscrollcommand=cleanup_scroll.set)
-
-        ttk.Label(
-            parent,
-            textvariable=self.statistics_summary_var,
-            foreground="#555555",
-            justify="left",
-        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
 
     def build_mosaic_tab(self, parent: ttk.Frame) -> None:
         """Create the SWOT GeoTIFF mosaic controls."""
@@ -4023,6 +4040,7 @@ class LauncherApp:
         self.draw_bar_chart(self.stats_stage_chart_canvas, [], "Rows by processing stage")
         self.draw_bar_chart(self.stats_tile_chart_canvas, [], "Top UTM tiles by recorded files")
         self.statistics_summary_var.set("")
+        self.cleanup_status_var.set("Open a project, then preview safe cleanup candidates.")
         if message:
             self.statistics_status_var.set(message)
 
@@ -4149,12 +4167,20 @@ class LauncherApp:
                 values=(status, str(count), message),
             )
 
+        cleanup_size = insights.metrics.get("Cleanup candidate size", "0 B")
         if include_cleanup:
             self.cleanup_candidates = list(insights.cleanup_candidates)
             self.populate_cleanup_tree(self.cleanup_candidates)
+            self.cleanup_status_var.set(
+                f"Cleanup preview updated: {len(self.cleanup_candidates)} files, {cleanup_size}."
+            )
         else:
             self.cleanup_candidates = []
             self.populate_cleanup_tree([])
+            self.cleanup_status_var.set(
+                "Cleanup preview is not loaded from the saved statistics snapshot. "
+                "Click Preview Cleanup or Refresh Statistics to compute current candidates."
+            )
 
         stage_totals: Dict[str, int] = {}
         for stage, _status, count in insights.stage_status_counts:
@@ -4173,13 +4199,8 @@ class LauncherApp:
         )
 
         coverage = insights.metrics.get("Date coverage", "") or "not available"
-        cleanup_size = insights.metrics.get("Cleanup candidate size", "0 B")
-        if include_cleanup:
-            cleanup_text = f"{len(self.cleanup_candidates)} files, {cleanup_size}"
-        else:
-            cleanup_text = "not loaded from saved snapshot; refresh to compute"
         self.statistics_summary_var.set(
-            f"Date coverage: {coverage}. Cleanup preview: {cleanup_text}."
+            f"Date coverage: {coverage}."
         )
         self.statistics_status_var.set(status_text)
 
@@ -4290,13 +4311,13 @@ class LauncherApp:
             )
 
     def preview_cleanup_candidates(self, notify: bool = True) -> None:
-        """Load conservative cleanup candidates into the Statistics cleanup table."""
+        """Load conservative cleanup candidates into the Cleanup table."""
         if not self.require_active_project("preview cleanup candidates"):
             return
         try:
             self.cleanup_candidates = plan_cleanup_candidates(self.build_config())
         except Exception as exc:
-            self.statistics_status_var.set(f"Could not preview cleanup candidates: {exc}")
+            self.cleanup_status_var.set(f"Could not preview cleanup candidates: {exc}")
             messagebox.showerror(
                 "Could not preview cleanup",
                 f"Failed to inspect project manifests:\n{exc}",
@@ -4304,10 +4325,9 @@ class LauncherApp:
             return
         self.populate_cleanup_tree(self.cleanup_candidates)
         total_size = sum(candidate.size_bytes for candidate in self.cleanup_candidates)
-        self.statistics_summary_var.set(
+        self.cleanup_status_var.set(
             f"Cleanup preview: {len(self.cleanup_candidates)} files, {format_insight_bytes(total_size)}."
         )
-        self.statistics_status_var.set("Cleanup preview refreshed.")
         if notify and not self.cleanup_candidates:
             messagebox.showinfo(
                 "No cleanup candidates",
@@ -4390,13 +4410,13 @@ class LauncherApp:
             f"Deleted {deleted} files and freed {format_insight_bytes(bytes_deleted)}."
         )
         if errors:
-            self.statistics_status_var.set(f"{message} {len(errors)} files could not be deleted.")
+            self.cleanup_status_var.set(f"{message} {len(errors)} files could not be deleted.")
             messagebox.showwarning(
                 "Cleanup finished with warnings",
                 f"{message}\n\nSome files could not be deleted:\n" + "\n".join(errors[:10]),
             )
             return
-        self.statistics_status_var.set(message)
+        self.cleanup_status_var.set(message)
         messagebox.showinfo("Cleanup finished", message)
 
     def update_extraction_progress(self, current: int, total: int, message: str) -> None:

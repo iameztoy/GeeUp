@@ -109,7 +109,15 @@ class GuiLayoutTests(unittest.TestCase):
 
             self.assertEqual(
                 tab_texts,
-                ["Download", "Duplicate Removal", "Extraction", "Mosaic", "Upload", "Statistics"],
+                [
+                    "Download",
+                    "Duplicate Removal",
+                    "Extraction",
+                    "Mosaic",
+                    "Upload",
+                    "Statistics",
+                    "Cleanup",
+                ],
             )
             self.assertIn("New Project", collect_button_texts(app.root))
             self.assertIn("Open Project", collect_button_texts(app.root))
@@ -123,6 +131,7 @@ class GuiLayoutTests(unittest.TestCase):
                 mosaic_tab,
                 upload_tab,
                 statistics_tab,
+                cleanup_tab,
             ) = notebook.winfo_children()
             self.assertIn("Collection", collect_label_texts(download_tab))
             self.assertIn("Product version filter", collect_label_texts(download_tab))
@@ -162,12 +171,14 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Run Dry Run", collect_button_texts(upload_tab))
             self.assertIn("Run Real Upload", collect_button_texts(upload_tab))
             self.assertIn("Refresh Statistics", collect_button_texts(statistics_tab))
-            self.assertIn("Preview Cleanup", collect_button_texts(statistics_tab))
-            self.assertIn("Delete Selected Cleanup Files", collect_button_texts(statistics_tab))
-            self.assertIn("Delete All Cleanup Candidates", collect_button_texts(statistics_tab))
+            self.assertNotIn("Preview Cleanup", collect_button_texts(statistics_tab))
+            self.assertIn("Preview Cleanup", collect_button_texts(cleanup_tab))
+            self.assertIn("Delete Selected Cleanup Files", collect_button_texts(cleanup_tab))
+            self.assertIn("Delete All Cleanup Candidates", collect_button_texts(cleanup_tab))
             self.assertGreaterEqual(len(collect_widgets(extract_tab, ttk.Progressbar)), 1)
             self.assertGreaterEqual(len(collect_widgets(mosaic_tab, ttk.Progressbar)), 1)
             self.assertGreaterEqual(len(collect_widgets(statistics_tab, ttk.Treeview)), 3)
+            self.assertGreaterEqual(len(collect_widgets(cleanup_tab, ttk.Treeview)), 1)
             self.assertIn("Processing Levels Across Stages", collect_label_texts(statistics_tab))
             self.assertIn("Upload Status Counts", collect_label_texts(statistics_tab))
             self.assertIn("Pipeline Completeness By UTM Tile", collect_label_texts(statistics_tab))

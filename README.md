@@ -16,7 +16,8 @@ python geeup_gui.py
 - **Extraction:** converts SWOT NetCDF files into two-band GeoTIFFs with `wse` and `wse_qual`.
 - **Mosaic:** reduces GeoTIFF counts before upload, while keeping SWOT-compatible naming and metadata parsing.
 - **Upload:** uploads GeoTIFFs to Google Earth Engine through Chrome/Selenium, with optional UTM/source-tile filtering and Earth Engine asset verification.
-- **Statistics And Cleanup:** summarizes project coverage, processing status, file counts, dates, UTM tiles, uploads, and safe cleanup candidates.
+- **Statistics:** summarizes project coverage, processing status, file counts, dates, UTM tiles, uploads, and QA tables.
+- **Cleanup:** previews and deletes safe intermediate-file cleanup candidates with downstream manifest proof.
 
 ## Basic Workflow
 
@@ -26,7 +27,8 @@ python geeup_gui.py
 4. In **Extraction**, convert cleaned raw NetCDF files to GeoTIFFs using the GDAL conda runtime.
 5. In **Mosaic**, optionally group GeoTIFFs into upload-ready mosaics.
 6. In **Upload**, run a dry run first, then upload to the target Earth Engine ImageCollection.
-7. Use **Statistics** to check coverage, manifests, uploads, and cleanup candidates.
+7. Use **Statistics** to check coverage, manifests, uploads, and QA tables.
+8. Use **Cleanup** to preview and delete safe intermediate files when you need to recover disk space.
 
 ## Important Warnings
 

@@ -200,7 +200,7 @@ Typical steps:
 
 Before planning uploads, GeeUp can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the local upload report is incomplete.
 
-### 6. Statistics And Cleanup
+### 6. Statistics
 
 The Statistics tab reads project manifests, reports, and local folders. It summarizes:
 
@@ -229,7 +229,9 @@ Each refresh writes a saved statistics snapshot under:
 
 When you reopen a project, GeeUp reloads the latest saved snapshot so the Statistics tab is not blank. Click `Refresh Statistics` again whenever files or manifests have changed and you want to recompute and resave the statistics.
 
-Cleanup controls are conservative. They only offer files with downstream manifest proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine.
+### 7. Cleanup
+
+Cleanup is a separate tab because it can delete local intermediate files. Click `Preview Cleanup` first; GeeUp only offers files with downstream manifest proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine. Then delete selected rows, or delete all previewed candidates when you are sure the project stage is complete.
 
 ## Manual CLI Commands
 
