@@ -164,7 +164,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertNotIn("GDAL Python", collect_label_texts(upload_tab))
             self.assertIn("Upload scope", collect_label_texts(upload_tab))
             self.assertIn("Selected upload tiles", collect_label_texts(upload_tab))
-            self.assertIn("Apply Upload Tiles", collect_button_texts(upload_tab))
+            self.assertIn("Validate Typed Tiles", collect_button_texts(upload_tab))
             self.assertIn("Clear Upload Tiles", collect_button_texts(upload_tab))
             self.assertIn("Refresh Available Tiles", collect_button_texts(upload_tab))
             self.assertIn("Execution", collect_label_texts(upload_tab))
@@ -367,6 +367,7 @@ class GuiLayoutTests(unittest.TestCase):
 
                 self.assertEqual(values, ["UTM34M"])
                 self.assertIn("current origin folder", app.upload_tile_availability_var.get())
+                self.assertIn("UTM35M", app.upload_tile_status_var.get())
             finally:
                 root.destroy()
 

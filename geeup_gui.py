@@ -56,6 +56,11 @@ UPLOAD_SCOPE_LABELS = {
 UPLOAD_SCOPE_LABEL_BY_VALUE = {
     value: label for label, value in UPLOAD_SCOPE_LABELS.items()
 }
+UPLOAD_SUCCESS_STATUSES = {
+    "COMPLETED",
+    "SKIPPED_ALREADY_EXISTS",
+    "EE_VERIFIED_EXISTS",
+}
 
 
 def in_isolated_python_environment() -> bool:
@@ -118,6 +123,7 @@ from project_insights import (
     plan_cleanup_candidates,
     path_lookup_keys,
     read_csv_rows,
+    upload_row_source_tiles,
     write_project_insights_snapshot,
 )
 from swot_download_tool import (
@@ -333,6 +339,9 @@ class LauncherApp:
         self.upload_selected_tiles_var = tk.StringVar(value=", ".join(upload_tiles))
         self.upload_tile_availability_var = tk.StringVar(
             value="Upload tiles are derived from the current origin folder when possible."
+        )
+        self.upload_tile_status_var = tk.StringVar(
+            value="No upload tiles selected. Click a listed tile, or type/paste tile IDs and validate typed tiles."
         )
         self.upload_visible_utm_tiles = list(self.all_utm_tiles)
         self.upload_selected_tiles = set(upload_tiles)
@@ -1158,7 +1167,7 @@ class LauncherApp:
         ).grid(row=0, column=0, sticky="ew")
         ttk.Button(
             selected_upload_frame,
-            text="Apply Upload Tiles",
+            text="Validate Typed Tiles",
             command=self.apply_upload_tiles_from_text,
         ).grid(row=1, column=0, sticky="ew", pady=(4, 0))
         ttk.Button(
@@ -1171,6 +1180,13 @@ class LauncherApp:
             text="Refresh Available Tiles",
             command=self.refresh_upload_tile_list,
         ).grid(row=3, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(
+            selected_upload_frame,
+            textvariable=self.upload_tile_status_var,
+            foreground="#184a8b",
+            wraplength=320,
+            justify="left",
+        ).grid(row=4, column=0, sticky="ew", pady=(6, 0))
         row += 1
 
         row = self.add_entry_row(
@@ -1284,7 +1300,7 @@ class LauncherApp:
         ).grid(row=0, column=2, sticky="w", padx=(8, 0))
         ttk.Label(
             buttons,
-            text="Use Apply Upload Tiles only to update the optional UTM filter; use Run Dry Run or Run Real Upload to execute.",
+            text="List clicks update the optional UTM filter immediately. Use Validate Typed Tiles only to check typed or pasted IDs before running; use Run Dry Run or Run Real Upload to execute.",
             foreground="#555555",
             wraplength=900,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
@@ -2593,21 +2609,98 @@ class LauncherApp:
 
     def upload_report_successful_local_files(self) -> set[str]:
         """Return local files already recorded as uploaded or EE-verified."""
-        success_statuses = {
-            "COMPLETED",
-            "SKIPPED_ALREADY_EXISTS",
-            "EE_VERIFIED_EXISTS",
-        }
         uploaded: set[str] = set()
         report_path = self.current_upload_report_path()
         for row in read_csv_rows(report_path):
-            if str(row.get("final_status", "") or "").upper() not in success_statuses:
+            if str(row.get("final_status", "") or "").upper() not in UPLOAD_SUCCESS_STATUSES:
                 continue
             local_file = str(row.get("local_file", "") or "").strip()
             if not local_file:
                 continue
             uploaded.update(path_lookup_keys(local_file))
         return uploaded
+
+    def upload_report_completed_tiles(self) -> list[str]:
+        """Return source UTM tiles with completed or EE-verified upload rows."""
+        completed: set[str] = set()
+        report_path = self.current_upload_report_path()
+        unresolved_rows: list[dict[str, str]] = []
+        for row in read_csv_rows(report_path):
+            if str(row.get("final_status", "") or "").upper() not in UPLOAD_SUCCESS_STATUSES:
+                continue
+            tiles = upload_row_source_tiles(row, {})
+            if tiles:
+                completed.update(tiles)
+            else:
+                unresolved_rows.append(row)
+        if unresolved_rows:
+            mosaic_lookup = self.mosaic_source_tiles_by_output()
+            for row in unresolved_rows:
+                completed.update(upload_row_source_tiles(row, mosaic_lookup))
+        return sorted(tile for tile in completed if tile)
+
+    def compact_tile_list(self, tiles: Sequence[str], limit: int = 10) -> str:
+        """Return a compact comma-separated tile summary for status labels."""
+        if not tiles:
+            return "none"
+        shown = list(tiles[:limit])
+        suffix = "" if len(tiles) <= limit else f", +{len(tiles) - limit} more"
+        return f"{', '.join(shown)}{suffix}"
+
+    def update_upload_tile_status(
+        self,
+        *,
+        available_tiles: Sequence[str] | None = None,
+        completed_tiles: Sequence[str] | None = None,
+        prefix: str = "",
+    ) -> None:
+        """Update the Upload tile status text from selected, pending, and completed tiles."""
+        if not hasattr(self, "upload_tile_status_var"):
+            return
+        available = (
+            sorted(available_tiles)
+            if available_tiles is not None
+            else self.available_upload_tiles()
+        )
+        completed = (
+            sorted(completed_tiles)
+            if completed_tiles is not None
+            else self.upload_report_completed_tiles()
+        )
+        selected = sorted(self.upload_selected_tiles)
+        parts: list[str] = []
+        if prefix:
+            parts.append(prefix)
+        if selected:
+            parts.append(
+                f"Selected filter tiles: {len(selected)} "
+                f"({self.compact_tile_list(selected)})."
+            )
+        else:
+            parts.append("No upload filter tiles selected.")
+
+        if completed:
+            parts.append(
+                f"Completed/EE-verified tiles in upload report: {len(completed)} "
+                f"({self.compact_tile_list(completed)})."
+            )
+        else:
+            parts.append("No completed/EE-verified upload tiles are recorded yet.")
+
+        if selected:
+            pending_selected = sorted(set(selected) & set(available))
+            completed_selected = sorted(set(selected) & set(completed))
+            if completed_selected and not pending_selected:
+                parts.append(
+                    "The selected tile(s) have no pending local upload candidates in the current list; "
+                    "run a dry run to confirm they are skipped or already verified."
+                )
+            elif completed_selected:
+                parts.append(
+                    "Some selected tile(s) already have completed assets; only pending files/assets should be planned."
+                )
+
+        self.upload_tile_status_var.set(" ".join(parts))
 
     def mosaic_source_tiles_by_output(self) -> dict[str, list[str]]:
         """Return source UTM tiles for mosaic outputs from the mosaic manifest."""
@@ -2665,15 +2758,16 @@ class LauncherApp:
         self.upload_tile_listbox.delete(0, tk.END)
         needle = self.upload_tile_filter_var.get().strip().upper()
         available_tiles = self.available_upload_tiles()
+        completed_tiles = self.upload_report_completed_tiles()
         if available_tiles:
             base_tiles = sorted(set(available_tiles) | set(self.upload_selected_tiles))
             self.upload_tile_availability_var.set(
-                f"Showing {len(available_tiles)} tile(s) found in the current origin folder and not already completed in the upload report."
+                f"Showing {len(available_tiles)} upload-ready tile(s) found in the current origin folder. Files already marked completed or EE-verified in upload_report.csv are excluded."
             )
         else:
             base_tiles = list(self.all_utm_tiles)
             self.upload_tile_availability_var.set(
-                "No upload-ready UTM tiles were found in the current origin folder; showing the global list as a fallback."
+                "No upload-ready UTM tiles were found in the current origin folder after local report filtering; showing the global list as a fallback."
             )
         self.upload_visible_utm_tiles = [
             tile for tile in base_tiles if needle in tile
@@ -2682,6 +2776,10 @@ class LauncherApp:
             self.upload_tile_listbox.insert(tk.END, tile)
             if tile in self.upload_selected_tiles:
                 self.upload_tile_listbox.selection_set(tk.END)
+        self.update_upload_tile_status(
+            available_tiles=available_tiles,
+            completed_tiles=completed_tiles,
+        )
 
     def on_upload_tile_select(self, _event: tk.Event | None = None) -> None:
         """Add the current Upload listbox selection to the selected tile state."""
@@ -2695,6 +2793,7 @@ class LauncherApp:
             ", ".join(sorted(self.upload_selected_tiles))
         )
         self.refresh_upload_tile_list()
+        self.update_upload_tile_status(prefix="List selection updated.")
 
     def apply_upload_tiles_from_text(self) -> None:
         """Parse the Upload selected-tile text box and apply it to the listbox."""
@@ -2706,12 +2805,14 @@ class LauncherApp:
         self.upload_selected_tiles = set(tiles)
         self.upload_selected_tiles_var.set(", ".join(tiles))
         self.refresh_upload_tile_list()
+        self.update_upload_tile_status(prefix="Typed upload tiles validated.")
 
     def clear_upload_tiles(self) -> None:
         """Clear Upload UTM tile selection."""
         self.upload_selected_tiles.clear()
         self.upload_selected_tiles_var.set("")
         self.refresh_upload_tile_list()
+        self.update_upload_tile_status(prefix="Upload tile selection cleared.")
 
     def current_upload_tiles(self) -> list[str]:
         """Return normalized selected Upload tiles."""

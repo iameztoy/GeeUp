@@ -191,14 +191,14 @@ Typical steps:
 1. Set the origin folder.
 2. Set the destination ImageCollection asset path.
 3. Choose upload scope: all files, or selected UTM/source tiles only.
-4. If selected-tile scope is active, choose or type upload tiles and click `Apply Upload Tiles`.
+4. If selected-tile scope is active, choose upload tiles from the list, or type/paste tile IDs and optionally click `Validate Typed Tiles`.
 5. In the `Execution` box, run `Run Dry Run`.
 6. Review `00_logs\upload_report.csv`.
 7. In the `Execution` box, run `Run Real Upload`.
 
-`Apply Upload Tiles` only updates the optional UTM filter. It does not start an upload.
+List clicks update the optional UTM filter immediately. `Validate Typed Tiles` only checks typed or pasted tile IDs and refreshes the list highlighting. It does not start an upload.
 
-Before planning uploads, GeeUp can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the local upload report is incomplete.
+Before planning uploads, GeeUp can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the local upload report is incomplete. The Upload tile list also excludes local files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS` in `upload_report.csv`; the status text shows which source tiles are already completed or verified.
 
 ### 6. Statistics
 
