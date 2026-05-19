@@ -89,6 +89,15 @@ REPORT_COLUMNS = [
     "message",
     "input_files",
 ]
+ERROR_DISK_SPACE_STATUS = "ERROR_DISK_SPACE"
+DISK_SPACE_ERROR_PATTERNS = (
+    "no space left",
+    "not enough space",
+    "disk full",
+    "insufficient disk",
+    "tiffappendtostrip:write error",
+    "write error at scanline",
+)
 
 
 @dataclass(frozen=True)
@@ -612,16 +621,26 @@ def run_mosaic(
                 )
             )
         except Exception as exc:  # noqa: BLE001
-            status = "ERROR"
+            status = ERROR_DISK_SPACE_STATUS if is_disk_space_error(exc) else "ERROR"
+            message = str(exc)
+            if status == ERROR_DISK_SPACE_STATUS:
+                message = (
+                    f"{message} Mosaic run stopped early because this looks like a disk-space "
+                    "or low-level GeoTIFF write failure. Free space, then rerun Mosaic with "
+                    "overwrite off and manifest skipping on."
+                )
             rows.append(
                 add_mosaic_tracking_fields(
-                    report_row_for_group(group, status, str(exc)),
+                    report_row_for_group(group, status, message),
                     group,
                     signature,
                 )
             )
+            cleanup_temporary_output(group.output_file)
         if progress_callback is not None:
             progress_callback(index, total, f"{status}: {group.output_file.name}")
+        if status == ERROR_DISK_SPACE_STATUS:
+            break
 
     write_report(config.report_csv, rows)
     write_mixed_crid_report(config.mixed_crid_report_csv, rows)
@@ -705,6 +724,49 @@ def geotiff_creation_options(config: MosaicConfig) -> List[str]:
     return options
 
 
+def temporary_mosaic_path(output_file: Path) -> Path:
+    """Return a same-folder temporary GeoTIFF path for one final mosaic."""
+    return output_file.with_name(f"{output_file.stem}.part{output_file.suffix}")
+
+
+def world_file_path(path: Path) -> Path:
+    """Return the standard world-file sidecar path for a GeoTIFF."""
+    return path.with_suffix(".tfw")
+
+
+def cleanup_temporary_output(output_file: Path) -> None:
+    """Remove temporary mosaic files left after a failed write."""
+    temp_file = temporary_mosaic_path(output_file)
+    for path in (temp_file, world_file_path(temp_file)):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+
+def promote_temporary_output(temp_file: Path, output_file: Path, config: MosaicConfig) -> None:
+    """Atomically promote a completed temporary GeoTIFF to the final output name."""
+    temp_world = world_file_path(temp_file)
+    final_world = world_file_path(output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_file.replace(output_file)
+    if temp_world.exists():
+        temp_world.replace(final_world)
+    elif config.write_world_file:
+        try:
+            if final_world.exists():
+                final_world.unlink()
+        except OSError:
+            pass
+
+
+def is_disk_space_error(exc: BaseException) -> bool:
+    """Return True when an exception looks like disk exhaustion or write failure."""
+    message = str(exc).lower()
+    return any(pattern in message for pattern in DISK_SPACE_ERROR_PATTERNS)
+
+
 def apply_output_band_metadata(dataset: Any) -> None:
     """Restore expected band descriptions on extraction-style mosaic outputs."""
     if dataset.RasterCount >= 1:
@@ -718,20 +780,33 @@ def copy_singleton(group: MosaicGroup, config: MosaicConfig) -> None:
     gdal = require_gdal()
 
     config.output_folder.mkdir(parents=True, exist_ok=True)
+    temp_output = temporary_mosaic_path(group.output_file)
+    cleanup_temporary_output(group.output_file)
     source_ds = gdal.Open(str(group.sources[0].path))
     if source_ds is None:
         raise RuntimeError(f"Could not open singleton input: {group.sources[0].path.name}")
-    translate_options = gdal.TranslateOptions(
-        format="GTiff",
-        creationOptions=geotiff_creation_options(config),
-    )
-    out_ds = gdal.Translate(str(group.output_file), source_ds, options=translate_options)
-    source_ds = None
-    if out_ds is None:
-        raise RuntimeError(f"Could not write singleton output: {group.output_file}")
-    apply_output_band_metadata(out_ds)
-    out_ds.FlushCache()
     out_ds = None
+    promoted = False
+    try:
+        translate_options = gdal.TranslateOptions(
+            format="GTiff",
+            creationOptions=geotiff_creation_options(config),
+        )
+        out_ds = gdal.Translate(str(temp_output), source_ds, options=translate_options)
+        source_ds = None
+        if out_ds is None:
+            raise RuntimeError(f"Could not write singleton output: {group.output_file}")
+        apply_output_band_metadata(out_ds)
+        out_ds.FlushCache()
+        out_ds = None
+        promote_temporary_output(temp_output, group.output_file, config)
+        promoted = True
+    finally:
+        source_ds = None
+        if out_ds is not None:
+            out_ds = None
+        if not promoted:
+            cleanup_temporary_output(group.output_file)
 
 
 def require_numpy() -> tuple[Any, Any]:
@@ -879,12 +954,15 @@ def merge_group(group: MosaicGroup, config: MosaicConfig) -> None:
     gdal = require_gdal()
 
     config.output_folder.mkdir(parents=True, exist_ok=True)
+    temp_output = temporary_mosaic_path(group.output_file)
+    cleanup_temporary_output(group.output_file)
     vrt_path = f"/vsimem/{group.output_file.stem}.vrt"
     source_paths = [str(source.path) for source in reversed(group.sources)]
     vrt_ds = None
     output_dataset = None
     aligned_sources: List[Any] = []
     aligned_vrt_paths: List[str] = []
+    promoted = False
     try:
         vrt_ds = gdal.BuildVRT(vrt_path, source_paths)
         if vrt_ds is None:
@@ -893,19 +971,22 @@ def merge_group(group: MosaicGroup, config: MosaicConfig) -> None:
             format="GTiff",
             creationOptions=geotiff_creation_options(config),
         )
-        output_dataset = gdal.Translate(str(group.output_file), vrt_ds, options=translate_options)
+        output_dataset = gdal.Translate(str(temp_output), vrt_ds, options=translate_options)
         if output_dataset is None:
             raise RuntimeError(f"Could not write mosaic: {group.output_file}")
         apply_output_band_metadata(output_dataset)
         output_dataset.FlushCache()
         output_dataset = None
 
-        output_dataset = gdal.Open(str(group.output_file), gdal.GA_Update)
+        output_dataset = gdal.Open(str(temp_output), gdal.GA_Update)
         if output_dataset is None:
             raise RuntimeError(f"Could not reopen mosaic for quality-band rewrite: {group.output_file}")
         if output_dataset.RasterCount < 2:
             apply_output_band_metadata(output_dataset)
             output_dataset.FlushCache()
+            output_dataset = None
+            promote_temporary_output(temp_output, group.output_file, config)
+            promoted = True
             return
 
         band1 = output_dataset.GetRasterBand(1)
@@ -923,6 +1004,9 @@ def merge_group(group: MosaicGroup, config: MosaicConfig) -> None:
         )
         rewrite_quality_band(output_dataset, aligned_sources, band1_nodata, band2_nodata)
         output_dataset.FlushCache()
+        output_dataset = None
+        promote_temporary_output(temp_output, group.output_file, config)
+        promoted = True
     finally:
         for index in range(len(aligned_sources)):
             aligned_sources[index] = None
@@ -938,6 +1022,8 @@ def merge_group(group: MosaicGroup, config: MosaicConfig) -> None:
                 gdal.Unlink(path)
             except Exception:
                 pass
+        if not promoted:
+            cleanup_temporary_output(group.output_file)
 
 
 def report_row_for_group(
@@ -1084,7 +1170,7 @@ def write_mixed_crid_report(
 def summarize_exit_code(rows: Sequence[Dict[str, str]]) -> int:
     """Return a process exit code for report statuses."""
     failing = {"ERROR", "INVALID_FILENAME", "SKIPPED_INCOMPATIBLE", "STALE_EXISTS"}
-    return 2 if any(row.get("status") in failing for row in rows) else 0
+    return 2 if any(row.get("status") in failing or row.get("status", "").startswith("ERROR_") for row in rows) else 0
 
 
 def summarize_rows(rows: Sequence[Dict[str, str]]) -> Dict[str, int]:

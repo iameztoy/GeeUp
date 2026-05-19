@@ -205,15 +205,29 @@ Before planning uploads, GeeUp can list existing Earth Engine assets and mark ma
 The Statistics tab reads project manifests, reports, and local folders. It summarizes:
 
 - total files and size by processing level
+- processing levels such as `PGD0_01` or any future CRID/product-counter level, including how many remote matches, downloads, extractions, mosaic sources, and uploaded/verified assets are recorded for each level
 - raw downloads and manifest-known files
 - older remote product versions excluded from download
 - duplicate files moved
 - files and date coverage by UTM tile
+- processing levels by UTM tile, useful for checking whether some tiles are dominated by older or newer product versions
 - extraction and mosaic counts
 - upload status, UTM-filtered rows, and EE-verified existing assets
+- uploaded/verified asset counts by status, source UTM tile, date, processing level, and output grid
+- upload QA by UTM tile, comparing downloaded, extracted, mosaicked, and uploaded/verified counts
+- local mosaics that appear ready but are not yet uploaded or verified in Earth Engine
+- grouped upload failures and warning messages
 - observed SWOT cycles, passes, scenes, CRIDs, and product counters
 
 Use `Refresh Statistics` when you want an immediate update. GeeUp also refreshes statistics automatically after major workflow steps.
+
+Each refresh writes a saved statistics snapshot under:
+
+```text
+<project_root>\00_logs\statistics
+```
+
+When you reopen a project, GeeUp reloads the latest saved snapshot so the Statistics tab is not blank. Click `Refresh Statistics` again whenever files or manifests have changed and you want to recompute and resave the statistics.
 
 Cleanup controls are conservative. They only offer files with downstream manifest proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine.
 
@@ -287,6 +301,11 @@ Common files include:
 - `upload_report.csv`
 - `ee_asset_inventory.csv`
 - `workflow_manifest.csv`
+- `statistics\project_statistics_snapshot.json`
+- `statistics\project_statistics_*.csv`
+- `statistics\project_statistics_upload_qa_by_tile.csv`
+- `statistics\project_statistics_ready_not_uploaded.csv`
+- `statistics\project_statistics_upload_errors.csv`
 
 Older root-level folders such as `logs`, `artifacts`, or `reports` may exist from pre-project runs or from manual CLI runs that used older defaults.
 

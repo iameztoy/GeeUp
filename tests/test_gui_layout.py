@@ -68,6 +68,17 @@ def collect_button_texts(widget: tk.Widget) -> set[str]:
     return texts
 
 
+def listbox_values(listbox: tk.Listbox) -> list[str]:
+    return [str(listbox.get(index)) for index in range(listbox.size())]
+
+
+def swot_tif_name(tile: str) -> str:
+    return (
+        f"SWOT_L2_HR_Raster_100m_{tile}_N_x_x_x_"
+        "034_266_MOSA_20260102T000000_20260102T010000_PGD0_01.tif"
+    )
+
+
 class GuiLayoutTests(unittest.TestCase):
     def sample_config(self, root: Path) -> dict:
         return {
@@ -146,6 +157,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Selected upload tiles", collect_label_texts(upload_tab))
             self.assertIn("Apply Upload Tiles", collect_button_texts(upload_tab))
             self.assertIn("Clear Upload Tiles", collect_button_texts(upload_tab))
+            self.assertIn("Refresh Available Tiles", collect_button_texts(upload_tab))
             self.assertIn("Execution", collect_label_texts(upload_tab))
             self.assertIn("Run Dry Run", collect_button_texts(upload_tab))
             self.assertIn("Run Real Upload", collect_button_texts(upload_tab))
@@ -156,6 +168,9 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertGreaterEqual(len(collect_widgets(extract_tab, ttk.Progressbar)), 1)
             self.assertGreaterEqual(len(collect_widgets(mosaic_tab, ttk.Progressbar)), 1)
             self.assertGreaterEqual(len(collect_widgets(statistics_tab, ttk.Treeview)), 3)
+            self.assertIn("Processing Levels Across Stages", collect_label_texts(statistics_tab))
+            self.assertIn("Upload Status Counts", collect_label_texts(statistics_tab))
+            self.assertIn("Pipeline Completeness By UTM Tile", collect_label_texts(statistics_tab))
         finally:
             root.destroy()
 
@@ -310,6 +325,40 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_upload_tile_list_prefers_available_not_uploaded_tiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project_root = Path(temp)
+            logs = project_root / "00_logs"
+            origin = project_root / "03_mosaics"
+            origin.mkdir(parents=True)
+            tile_34 = origin / swot_tif_name("UTM34M")
+            tile_35 = origin / swot_tif_name("UTM35M")
+            tile_34.write_bytes(b"tif")
+            tile_35.write_bytes(b"tif")
+            write_csv(
+                logs / "upload_report.csv",
+                [
+                    {
+                        "local_file": str(tile_35),
+                        "final_status": "COMPLETED",
+                    }
+                ],
+            )
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                app = LauncherApp(root)
+                app.processing_logs_var.set(str(logs))
+                app.folder_var.set(str(origin))
+                app.refresh_upload_tile_list()
+
+                values = listbox_values(app.upload_tile_listbox)
+
+                self.assertEqual(values, ["UTM34M"])
+                self.assertIn("current origin folder", app.upload_tile_availability_var.get())
+            finally:
+                root.destroy()
+
     def test_listbox_adds_to_existing_map_selection(self) -> None:
         root = tk.Tk()
         root.withdraw()
@@ -398,6 +447,19 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertIn(("Raw NetCDF files on disk", "1"), metrics)
                 self.assertEqual(len(cleanup_rows), 1)
                 self.assertIn("Project statistics refreshed", app.statistics_status_var.get())
+                self.assertTrue(
+                    (project_root / "00_logs" / "statistics" / "project_statistics_snapshot.json").exists()
+                )
+
+                app.clear_project_statistics_display()
+                app.apply_project(project, write_config=False)
+                reloaded_metrics = [
+                    app.stats_metrics_tree.item(item, "values")
+                    for item in app.stats_metrics_tree.get_children()
+                ]
+
+                self.assertIn(("Raw NetCDF files on disk", "1"), reloaded_metrics)
+                self.assertIn("Loaded saved project statistics", app.statistics_status_var.get())
         finally:
             root.destroy()
 

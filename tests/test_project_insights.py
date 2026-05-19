@@ -8,7 +8,9 @@ from project_insights import (
     collect_project_insights,
     delete_cleanup_candidates,
     format_bytes,
+    load_project_insights_snapshot,
     plan_cleanup_candidates,
+    write_project_insights_snapshot,
 )
 
 
@@ -24,6 +26,19 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def swot_name(
+    *,
+    tile: str = "UTM34M",
+    crid: str = "PGD0",
+    counter: str = "01",
+    suffix: str = ".nc",
+) -> str:
+    return (
+        f"SWOT_L2_HR_Raster_100m_{tile}_N_x_x_x_"
+        f"034_266_000F_20260102T000000_20260102T010000_{crid}_{counter}{suffix}"
+    )
 
 
 class ProjectInsightsTests(unittest.TestCase):
@@ -58,10 +73,13 @@ class ProjectInsightsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = self.sample_project(root)
-            raw = root / "01_raw_downloads" / "raw.nc"
+            raw = root / "01_raw_downloads" / swot_name(crid="PGD0", counter="02")
             moved = root / "01_raw_downloads" / "moved" / "old.nc"
-            extracted = root / "02_extracted_geotiffs" / "tile.tif"
-            mosaic = root / "03_mosaics" / "mosaic.tif"
+            extracted = root / "02_extracted_geotiffs" / swot_name(crid="PGD0", counter="02", suffix=".tif")
+            mosaic = root / "03_mosaics" / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_"
+                "20260102T000000_20260102T010000_PGD0_02.tif"
+            )
             for path in (raw, moved, extracted, mosaic):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"12345")
@@ -72,7 +90,7 @@ class ProjectInsightsTests(unittest.TestCase):
                 [
                     {
                         "granule_id": "G1",
-                        "file_name": "SWOT_L2_HR_Raster_100m_UTM34M_x.nc",
+                        "file_name": swot_name(crid="PGD0", counter="02"),
                         "utm_tile": "UTM34M",
                         "start_time": "2026-01-02T00:00:00Z",
                         "size_mb": "1.5",
@@ -82,13 +100,14 @@ class ProjectInsightsTests(unittest.TestCase):
                     },
                     {
                         "granule_id": "G0",
-                        "file_name": "SWOT_L2_HR_Raster_100m_UTM34M_old.nc",
+                        "file_name": swot_name(crid="PGD0", counter="01"),
                         "utm_tile": "UTM34M",
                         "start_time": "2026-01-02T00:00:00Z",
                         "size_mb": "0.5",
                         "downloaded": "no",
                         "raw_exists": "no",
                         "last_status": "EXCLUDED_OLDER_VERSION",
+                        "selected_for_download": "no",
                         "duplicate_filter_status": "excluded_older_version",
                     }
                 ],
@@ -132,17 +151,27 @@ class ProjectInsightsTests(unittest.TestCase):
                         "local_file": str(mosaic),
                         "asset_id": "projects/example/assets/mosaic",
                         "final_status": "COMPLETED",
+                        "output_grid": "UTM34M",
+                        "source_utm_tiles": json.dumps(["UTM34M"]),
                     },
                     {
                         "local_file": str(mosaic),
                         "asset_id": "projects/example/assets/mosaic_existing",
                         "final_status": "EE_VERIFIED_EXISTS",
+                        "output_grid": "UTM34M",
+                        "source_utm_tiles": json.dumps(["UTM34M"]),
                     },
                     {
                         "local_file": str(mosaic),
                         "asset_id": "projects/example/assets/mosaic_filtered",
                         "final_status": "FILTERED_UTM_TILE",
                         "upload_selected": "no",
+                    },
+                    {
+                        "local_file": str(mosaic.with_name("missing.tif")),
+                        "asset_id": "projects/example/assets/mosaic_failed",
+                        "final_status": "ERROR",
+                        "error_message": "browser closed",
                     }
                 ],
             )
@@ -157,6 +186,18 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertEqual(insights.metrics["Remote matches excluded as older versions"], "1")
             self.assertEqual(insights.metrics["EE-verified existing assets recorded"], "1")
             self.assertEqual(insights.metrics["Upload rows filtered by UTM selection"], "1")
+            self.assertEqual(insights.metrics["Upload failures/errors recorded"], "1")
+            self.assertEqual(insights.metrics["Upload-ready mosaics not uploaded/verified"], "0")
+            self.assertEqual(insights.metrics["Unique processing levels observed"], "2")
+            self.assertIn(("PGD0_02", 1, 1, 1, 1, 1, 2), insights.processing_level_counts)
+            self.assertIn(("PGD0_01", 1, 0, 0, 0, 0, 0), insights.processing_level_counts)
+            self.assertIn(("UTM34M", "PGD0_02", 1, 1, 1, 1), insights.processing_level_tile_counts)
+            self.assertIn(("COMPLETED", 1), insights.upload_status_counts)
+            self.assertIn(("EE_VERIFIED_EXISTS", 1), insights.upload_status_counts)
+            self.assertIn(("UTM34M", 2), insights.uploaded_tile_counts)
+            self.assertIn(("PGD0_02", 2), insights.uploaded_processing_level_counts)
+            self.assertIn(("ERROR", "browser closed", 1), insights.upload_error_counts)
+            self.assertIn(("UTM34M", 1, 1, 1, 2, 0), insights.upload_qa_tile_rows)
             self.assertIn(("UTM34M", 3), insights.tile_counts)
             self.assertIn(("UTM34M", 1), insights.mosaic_output_grid_counts)
             self.assertIn(("UTM34M", 1), insights.mosaic_source_tile_counts)
@@ -203,9 +244,11 @@ class ProjectInsightsTests(unittest.TestCase):
             insights = collect_project_insights(config)
 
             self.assertEqual(insights.metrics["Completed common-CRS/non-UTM mosaics"], "1")
+            self.assertEqual(insights.metrics["Upload-ready mosaics not uploaded/verified"], "1")
             self.assertIn(("LAEA", 1), insights.mosaic_output_grid_counts)
             self.assertIn(("UTM34M", 1), insights.mosaic_source_tile_counts)
             self.assertIn(("UTM35M", 1), insights.mosaic_source_tile_counts)
+            self.assertEqual(insights.ready_not_uploaded_rows[0][1], "UTM34M,UTM35M")
 
     def test_delete_cleanup_candidates_removes_only_candidate_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -261,6 +304,46 @@ class ProjectInsightsTests(unittest.TestCase):
     def test_format_bytes(self) -> None:
         self.assertEqual(format_bytes(0), "0 B")
         self.assertEqual(format_bytes(1024), "1.0 KB")
+
+    def test_statistics_snapshot_round_trip_and_csv_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            write_csv(
+                root / "00_logs" / "download_manifest.csv",
+                [
+                    {
+                        "granule_id": "G1",
+                        "file_name": swot_name(crid="PGD0", counter="01"),
+                        "utm_tile": "UTM34M",
+                        "start_time": "2026-01-02T00:00:00Z",
+                        "size_mb": "1.5",
+                        "downloaded": "yes",
+                        "raw_exists": "no",
+                        "selected_for_download": "yes",
+                        "last_status": "SKIPPED_MANIFEST",
+                    }
+                ],
+            )
+            insights = collect_project_insights(config)
+
+            snapshot_path = write_project_insights_snapshot(config, insights)
+            loaded = load_project_insights_snapshot(config)
+
+            self.assertTrue(snapshot_path.exists())
+            self.assertTrue((root / "00_logs" / "statistics" / "project_statistics_metrics.csv").exists())
+            self.assertTrue((root / "00_logs" / "statistics" / "project_statistics_processing_levels.csv").exists())
+            self.assertIsNotNone(loaded)
+            loaded_insights, generated_at = loaded
+            self.assertTrue(generated_at)
+            self.assertEqual(
+                loaded_insights.metrics["Downloaded granules recorded"],
+                insights.metrics["Downloaded granules recorded"],
+            )
+            self.assertEqual(loaded_insights.tile_counts, insights.tile_counts)
+            self.assertEqual(loaded_insights.processing_level_counts, insights.processing_level_counts)
+            self.assertEqual(loaded_insights.upload_status_counts, insights.upload_status_counts)
+            self.assertEqual(loaded_insights.upload_qa_tile_rows, insights.upload_qa_tile_rows)
 
 
 if __name__ == "__main__":

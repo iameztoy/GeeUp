@@ -4,15 +4,23 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
+import ee_mosaic_tool
 from ee_mosaic_tool import (
+    ERROR_DISK_SPACE_STATUS,
     GROUPING_MODE_PASS_DATE_COMMON_CRS,
     GROUPING_MODE_UTM_ZONE_HEMISPHERE,
     MosaicConfig,
     build_mosaic_plan,
+    cleanup_temporary_output,
     group_source_signature,
+    is_disk_space_error,
+    promote_temporary_output,
     run_mosaic,
+    temporary_mosaic_path,
+    world_file_path,
     write_mosaic_manifest,
 )
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env, check_gdal_runtime
@@ -265,6 +273,64 @@ class MosaicPlanningTests(unittest.TestCase):
             self.assertEqual(rows[0]["known_from_manifest"], "yes")
             self.assertFalse(group.output_file.exists())
             self.assertTrue((root / "workflow_manifest.csv").exists())
+
+    def test_disk_write_error_stops_mosaic_run_early(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / swot_name(scene="000A")).touch()
+            (root / swot_name(scene="001A")).touch()
+            (root / swot_name(scene="002A", start="20250708T010000", end="20250708T010100")).touch()
+            (root / swot_name(scene="003A", start="20250708T010000", end="20250708T010100")).touch()
+            config = MosaicConfig(
+                input_folder=root,
+                output_folder=root / "out",
+                report_csv=root / "report.csv",
+                manifest_csv=root / "mosaic_manifest.csv",
+            )
+
+            with mock.patch.object(ee_mosaic_tool, "validate_raster_group"):
+                with mock.patch.object(
+                    ee_mosaic_tool,
+                    "merge_group",
+                    side_effect=RuntimeError("TIFFAppendToStrip:Write error at scanline 42"),
+                ):
+                    exit_code, rows = run_mosaic(config, dry_run=False)
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["status"], ERROR_DISK_SPACE_STATUS)
+            self.assertIn("stopped early", rows[0]["message"])
+            with (root / "report.csv").open("r", encoding="utf-8", newline="") as handle:
+                report_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(report_rows), 1)
+            self.assertEqual(report_rows[0]["status"], ERROR_DISK_SPACE_STATUS)
+
+    def test_temporary_output_is_promoted_or_cleaned(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            final = root / "mosaic.tif"
+            config = MosaicConfig(input_folder=root, output_folder=root, report_csv=root / "report.csv")
+            temp_output = temporary_mosaic_path(final)
+            temp_output.write_bytes(b"complete")
+            world_file_path(temp_output).write_text("world", encoding="utf-8")
+
+            promote_temporary_output(temp_output, final, config)
+
+            self.assertEqual(final.read_bytes(), b"complete")
+            self.assertFalse(temp_output.exists())
+            self.assertTrue(world_file_path(final).exists())
+
+            temp_output.write_bytes(b"partial")
+            world_file_path(temp_output).write_text("partial world", encoding="utf-8")
+            cleanup_temporary_output(final)
+
+            self.assertFalse(temp_output.exists())
+            self.assertFalse(world_file_path(temp_output).exists())
+
+    def test_disk_space_error_detection_matches_gdal_write_errors(self) -> None:
+        self.assertTrue(is_disk_space_error(RuntimeError("No space left on device")))
+        self.assertTrue(is_disk_space_error(RuntimeError("TIFFAppendToStrip:Write error at scanline 42")))
+        self.assertFalse(is_disk_space_error(RuntimeError("Invalid projection")))
 
     def test_existing_mosaic_with_changed_source_signature_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

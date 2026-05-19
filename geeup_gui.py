@@ -111,7 +111,14 @@ from project_insights import (
     collect_project_insights,
     delete_cleanup_candidates,
     format_bytes as format_insight_bytes,
+    lookup_path_value,
+    load_project_insights_snapshot,
+    mosaic_source_tiles,
+    normalize_utm_tile_token,
     plan_cleanup_candidates,
+    path_lookup_keys,
+    read_csv_rows,
+    write_project_insights_snapshot,
 )
 from swot_download_tool import (
     COLLECTION_LABELS,
@@ -132,6 +139,7 @@ from swot_download_tool import (
     run_download,
     write_download_report,
 )
+from swot_metadata import parse_swot_l2_hr_raster_metadata
 from utm_map_selector import UTMMapSelectorDialog, load_display_geometry
 
 
@@ -323,6 +331,9 @@ class LauncherApp:
             upload_tiles = []
         self.upload_tile_filter_var = tk.StringVar(value="")
         self.upload_selected_tiles_var = tk.StringVar(value=", ".join(upload_tiles))
+        self.upload_tile_availability_var = tk.StringVar(
+            value="Upload tiles are derived from the current origin folder when possible."
+        )
         self.upload_visible_utm_tiles = list(self.all_utm_tiles)
         self.upload_selected_tiles = set(upload_tiles)
         self.batch_size_var = tk.StringVar(
@@ -454,6 +465,9 @@ class LauncherApp:
             value="Open a project, then refresh statistics to summarize manifests and local files."
         )
         self.statistics_summary_var = tk.StringVar(value="")
+        self.cleanup_status_var = tk.StringVar(
+            value="Open a project, then preview safe cleanup candidates."
+        )
         self.cleanup_candidates: list[CleanupCandidate] = []
 
         self.build_layout()
@@ -494,12 +508,14 @@ class LauncherApp:
         mosaic_tab = ttk.Frame(notebook, padding=12)
         upload_tab = ttk.Frame(notebook, padding=12)
         statistics_tab = ttk.Frame(notebook, padding=12)
+        cleanup_tab = ttk.Frame(notebook, padding=12)
         notebook.add(download_tab, text="Download")
         notebook.add(duplicate_tab, text="Duplicate Removal")
         notebook.add(extract_tab, text="Extraction")
         notebook.add(mosaic_tab, text="Mosaic")
         notebook.add(upload_tab, text="Upload")
         notebook.add(statistics_tab, text="Statistics")
+        notebook.add(cleanup_tab, text="Cleanup")
 
         self.build_download_tab(download_tab)
         self.build_duplicate_tab(duplicate_tab)
@@ -507,6 +523,7 @@ class LauncherApp:
         self.build_mosaic_tab(mosaic_tab)
         self.build_upload_tab(upload_tab)
         self.build_statistics_tab(statistics_tab)
+        self.build_cleanup_tab(cleanup_tab)
 
     def build_project_bar(self, parent: ttk.Frame) -> None:
         """Create project controls above the processing tabs."""
@@ -1102,6 +1119,12 @@ class LauncherApp:
             sticky="ew",
             padx=(8, 8),
         )
+        ttk.Label(
+            upload_tiles,
+            textvariable=self.upload_tile_availability_var,
+            foreground="#555555",
+            wraplength=520,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
         list_frame = ttk.Frame(upload_tiles)
         list_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(4, 0))
         list_frame.columnconfigure(0, weight=1)
@@ -1143,6 +1166,11 @@ class LauncherApp:
             text="Clear Upload Tiles",
             command=self.clear_upload_tiles,
         ).grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(
+            selected_upload_frame,
+            text="Refresh Available Tiles",
+            command=self.refresh_upload_tile_list,
+        ).grid(row=3, column=0, sticky="ew", pady=(4, 0))
         row += 1
 
         row = self.add_entry_row(
@@ -1280,6 +1308,14 @@ class LauncherApp:
             "write",
             lambda *_args: self.refresh_upload_tile_list(),
         )
+        self.folder_var.trace_add(
+            "write",
+            lambda *_args: self.refresh_upload_tile_list(),
+        )
+        self.recursive_var.trace_add(
+            "write",
+            lambda *_args: self.refresh_upload_tile_list(),
+        )
         self.refresh_upload_tile_list()
 
         status = ttk.Label(
@@ -1332,11 +1368,15 @@ class LauncherApp:
 
         overview = ttk.Frame(inner, padding=8)
         tiles = ttk.Frame(inner, padding=8)
+        levels = ttk.Frame(inner, padding=8)
         mosaics = ttk.Frame(inner, padding=8)
+        uploaded = ttk.Frame(inner, padding=8)
         cleanup = ttk.Frame(inner, padding=8)
         inner.add(overview, text="Overview")
         inner.add(tiles, text="Tiles And Dates")
+        inner.add(levels, text="Processing Levels")
         inner.add(mosaics, text="Mosaics")
+        inner.add(uploaded, text="Uploaded")
         inner.add(cleanup, text="Cleanup")
 
         overview.columnconfigure(0, weight=1)
@@ -1419,6 +1459,76 @@ class LauncherApp:
         self.stats_date_tree.column("count", width=80, anchor="e")
         self.stats_date_tree.grid(row=0, column=0, sticky="nsew")
 
+        levels.columnconfigure(0, weight=1)
+        levels.columnconfigure(1, weight=1)
+        levels.rowconfigure(0, weight=1)
+        level_summary_frame = ttk.LabelFrame(
+            levels,
+            text="Processing Levels Across Stages",
+            padding=8,
+        )
+        level_summary_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        level_summary_frame.columnconfigure(0, weight=1)
+        level_summary_frame.rowconfigure(0, weight=1)
+        self.stats_processing_level_tree = ttk.Treeview(
+            level_summary_frame,
+            columns=(
+                "level",
+                "remote",
+                "selected",
+                "downloaded",
+                "extracted",
+                "mosaic_sources",
+                "uploaded",
+            ),
+            show="headings",
+            height=16,
+        )
+        level_headings = {
+            "level": "Level",
+            "remote": "Remote",
+            "selected": "Selected",
+            "downloaded": "Downloaded",
+            "extracted": "Extracted",
+            "mosaic_sources": "Mosaic src",
+            "uploaded": "Uploaded/verified",
+        }
+        for column, heading in level_headings.items():
+            self.stats_processing_level_tree.heading(column, text=heading)
+            width = 105 if column != "level" else 115
+            anchor = "w" if column == "level" else "e"
+            self.stats_processing_level_tree.column(column, width=width, anchor=anchor)
+        self.stats_processing_level_tree.grid(row=0, column=0, sticky="nsew")
+
+        tile_level_frame = ttk.LabelFrame(
+            levels,
+            text="Processing Levels By UTM Tile",
+            padding=8,
+        )
+        tile_level_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        tile_level_frame.columnconfigure(0, weight=1)
+        tile_level_frame.rowconfigure(0, weight=1)
+        self.stats_processing_level_tile_tree = ttk.Treeview(
+            tile_level_frame,
+            columns=("tile", "level", "remote", "downloaded", "extracted", "mosaic_sources"),
+            show="headings",
+            height=16,
+        )
+        tile_level_headings = {
+            "tile": "Tile",
+            "level": "Level",
+            "remote": "Remote",
+            "downloaded": "Downloaded",
+            "extracted": "Extracted",
+            "mosaic_sources": "Mosaic src",
+        }
+        for column, heading in tile_level_headings.items():
+            self.stats_processing_level_tile_tree.heading(column, text=heading)
+            width = 100 if column in {"tile", "level"} else 90
+            anchor = "w" if column in {"tile", "level"} else "e"
+            self.stats_processing_level_tile_tree.column(column, width=width, anchor=anchor)
+        self.stats_processing_level_tile_tree.grid(row=0, column=0, sticky="nsew")
+
         mosaics.columnconfigure(0, weight=1)
         mosaics.columnconfigure(1, weight=1)
         mosaics.rowconfigure(0, weight=1)
@@ -1461,6 +1571,154 @@ class LauncherApp:
         self.stats_mosaic_source_tile_tree.column("tile", width=150, anchor="w")
         self.stats_mosaic_source_tile_tree.column("count", width=80, anchor="e")
         self.stats_mosaic_source_tile_tree.grid(row=0, column=0, sticky="nsew")
+
+        uploaded.columnconfigure(0, weight=1)
+        uploaded.rowconfigure(0, weight=1)
+        uploaded_inner = ttk.Notebook(uploaded)
+        uploaded_inner.grid(row=0, column=0, sticky="nsew")
+        uploaded_summary = ttk.Frame(uploaded_inner, padding=4)
+        uploaded_qa = ttk.Frame(uploaded_inner, padding=4)
+        uploaded_inner.add(uploaded_summary, text="Summary")
+        uploaded_inner.add(uploaded_qa, text="QA")
+
+        uploaded_summary.columnconfigure(0, weight=1)
+        uploaded_summary.columnconfigure(1, weight=1)
+        uploaded_summary.rowconfigure(0, weight=1)
+        uploaded_summary.rowconfigure(1, weight=1)
+
+        upload_status_frame = ttk.LabelFrame(uploaded_summary, text="Upload Status Counts", padding=8)
+        upload_status_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=(0, 5))
+        upload_status_frame.columnconfigure(0, weight=1)
+        upload_status_frame.rowconfigure(0, weight=1)
+        self.stats_upload_status_tree = ttk.Treeview(
+            upload_status_frame,
+            columns=("status", "count"),
+            show="headings",
+            height=8,
+        )
+        self.stats_upload_status_tree.heading("status", text="Status")
+        self.stats_upload_status_tree.heading("count", text="Count")
+        self.stats_upload_status_tree.column("status", width=180, anchor="w")
+        self.stats_upload_status_tree.column("count", width=80, anchor="e")
+        self.stats_upload_status_tree.grid(row=0, column=0, sticky="nsew")
+
+        uploaded_tile_frame = ttk.LabelFrame(uploaded_summary, text="Uploaded/Verified By Source Tile", padding=8)
+        uploaded_tile_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=(0, 5))
+        uploaded_tile_frame.columnconfigure(0, weight=1)
+        uploaded_tile_frame.rowconfigure(0, weight=1)
+        self.stats_uploaded_tile_tree = ttk.Treeview(
+            uploaded_tile_frame,
+            columns=("tile", "count"),
+            show="headings",
+            height=8,
+        )
+        self.stats_uploaded_tile_tree.heading("tile", text="Tile")
+        self.stats_uploaded_tile_tree.heading("count", text="Count")
+        self.stats_uploaded_tile_tree.column("tile", width=130, anchor="w")
+        self.stats_uploaded_tile_tree.column("count", width=80, anchor="e")
+        self.stats_uploaded_tile_tree.grid(row=0, column=0, sticky="nsew")
+
+        uploaded_date_frame = ttk.LabelFrame(uploaded_summary, text="Uploaded/Verified By Date", padding=8)
+        uploaded_date_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 5), pady=(5, 0))
+        uploaded_date_frame.columnconfigure(0, weight=1)
+        uploaded_date_frame.rowconfigure(0, weight=1)
+        self.stats_uploaded_date_tree = ttk.Treeview(
+            uploaded_date_frame,
+            columns=("date", "count"),
+            show="headings",
+            height=8,
+        )
+        self.stats_uploaded_date_tree.heading("date", text="Date")
+        self.stats_uploaded_date_tree.heading("count", text="Count")
+        self.stats_uploaded_date_tree.column("date", width=130, anchor="w")
+        self.stats_uploaded_date_tree.column("count", width=80, anchor="e")
+        self.stats_uploaded_date_tree.grid(row=0, column=0, sticky="nsew")
+
+        uploaded_level_frame = ttk.LabelFrame(uploaded_summary, text="Uploaded/Verified By Processing Level", padding=8)
+        uploaded_level_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 0), pady=(5, 0))
+        uploaded_level_frame.columnconfigure(0, weight=1)
+        uploaded_level_frame.rowconfigure(0, weight=1)
+        self.stats_uploaded_level_tree = ttk.Treeview(
+            uploaded_level_frame,
+            columns=("level", "count"),
+            show="headings",
+            height=8,
+        )
+        self.stats_uploaded_level_tree.heading("level", text="Level")
+        self.stats_uploaded_level_tree.heading("count", text="Count")
+        self.stats_uploaded_level_tree.column("level", width=130, anchor="w")
+        self.stats_uploaded_level_tree.column("count", width=80, anchor="e")
+        self.stats_uploaded_level_tree.grid(row=0, column=0, sticky="nsew")
+
+        uploaded_qa.columnconfigure(0, weight=1)
+        uploaded_qa.columnconfigure(1, weight=1)
+        uploaded_qa.rowconfigure(0, weight=1)
+        uploaded_qa.rowconfigure(1, weight=1)
+
+        qa_tile_frame = ttk.LabelFrame(uploaded_qa, text="Pipeline Completeness By UTM Tile", padding=8)
+        qa_tile_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 5))
+        qa_tile_frame.columnconfigure(0, weight=1)
+        qa_tile_frame.rowconfigure(0, weight=1)
+        self.stats_upload_qa_tile_tree = ttk.Treeview(
+            qa_tile_frame,
+            columns=("tile", "downloaded", "extracted", "mosaic_sources", "uploaded", "missing_upload"),
+            show="headings",
+            height=9,
+        )
+        qa_headings = {
+            "tile": "Tile",
+            "downloaded": "Downloaded",
+            "extracted": "Extracted",
+            "mosaic_sources": "Mosaic src",
+            "uploaded": "Uploaded/verified",
+            "missing_upload": "Missing upload",
+        }
+        for column, heading in qa_headings.items():
+            self.stats_upload_qa_tile_tree.heading(column, text=heading)
+            self.stats_upload_qa_tile_tree.column(
+                column,
+                width=130 if column == "tile" else 110,
+                anchor="w" if column == "tile" else "e",
+            )
+        self.stats_upload_qa_tile_tree.grid(row=0, column=0, sticky="nsew")
+
+        ready_frame = ttk.LabelFrame(uploaded_qa, text="Ready Mosaics Not Uploaded/Verified", padding=8)
+        ready_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 5), pady=(5, 0))
+        ready_frame.columnconfigure(0, weight=1)
+        ready_frame.rowconfigure(0, weight=1)
+        self.stats_ready_not_uploaded_tree = ttk.Treeview(
+            ready_frame,
+            columns=("date", "grid", "source_tiles", "output_file"),
+            show="headings",
+            height=8,
+        )
+        self.stats_ready_not_uploaded_tree.heading("date", text="Date")
+        self.stats_ready_not_uploaded_tree.heading("grid", text="Grid")
+        self.stats_ready_not_uploaded_tree.heading("source_tiles", text="Source tiles")
+        self.stats_ready_not_uploaded_tree.heading("output_file", text="Output file")
+        self.stats_ready_not_uploaded_tree.column("date", width=95, anchor="w")
+        self.stats_ready_not_uploaded_tree.column("grid", width=90, anchor="w")
+        self.stats_ready_not_uploaded_tree.column("source_tiles", width=130, anchor="w")
+        self.stats_ready_not_uploaded_tree.column("output_file", width=360, anchor="w")
+        self.stats_ready_not_uploaded_tree.grid(row=0, column=0, sticky="nsew")
+
+        upload_errors_frame = ttk.LabelFrame(uploaded_qa, text="Upload Failures / Warnings", padding=8)
+        upload_errors_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 0), pady=(5, 0))
+        upload_errors_frame.columnconfigure(0, weight=1)
+        upload_errors_frame.rowconfigure(0, weight=1)
+        self.stats_upload_errors_tree = ttk.Treeview(
+            upload_errors_frame,
+            columns=("status", "count", "message"),
+            show="headings",
+            height=8,
+        )
+        self.stats_upload_errors_tree.heading("status", text="Status")
+        self.stats_upload_errors_tree.heading("count", text="Count")
+        self.stats_upload_errors_tree.heading("message", text="Message")
+        self.stats_upload_errors_tree.column("status", width=120, anchor="w")
+        self.stats_upload_errors_tree.column("count", width=70, anchor="e")
+        self.stats_upload_errors_tree.column("message", width=360, anchor="w")
+        self.stats_upload_errors_tree.grid(row=0, column=0, sticky="nsew")
 
         cleanup.columnconfigure(0, weight=1)
         cleanup.rowconfigure(1, weight=1)
@@ -1918,6 +2176,7 @@ class LauncherApp:
         if write_config:
             data = self.build_config()
             self.write_config_data(data)
+        self.load_saved_project_statistics()
 
     def try_auto_open_project_from_config(self) -> None:
         """Auto-open the project whose root is stored in the active config mirror."""
@@ -2315,14 +2574,92 @@ class LauncherApp:
         """Return the config value for the selected Upload scope."""
         return UPLOAD_SCOPE_LABELS.get(self.upload_scope_var.get(), "all")
 
+    def upload_report_successful_local_files(self) -> set[str]:
+        """Return local files already recorded as uploaded or EE-verified."""
+        success_statuses = {
+            "COMPLETED",
+            "SKIPPED_ALREADY_EXISTS",
+            "EE_VERIFIED_EXISTS",
+        }
+        uploaded: set[str] = set()
+        report_path = self.current_upload_report_path()
+        for row in read_csv_rows(report_path):
+            if str(row.get("final_status", "") or "").upper() not in success_statuses:
+                continue
+            local_file = str(row.get("local_file", "") or "").strip()
+            if not local_file:
+                continue
+            uploaded.update(path_lookup_keys(local_file))
+        return uploaded
+
+    def mosaic_source_tiles_by_output(self) -> dict[str, list[str]]:
+        """Return source UTM tiles for mosaic outputs from the mosaic manifest."""
+        lookup: dict[str, list[str]] = {}
+        manifest_path = Path(self.mosaic_manifest_var.get().strip())
+        for row in read_csv_rows(manifest_path):
+            output = str(row.get("output_file", "") or "").strip()
+            if not output:
+                continue
+            tiles = mosaic_source_tiles(row)
+            if not tiles:
+                continue
+            for key in path_lookup_keys(output):
+                lookup[key] = tiles
+        return lookup
+
+    def upload_file_source_tiles(
+        self,
+        path: Path,
+        mosaic_lookup: dict[str, list[str]],
+    ) -> list[str]:
+        """Return upload UTM/source tiles for one local upload candidate."""
+        source_tiles = lookup_path_value(mosaic_lookup, path)
+        if source_tiles:
+            return source_tiles
+        parsed = parse_swot_l2_hr_raster_metadata(path)
+        if parsed is None:
+            return []
+        tile = normalize_utm_tile_token(parsed.fields.get("coordinate_system", ""))
+        return [tile] if tile else []
+
+    def available_upload_tiles(self) -> list[str]:
+        """Return UTM tiles represented by local upload candidates not already uploaded."""
+        folder = Path(self.folder_var.get().strip())
+        if not folder.exists() or not folder.is_dir():
+            return []
+        uploaded_keys = self.upload_report_successful_local_files()
+        mosaic_lookup = self.mosaic_source_tiles_by_output()
+        patterns = ("*.tif", "*.tiff")
+        tiles: set[str] = set()
+        for pattern in patterns:
+            iterator = folder.rglob(pattern) if self.recursive_var.get() else folder.glob(pattern)
+            for path in iterator:
+                if not path.is_file():
+                    continue
+                if any(key in uploaded_keys for key in path_lookup_keys(path)):
+                    continue
+                tiles.update(self.upload_file_source_tiles(path, mosaic_lookup))
+        return sorted(tile for tile in tiles if tile)
+
     def refresh_upload_tile_list(self) -> None:
         """Refresh the filtered Upload UTM listbox while preserving selection."""
         if not hasattr(self, "upload_tile_listbox"):
             return
         self.upload_tile_listbox.delete(0, tk.END)
         needle = self.upload_tile_filter_var.get().strip().upper()
+        available_tiles = self.available_upload_tiles()
+        if available_tiles:
+            base_tiles = sorted(set(available_tiles) | set(self.upload_selected_tiles))
+            self.upload_tile_availability_var.set(
+                f"Showing {len(available_tiles)} tile(s) found in the current origin folder and not already completed in the upload report."
+            )
+        else:
+            base_tiles = list(self.all_utm_tiles)
+            self.upload_tile_availability_var.set(
+                "No upload-ready UTM tiles were found in the current origin folder; showing the global list as a fallback."
+            )
         self.upload_visible_utm_tiles = [
-            tile for tile in self.all_utm_tiles if needle in tile
+            tile for tile in base_tiles if needle in tile
         ]
         for tile in self.upload_visible_utm_tiles:
             self.upload_tile_listbox.insert(tk.END, tile)
@@ -3662,6 +3999,211 @@ class LauncherApp:
         for item in tree.get_children():
             tree.delete(item)
 
+    def clear_project_statistics_display(self, message: str = "") -> None:
+        """Clear statistics widgets."""
+        for tree in (
+            self.stats_metrics_tree,
+            self.stats_tile_tree,
+            self.stats_date_tree,
+            self.stats_processing_level_tree,
+            self.stats_processing_level_tile_tree,
+            self.stats_mosaic_output_grid_tree,
+            self.stats_mosaic_source_tile_tree,
+            self.stats_upload_status_tree,
+            self.stats_uploaded_tile_tree,
+            self.stats_uploaded_date_tree,
+            self.stats_uploaded_level_tree,
+            self.stats_upload_qa_tile_tree,
+            self.stats_ready_not_uploaded_tree,
+            self.stats_upload_errors_tree,
+        ):
+            self.clear_treeview(tree)
+        self.cleanup_candidates = []
+        self.populate_cleanup_tree([])
+        self.draw_bar_chart(self.stats_stage_chart_canvas, [], "Rows by processing stage")
+        self.draw_bar_chart(self.stats_tile_chart_canvas, [], "Top UTM tiles by recorded files")
+        self.statistics_summary_var.set("")
+        if message:
+            self.statistics_status_var.set(message)
+
+    def display_project_statistics(
+        self,
+        insights: Any,
+        *,
+        status_text: str,
+        include_cleanup: bool = True,
+    ) -> None:
+        """Render project statistics into the GUI tables and charts."""
+        self.clear_treeview(self.stats_metrics_tree)
+        for metric, value in insights.metrics.items():
+            self.stats_metrics_tree.insert("", tk.END, values=(metric, value))
+        if insights.stage_status_counts:
+            self.stats_metrics_tree.insert("", tk.END, values=("", ""))
+            self.stats_metrics_tree.insert("", tk.END, values=("Stage status counts", ""))
+            for stage, status, count in insights.stage_status_counts:
+                self.stats_metrics_tree.insert(
+                    "",
+                    tk.END,
+                    values=(f"{stage}: {status}", str(count)),
+                )
+
+        self.clear_treeview(self.stats_tile_tree)
+        for tile, count in insights.tile_counts:
+            self.stats_tile_tree.insert("", tk.END, values=(tile, str(count)))
+
+        self.clear_treeview(self.stats_date_tree)
+        for date_text, count in insights.date_counts:
+            self.stats_date_tree.insert("", tk.END, values=(date_text, str(count)))
+
+        self.clear_treeview(self.stats_processing_level_tree)
+        for (
+            level,
+            remote,
+            selected,
+            downloaded,
+            extracted,
+            mosaic_sources,
+            uploaded,
+        ) in insights.processing_level_counts:
+            self.stats_processing_level_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    level,
+                    str(remote),
+                    str(selected),
+                    str(downloaded),
+                    str(extracted),
+                    str(mosaic_sources),
+                    str(uploaded),
+                ),
+            )
+
+        self.clear_treeview(self.stats_processing_level_tile_tree)
+        for tile, level, remote, downloaded, extracted, mosaic_sources in insights.processing_level_tile_counts:
+            self.stats_processing_level_tile_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    tile,
+                    level,
+                    str(remote),
+                    str(downloaded),
+                    str(extracted),
+                    str(mosaic_sources),
+                ),
+            )
+
+        self.clear_treeview(self.stats_mosaic_output_grid_tree)
+        for grid, count in insights.mosaic_output_grid_counts:
+            self.stats_mosaic_output_grid_tree.insert("", tk.END, values=(grid, str(count)))
+
+        self.clear_treeview(self.stats_mosaic_source_tile_tree)
+        for tile, count in insights.mosaic_source_tile_counts:
+            self.stats_mosaic_source_tile_tree.insert("", tk.END, values=(tile, str(count)))
+
+        self.clear_treeview(self.stats_upload_status_tree)
+        for status, count in insights.upload_status_counts:
+            self.stats_upload_status_tree.insert("", tk.END, values=(status, str(count)))
+
+        self.clear_treeview(self.stats_uploaded_tile_tree)
+        for tile, count in insights.uploaded_tile_counts:
+            self.stats_uploaded_tile_tree.insert("", tk.END, values=(tile, str(count)))
+
+        self.clear_treeview(self.stats_uploaded_date_tree)
+        for date_text, count in insights.uploaded_date_counts:
+            self.stats_uploaded_date_tree.insert("", tk.END, values=(date_text, str(count)))
+
+        self.clear_treeview(self.stats_uploaded_level_tree)
+        for level, count in insights.uploaded_processing_level_counts:
+            self.stats_uploaded_level_tree.insert("", tk.END, values=(level, str(count)))
+
+        self.clear_treeview(self.stats_upload_qa_tile_tree)
+        for tile, downloaded, extracted, mosaic_sources, uploaded, missing_upload in insights.upload_qa_tile_rows:
+            self.stats_upload_qa_tile_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    tile,
+                    str(downloaded),
+                    str(extracted),
+                    str(mosaic_sources),
+                    str(uploaded),
+                    str(missing_upload),
+                ),
+            )
+
+        self.clear_treeview(self.stats_ready_not_uploaded_tree)
+        for output_file, source_tiles, date_text, grid in insights.ready_not_uploaded_rows:
+            self.stats_ready_not_uploaded_tree.insert(
+                "",
+                tk.END,
+                values=(date_text, grid, source_tiles, output_file),
+            )
+
+        self.clear_treeview(self.stats_upload_errors_tree)
+        for status, message, count in insights.upload_error_counts:
+            self.stats_upload_errors_tree.insert(
+                "",
+                tk.END,
+                values=(status, str(count), message),
+            )
+
+        if include_cleanup:
+            self.cleanup_candidates = list(insights.cleanup_candidates)
+            self.populate_cleanup_tree(self.cleanup_candidates)
+        else:
+            self.cleanup_candidates = []
+            self.populate_cleanup_tree([])
+
+        stage_totals: Dict[str, int] = {}
+        for stage, _status, count in insights.stage_status_counts:
+            if stage == "workflow":
+                continue
+            stage_totals[stage] = stage_totals.get(stage, 0) + count
+        self.draw_bar_chart(
+            self.stats_stage_chart_canvas,
+            list(stage_totals.items()),
+            "Rows by processing stage",
+        )
+        self.draw_bar_chart(
+            self.stats_tile_chart_canvas,
+            insights.tile_counts[:12],
+            "Top UTM tiles by recorded files",
+        )
+
+        coverage = insights.metrics.get("Date coverage", "") or "not available"
+        cleanup_size = insights.metrics.get("Cleanup candidate size", "0 B")
+        if include_cleanup:
+            cleanup_text = f"{len(self.cleanup_candidates)} files, {cleanup_size}"
+        else:
+            cleanup_text = "not loaded from saved snapshot; refresh to compute"
+        self.statistics_summary_var.set(
+            f"Date coverage: {coverage}. Cleanup preview: {cleanup_text}."
+        )
+        self.statistics_status_var.set(status_text)
+
+    def load_saved_project_statistics(self) -> None:
+        """Load the last saved statistics snapshot for the active project."""
+        if not self.current_project_root_var.get().strip():
+            self.clear_project_statistics_display(
+                "Open a project, then refresh statistics to summarize manifests and local files."
+            )
+            return
+        loaded = load_project_insights_snapshot(self.build_config())
+        if loaded is None:
+            self.clear_project_statistics_display(
+                "No saved statistics snapshot yet. Click Refresh Statistics to compute and save one."
+            )
+            return
+        insights, generated_at = loaded
+        suffix = f" from {generated_at}" if generated_at else ""
+        self.display_project_statistics(
+            insights,
+            status_text=f"Loaded saved project statistics{suffix}. Refresh to update from current files.",
+            include_cleanup=False,
+        )
+
     def refresh_project_statistics_if_active(self, source: str) -> None:
         """Refresh statistics silently when a project is open."""
         if self.current_project_root_var.get().strip():
@@ -3688,61 +4230,18 @@ class LauncherApp:
                 )
             return
 
-        self.clear_treeview(self.stats_metrics_tree)
-        for metric, value in insights.metrics.items():
-            self.stats_metrics_tree.insert("", tk.END, values=(metric, value))
-        if insights.stage_status_counts:
-            self.stats_metrics_tree.insert("", tk.END, values=("", ""))
-            self.stats_metrics_tree.insert("", tk.END, values=("Stage status counts", ""))
-            for stage, status, count in insights.stage_status_counts:
-                self.stats_metrics_tree.insert(
-                    "",
-                    tk.END,
-                    values=(f"{stage}: {status}", str(count)),
-                )
-
-        self.clear_treeview(self.stats_tile_tree)
-        for tile, count in insights.tile_counts:
-            self.stats_tile_tree.insert("", tk.END, values=(tile, str(count)))
-
-        self.clear_treeview(self.stats_date_tree)
-        for date_text, count in insights.date_counts:
-            self.stats_date_tree.insert("", tk.END, values=(date_text, str(count)))
-
-        self.clear_treeview(self.stats_mosaic_output_grid_tree)
-        for grid, count in insights.mosaic_output_grid_counts:
-            self.stats_mosaic_output_grid_tree.insert("", tk.END, values=(grid, str(count)))
-
-        self.clear_treeview(self.stats_mosaic_source_tile_tree)
-        for tile, count in insights.mosaic_source_tile_counts:
-            self.stats_mosaic_source_tile_tree.insert("", tk.END, values=(tile, str(count)))
-
-        self.cleanup_candidates = list(insights.cleanup_candidates)
-        self.populate_cleanup_tree(self.cleanup_candidates)
-
-        stage_totals: Dict[str, int] = {}
-        for stage, _status, count in insights.stage_status_counts:
-            if stage == "workflow":
-                continue
-            stage_totals[stage] = stage_totals.get(stage, 0) + count
-        self.draw_bar_chart(
-            self.stats_stage_chart_canvas,
-            list(stage_totals.items()),
-            "Rows by processing stage",
-        )
-        self.draw_bar_chart(
-            self.stats_tile_chart_canvas,
-            insights.tile_counts[:12],
-            "Top UTM tiles by recorded files",
-        )
-
-        coverage = insights.metrics.get("Date coverage", "") or "not available"
-        cleanup_size = insights.metrics.get("Cleanup candidate size", "0 B")
-        self.statistics_summary_var.set(
-            f"Date coverage: {coverage}. Cleanup preview: {len(self.cleanup_candidates)} files, {cleanup_size}."
-        )
         suffix = f" after {source}" if source else ""
-        self.statistics_status_var.set(f"Project statistics refreshed{suffix}.")
+        snapshot_text = ""
+        try:
+            snapshot_path = write_project_insights_snapshot(self.build_config(), insights)
+            snapshot_text = f" Saved to {snapshot_path}."
+        except OSError as exc:
+            snapshot_text = f" Could not save statistics snapshot: {exc}"
+        self.display_project_statistics(
+            insights,
+            status_text=f"Project statistics refreshed{suffix}.{snapshot_text}",
+            include_cleanup=True,
+        )
 
     def draw_bar_chart(
         self,
