@@ -144,6 +144,10 @@ Upload defaults to scanning every GeoTIFF in the configured origin folder. When 
 
 Before upload planning, GeeUp can list the destination Earth Engine collection with `ee.data.listAssets`. Existing asset IDs are written as `EE_VERIFIED_EXISTS` in `upload_report.csv` and skipped. This is more reliable than trusting the local upload report alone after an interrupted run. The latest listing is cached in `ee_asset_inventory.csv`. The Upload tab's tile list shows local upload-ready source tiles after filtering out files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS`; the status line also summarizes tiles already completed or verified in the upload report.
 
+Dry runs are optional but useful after changing upload settings. They do not upload anything; they write the full per-file plan to `upload_report.csv` and print only a short console preview to avoid flooding the terminal for large projects. Real runs write `PLANNED_UPLOAD` rows before the confirmation prompt, then update those rows as files are submitted and completed. The Upload tab progress bar is derived from these report statuses.
+
+If a run is interrupted or the console is closed while rows are still `SUBMITTED`, use the Upload tab's `Sync EE Assets` action after Earth Engine has finished ingesting the assets. This runs an inventory-only sync against the destination collection and updates matching local report rows to `EE_VERIFIED_EXISTS`. Statistics merges `ee_asset_inventory.csv` with `upload_report.csv`, so EE-verified assets count as uploaded even if an older local report row was stale or filtered by a later selected-tile run.
+
 ## Mosaic Output Naming
 
 Mosaic output names remain upload-compatible. They use:

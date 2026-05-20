@@ -168,8 +168,10 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Clear Upload Tiles", collect_button_texts(upload_tab))
             self.assertIn("Refresh Available Tiles", collect_button_texts(upload_tab))
             self.assertIn("Execution", collect_label_texts(upload_tab))
+            self.assertIn("Sync EE Assets", collect_button_texts(upload_tab))
             self.assertIn("Run Dry Run", collect_button_texts(upload_tab))
             self.assertIn("Run Real Upload", collect_button_texts(upload_tab))
+            self.assertGreaterEqual(len(collect_widgets(upload_tab, ttk.Progressbar)), 1)
             self.assertIn("Refresh Statistics", collect_button_texts(statistics_tab))
             self.assertNotIn("Preview Cleanup", collect_button_texts(statistics_tab))
             self.assertIn("Preview Cleanup", collect_button_texts(cleanup_tab))
@@ -316,6 +318,31 @@ class GuiLayoutTests(unittest.TestCase):
                     app.poll_upload_statistics_report(str(report), None, 0)
 
                 refresh.assert_called_once_with("upload report")
+            finally:
+                root.destroy()
+
+    def test_upload_report_progress_counts_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = Path(temp) / "upload_report.csv"
+            write_csv(
+                report,
+                [
+                    {"final_status": "PLANNED_UPLOAD"},
+                    {"final_status": "SUBMITTED"},
+                    {"final_status": "COMPLETED"},
+                    {"final_status": "FILTERED_UTM_TILE"},
+                ],
+            )
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                app = LauncherApp(root)
+
+                app.update_upload_progress_from_report(report)
+
+                self.assertAlmostEqual(app.upload_progress_var.get(), 66.666, places=2)
+                self.assertIn("planned pending 1", app.upload_progress_text_var.get())
+                self.assertIn("filtered 1", app.upload_progress_text_var.get())
             finally:
                 root.destroy()
 

@@ -312,6 +312,85 @@ class UploaderDialogRegressionTests(unittest.TestCase):
 
             self.assertEqual([item.asset_id for item in plan], ["projects/example/assets/collection/a"])
 
+    def test_selected_utm_filter_preserves_existing_submitted_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "inputs"
+            logs = root / "logs"
+            folder.mkdir(parents=True, exist_ok=True)
+            logs.mkdir(parents=True, exist_ok=True)
+            path = folder / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PGC0_01.tif"
+            )
+            path.write_bytes(b"1")
+            with (logs / "upload_report.csv").open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["local_file", "asset_id", "final_status"])
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "local_file": str(path),
+                        "asset_id": "projects/example/assets/collection/" + path.stem,
+                        "final_status": "SUBMITTED",
+                    }
+                )
+            config = self.uploader_config(
+                root,
+                scope="selected_utm",
+                tiles=["UTM35M"],
+                ee_sync=False,
+            )
+
+            plan = self.uploader(config).build_upload_plan()
+            rows = self.read_report_rows(config.artifacts.report_csv)
+
+            self.assertEqual(plan, [])
+            self.assertEqual(rows[0]["final_status"], "SUBMITTED")
+
+    def test_sync_existing_assets_to_report_ignores_selected_tile_filter(self) -> None:
+        class FakeData:
+            def listAssets(self, params):
+                return {
+                    "assets": [
+                        {
+                            "id": "projects/example/assets/collection/"
+                            "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                            "20260102T000000_20260102T010000_PGC0_01",
+                            "type": "IMAGE",
+                        }
+                    ]
+                }
+
+        class FakeEe:
+            data = FakeData()
+
+            def Initialize(self, project=None):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "inputs"
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PGC0_01.tif"
+            )
+            path.write_bytes(b"1")
+            config = self.uploader_config(
+                root,
+                scope="selected_utm",
+                tiles=["UTM35M"],
+                ee_sync=False,
+            )
+
+            with mock.patch("ee_ui_uploader.import_ee", return_value=FakeEe()):
+                count = self.uploader(config).sync_existing_assets_to_report()
+
+            rows = self.read_report_rows(config.artifacts.report_csv)
+            self.assertEqual(count, 1)
+            self.assertEqual(rows[0]["final_status"], EE_VERIFIED_EXISTS_STATUS)
+            self.assertEqual(rows[0]["source_utm_tiles"], '["UTM34M"]')
+
 
 if __name__ == "__main__":
     unittest.main()

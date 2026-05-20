@@ -66,6 +66,7 @@ class ProjectInsightsTests(unittest.TestCase):
             },
             "artifacts": {
                 "report_csv": str(logs / "upload_report.csv"),
+                "ee_asset_inventory_csv": str(logs / "ee_asset_inventory.csv"),
             },
         }
 
@@ -202,6 +203,50 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertIn(("UTM34M", 1), insights.mosaic_output_grid_counts)
             self.assertIn(("UTM34M", 1), insights.mosaic_source_tile_counts)
             self.assertEqual([candidate.stage for candidate in candidates], ["extracted", "mosaic", "raw"])
+
+    def test_ee_inventory_recovers_filtered_upload_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            mosaic = root / "03_mosaics" / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_"
+                "20260102T000000_20260102T010000_PGD0_02.tif"
+            )
+            mosaic.parent.mkdir(parents=True, exist_ok=True)
+            mosaic.write_bytes(b"12345")
+            asset_id = "projects/example/assets/SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_20260102T000000_20260102T010000_PGD0_02"
+            logs = root / "00_logs"
+            write_csv(
+                logs / "upload_report.csv",
+                [
+                    {
+                        "local_file": str(mosaic),
+                        "asset_id": asset_id,
+                        "final_status": "FILTERED_UTM_TILE",
+                        "upload_selected": "no",
+                        "output_grid": "UTM34M",
+                    }
+                ],
+            )
+            write_csv(
+                logs / "ee_asset_inventory.csv",
+                [
+                    {
+                        "asset_id": asset_id,
+                        "asset_name": asset_id.rsplit("/", 1)[-1],
+                        "asset_type": "IMAGE",
+                        "listed_at": "2026-05-20T10:00:00+02:00",
+                    }
+                ],
+            )
+
+            insights = collect_project_insights(config)
+            candidates = plan_cleanup_candidates(config)
+
+            self.assertIn(("EE_VERIFIED_EXISTS", 1), insights.upload_status_counts)
+            self.assertIn(("UTM34M", 1), insights.uploaded_tile_counts)
+            self.assertEqual(insights.metrics["Uploaded/already-existing assets recorded"], "1")
+            self.assertEqual([candidate.stage for candidate in candidates], ["mosaic"])
 
     def test_common_crs_mosaic_reports_source_tile_participation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

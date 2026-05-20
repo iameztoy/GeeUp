@@ -203,8 +203,14 @@ ACTIVE_STATUSES = {
     "READY",
     "RUNNING",
 }
+PRESERVE_ON_FILTER_STATUSES = RESUME_SKIP_STATUSES | {
+    "FAILED",
+    "ERROR",
+    "UNKNOWN_AFTER_CLICK",
+}
 
 UNKNOWN_AFTER_CLICK_STATUS = "UNKNOWN_AFTER_CLICK"
+PLANNED_UPLOAD_STATUS = "PLANNED_UPLOAD"
 UPLOAD_SCOPE_ALL = "all"
 UPLOAD_SCOPE_SELECTED_UTM = "selected_utm"
 VALID_UPLOAD_SCOPES = {UPLOAD_SCOPE_ALL, UPLOAD_SCOPE_SELECTED_UTM}
@@ -460,40 +466,55 @@ class ReportManager:
         """Return the recorded status for an asset ID."""
         return self.rows.get(asset_id, {}).get("final_status", "").strip().upper()
 
-    def upsert(self, row: Dict[str, str]) -> None:
-        """Insert or replace a report row."""
+    def merge_row(self, row: Dict[str, str]) -> Dict[str, str]:
+        """Insert or replace one in-memory report row and return the stored row."""
         asset_id = row["asset_id"]
         existing = self.rows.get(asset_id, {column: "" for column in REPORT_COLUMNS})
         existing.update({column: row.get(column, existing.get(column, "")) for column in REPORT_COLUMNS})
         self.rows[asset_id] = existing
-        self.write()
-        self.write_workflow_row(existing)
+        return existing
 
-    def write_workflow_row(self, row: Dict[str, str]) -> None:
-        """Mirror upload report status into the shared workflow manifest."""
+    def upsert(self, row: Dict[str, str]) -> None:
+        """Insert or replace a report row."""
+        existing = self.merge_row(row)
+        self.write()
+        self.write_workflow_rows([existing])
+
+    def upsert_many(self, rows: Iterable[Dict[str, str]]) -> None:
+        """Insert or replace multiple rows, then write reports once."""
+        existing_rows = [self.merge_row(row) for row in rows]
+        if not existing_rows:
+            return
+        self.write()
+        self.write_workflow_rows(existing_rows)
+
+    def workflow_row(self, row: Dict[str, str]) -> Dict[str, str]:
+        """Return the shared workflow manifest row for one upload report row."""
         local_file = Path(row.get("local_file", ""))
+        return {
+            "stage": "upload",
+            "record_id": row.get("asset_id", ""),
+            "record_type": "earth_engine_asset",
+            "status": row.get("final_status", ""),
+            "source_path": row.get("local_file", ""),
+            "output_path": row.get("asset_id", ""),
+            "start_time": row.get("metadata_start_time", ""),
+            "end_time": row.get("metadata_end_time", ""),
+            "output_exists": (
+                "yes"
+                if row.get("final_status", "") == EE_VERIFIED_EXISTS_STATUS
+                or row.get("ee_asset_exists", "").lower() == "yes"
+                else "unknown"
+            ),
+            "raw_exists": "yes" if local_file.exists() else "no",
+            "message": row.get("error_message", ""),
+        }
+
+    def write_workflow_rows(self, rows: Iterable[Dict[str, str]]) -> None:
+        """Mirror upload report statuses into the shared workflow manifest."""
         upsert_workflow_manifest(
             workflow_manifest_path(self.report_path),
-            [
-                {
-                    "stage": "upload",
-                    "record_id": row.get("asset_id", ""),
-                    "record_type": "earth_engine_asset",
-                    "status": row.get("final_status", ""),
-                    "source_path": row.get("local_file", ""),
-                    "output_path": row.get("asset_id", ""),
-                    "start_time": row.get("metadata_start_time", ""),
-                    "end_time": row.get("metadata_end_time", ""),
-                    "output_exists": (
-                        "yes"
-                        if row.get("final_status", "") == EE_VERIFIED_EXISTS_STATUS
-                        or row.get("ee_asset_exists", "").lower() == "yes"
-                        else "unknown"
-                    ),
-                    "raw_exists": "yes" if local_file.exists() else "no",
-                    "message": row.get("error_message", ""),
-                }
-            ],
+            [self.workflow_row(row) for row in rows],
         )
 
     def write(self) -> None:
@@ -881,6 +902,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-resume", action="store_true", help="Override config and disable resume mode.")
     parser.add_argument("--yes", action="store_true", help="Skip the safety confirmation prompt.")
     parser.add_argument("--headless", action="store_true", help="Run Chrome headless.")
+    parser.add_argument(
+        "--sync-only",
+        action="store_true",
+        help="Only sync Earth Engine assets into the local upload report; do not upload.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Show debug logging in the console.")
     return parser
 
@@ -947,7 +973,14 @@ class EarthEngineUIUploader:
 
     def run(self) -> int:
         """Run the upload workflow end to end."""
-        planned_items = self.build_upload_plan()
+        try:
+            planned_items = self.build_upload_plan()
+        except KeyboardInterrupt:
+            self.logger.warning("Interrupted by user while building the upload plan.")
+            return 130
+        except Exception:
+            self.logger.exception("Fatal error while building the upload plan.")
+            return 1
         if not planned_items:
             self.logger.info("No GeoTIFF files need processing. Nothing to do.")
             return 0
@@ -1002,10 +1035,18 @@ class EarthEngineUIUploader:
         if not files:
             self.logger.warning("No matching GeoTIFF files were found in %s", self.config.input_folder)
             return []
+        self.logger.info(
+            "Found %s GeoTIFF file(s) in %s. Building upload plan...",
+            len(files),
+            self.config.input_folder,
+        )
 
         planned: List[UploadItem] = []
+        report_rows: List[Dict[str, str]] = []
         seen_asset_ids: Dict[str, Path] = {}
         source_tile_lookup = self.load_mosaic_source_tile_lookup()
+        filtered_count = 0
+        ee_verified_count = 0
 
         for file_path in files:
             asset_name = self.build_asset_name(file_path.stem)
@@ -1016,22 +1057,13 @@ class EarthEngineUIUploader:
                 asset_id=asset_id,
             )
             self.apply_upload_filter_metadata(item, source_tile_lookup)
-            if not item.upload_selected:
-                self.report.upsert(
-                    self.make_report_row(
-                        item=item,
-                        submit_time="",
-                        detected_task_name="",
-                        final_status=FILTERED_UTM_STATUS,
-                        error_message="Excluded by upload UTM/source-tile selection.",
-                    )
-                )
-                continue
+            existing_status = self.report.get_status(asset_id)
             if self.ee_inventory_synced and asset_id in self.ee_existing_asset_ids:
                 item.ee_asset_exists = True
                 item.ee_verified_at = now_iso()
                 item.verification_source = "ee.data.listAssets"
-                self.report.upsert(
+                ee_verified_count += 1
+                report_rows.append(
                     self.make_report_row(
                         item=item,
                         submit_time="",
@@ -1043,10 +1075,28 @@ class EarthEngineUIUploader:
                 self.resume_skipped_assets.append(asset_id)
                 self.logger.info("Earth Engine verified skip: %s", asset_id)
                 continue
-            existing_status = self.report.get_status(asset_id)
             if self.should_resume_skip_existing_status(existing_status):
                 self.resume_skipped_assets.append(asset_id)
                 self.logger.info("Resume skip: %s (%s)", asset_id, existing_status)
+                continue
+            if not item.upload_selected:
+                filtered_count += 1
+                if existing_status in PRESERVE_ON_FILTER_STATUSES:
+                    self.logger.info(
+                        "Preserving existing upload status for non-selected asset: %s (%s)",
+                        asset_id,
+                        existing_status,
+                    )
+                    continue
+                report_rows.append(
+                    self.make_report_row(
+                        item=item,
+                        submit_time="",
+                        detected_task_name="",
+                        final_status=FILTERED_UTM_STATUS,
+                        error_message="Excluded by upload UTM/source-tile selection.",
+                    )
+                )
                 continue
             if asset_id in seen_asset_ids:
                 previous = seen_asset_ids[asset_id]
@@ -1063,11 +1113,32 @@ class EarthEngineUIUploader:
             for item in batch:
                 item.batch_number = batch_index
                 self.tracked_items[item.asset_id] = item
+                if not self.config.execution.dry_run:
+                    report_rows.append(
+                        self.make_report_row(
+                            item=item,
+                            submit_time="",
+                            detected_task_name="",
+                            final_status=PLANNED_UPLOAD_STATUS,
+                            error_message="Planned for real upload; awaiting submission.",
+                        )
+                    )
         self.logger.info(
-            "Prepared %s uploads. Resume skipped %s assets.",
+            "Prepared %s upload(s). Resume skipped %s asset(s). Filtered %s file(s) by upload scope. EE-verified skipped %s asset(s).",
             len(planned),
             len(self.resume_skipped_assets),
+            filtered_count,
+            ee_verified_count,
         )
+        if report_rows:
+            self.logger.info(
+                "Writing %s planning report row(s): %s filtered by UTM, %s EE-verified skip(s), %s planned upload(s).",
+                len(report_rows),
+                filtered_count,
+                ee_verified_count,
+                0 if self.config.execution.dry_run else len(planned),
+            )
+            self.report.upsert_many(report_rows)
         return planned
 
     def should_resume_skip_existing_status(self, existing_status: str) -> bool:
@@ -1100,6 +1171,55 @@ class EarthEngineUIUploader:
             len(records),
             self.config.destination_parent,
         )
+
+    def sync_existing_assets_to_report(self) -> int:
+        """Sync EE inventory and mark matching local files as verified existing."""
+        previous_sync_setting = self.config.upload.ee_sync_before_upload
+        self.config.upload.ee_sync_before_upload = True
+        try:
+            self.sync_earth_engine_inventory()
+        finally:
+            self.config.upload.ee_sync_before_upload = previous_sync_setting
+
+        files = self.collect_input_files()
+        if not files:
+            self.logger.warning("No matching GeoTIFF files were found in %s", self.config.input_folder)
+            return 0
+
+        source_tile_lookup = self.load_mosaic_source_tile_lookup()
+        rows: List[Dict[str, str]] = []
+        for file_path in files:
+            asset_name = self.build_asset_name(file_path.stem)
+            asset_id = f"{self.config.destination_parent}/{asset_name}"
+            if asset_id not in self.ee_existing_asset_ids:
+                continue
+            item = UploadItem(
+                local_file=file_path,
+                asset_name=asset_name,
+                asset_id=asset_id,
+                ee_asset_exists=True,
+                ee_verified_at=now_iso(),
+                verification_source="ee.data.listAssets",
+            )
+            self.apply_upload_filter_metadata(item, source_tile_lookup)
+            rows.append(
+                self.make_report_row(
+                    item=item,
+                    submit_time="",
+                    detected_task_name="",
+                    final_status=EE_VERIFIED_EXISTS_STATUS,
+                    error_message="Asset exists in the target Earth Engine collection.",
+                )
+            )
+
+        self.report.upsert_many(rows)
+        self.logger.info(
+            "EE asset sync marked %s local file(s) as %s in %s.",
+            len(rows),
+            EE_VERIFIED_EXISTS_STATUS,
+            self.config.artifacts.report_csv,
+        )
+        return len(rows)
 
     def list_earth_engine_assets(self, ee: Any) -> List[AssetInventoryRecord]:
         """Return direct child assets from the configured destination parent."""
@@ -1254,27 +1374,42 @@ class EarthEngineUIUploader:
     def run_dry_run(self, planned_items: Sequence[UploadItem]) -> None:
         """Record and print planned uploads without touching the UI."""
         self.logger.info("Dry-run mode is enabled. No browser automation will run.")
-        for item in planned_items:
+        report_rows: List[Dict[str, str]] = []
+        preview_limit = 25
+        for index, item in enumerate(planned_items, start=1):
             metadata = self.parse_metadata_for_item(item, required=False)
-            row = self.make_report_row(
-                item=item,
-                submit_time="",
-                detected_task_name="",
-                final_status="PLANNED_DRY_RUN",
-                error_message="Dry run only. No upload clicked.",
-            )
-            self.report.upsert(row)
-            self.logger.info("Plan: %s -> %s", item.local_file, item.asset_id)
-            if metadata.status == "METADATA_PARSED":
-                self.logger.info(
-                    "Metadata: start=%s end=%s properties=%s",
-                    metadata.start_time,
-                    metadata.end_time,
-                    metadata.properties,
+            report_rows.append(
+                self.make_report_row(
+                    item=item,
+                    submit_time="",
+                    detected_task_name="",
+                    final_status="PLANNED_DRY_RUN",
+                    error_message="Dry run only. No upload clicked.",
                 )
-            elif metadata.error_message:
-                self.logger.warning("Metadata: %s", metadata.error_message)
-        self.logger.info("Dry-run complete. Report written to %s", self.config.artifacts.report_csv)
+            )
+            if index <= preview_limit:
+                self.logger.info("Plan: %s -> %s", item.local_file, item.asset_id)
+                if metadata.status == "METADATA_PARSED":
+                    self.logger.info(
+                        "Metadata: start=%s end=%s properties=%s",
+                        metadata.start_time,
+                        metadata.end_time,
+                        metadata.properties,
+                    )
+                elif metadata.error_message:
+                    self.logger.warning("Metadata: %s", metadata.error_message)
+        if len(planned_items) > preview_limit:
+            self.logger.info(
+                "Dry-run console preview limited to first %s of %s planned upload(s). Full details are in the report CSV.",
+                preview_limit,
+                len(planned_items),
+            )
+        self.report.upsert_many(report_rows)
+        self.logger.info(
+            "Dry-run complete. Planned %s upload(s). Report written to %s",
+            len(planned_items),
+            self.config.artifacts.report_csv,
+        )
 
     def confirm_before_real_upload(self, planned_items: Sequence[UploadItem]) -> None:
         """Ask for a final confirmation before real uploads begin."""
@@ -2968,6 +3103,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger=logger,
         assume_yes=args.yes,
     )
+    if args.sync_only:
+        count = uploader.sync_existing_assets_to_report()
+        logger.info("Sync-only finished. Verified %s local file(s) against Earth Engine.", count)
+        return 0
     return uploader.run()
 
 

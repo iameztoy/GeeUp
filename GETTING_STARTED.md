@@ -198,6 +198,10 @@ Typical steps:
 
 List clicks update the optional UTM filter immediately. `Validate Typed Tiles` only checks typed or pasted tile IDs and refreshes the list highlighting. It does not start an upload.
 
+Dry run is recommended when you changed the origin folder, destination collection, upload scope, selected tiles, naming prefix/suffix, or metadata settings. If only retrying the same checked setup, you can run the real upload directly. The dry-run console prints only a short preview; the full per-file plan is written to `upload_report.csv`. The Upload tab progress bar reads that report and summarizes planned, submitted, completed, failed, and filtered rows.
+
+If a real upload was submitted but the console was closed before GeeUp finished monitoring Earth Engine tasks, `upload_report.csv` may still show `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It lists the destination collection and marks matching local mosaics as `EE_VERIFIED_EXISTS`, which also updates Statistics and Cleanup eligibility.
+
 Before planning uploads, GeeUp can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the local upload report is incomplete. The Upload tile list also excludes local files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS` in `upload_report.csv`; the status text shows which source tiles are already completed or verified.
 
 ### 6. Statistics

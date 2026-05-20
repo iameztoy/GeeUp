@@ -31,6 +31,7 @@ UPLOAD_CLEANUP_STATUSES = {
     "SKIPPED_ALREADY_EXISTS",
     "EE_VERIFIED_EXISTS",
 }
+EE_VERIFIED_STATUS = "EE_VERIFIED_EXISTS"
 UTM_TILE_TOKEN_RE = re.compile(r"^UTM(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])$")
 
 
@@ -441,6 +442,88 @@ def update_stage_counts(
         counts[(stage, status)] += 1
 
 
+def ee_inventory_image_rows(rows: Iterable[Mapping[str, str]]) -> List[Mapping[str, str]]:
+    """Return EE inventory rows that represent image assets."""
+    return [
+        row
+        for row in rows
+        if str(row.get("asset_id", "") or "").strip()
+        and str(row.get("asset_type", "") or "IMAGE").upper() in {"IMAGE", ""}
+    ]
+
+
+def asset_name_from_asset_id(asset_id: str) -> str:
+    """Return the last path component of an Earth Engine asset id."""
+    return str(asset_id or "").rstrip("/").rsplit("/", 1)[-1]
+
+
+def inferred_source_tiles_from_text(text: str) -> List[str]:
+    """Return source UTM tiles parsed from a file or asset name."""
+    parsed = parse_swot_l2_hr_raster_metadata(text)
+    if parsed is None:
+        return []
+    tile = normalize_utm_tile_token(parsed.fields.get("coordinate_system", ""))
+    return [tile] if tile else []
+
+
+def inventory_verified_upload_row(row: Mapping[str, str]) -> Dict[str, str]:
+    """Create a synthetic upload row from one EE inventory image row."""
+    asset_id = str(row.get("asset_id", "") or "").strip()
+    asset_name = str(row.get("asset_name", "") or "").strip() or asset_name_from_asset_id(asset_id)
+    tiles = inferred_source_tiles_from_text(asset_name)
+    parsed = parse_swot_l2_hr_raster_metadata(asset_name)
+    output_grid = ""
+    if parsed is not None:
+        output_grid = str(parsed.fields.get("coordinate_system", "") or "").upper()
+    return {
+        "local_file": asset_name,
+        "asset_id": asset_id,
+        "asset_name": asset_name,
+        "final_status": EE_VERIFIED_STATUS,
+        "output_grid": output_grid,
+        "source_utm_tiles": json.dumps(tiles),
+        "ee_asset_exists": "yes",
+        "ee_verified_at": str(row.get("listed_at", "") or ""),
+        "verification_source": "ee_asset_inventory.csv",
+    }
+
+
+def merge_upload_rows_with_ee_inventory(
+    upload_rows: Iterable[Mapping[str, str]],
+    inventory_rows: Iterable[Mapping[str, str]],
+) -> List[Dict[str, str]]:
+    """Return upload rows adjusted with EE inventory truth."""
+    inventory_by_asset = {
+        str(row.get("asset_id", "") or "").strip(): row
+        for row in ee_inventory_image_rows(inventory_rows)
+    }
+    merged: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_row in upload_rows:
+        row = dict(raw_row)
+        asset_id = str(row.get("asset_id", "") or "").strip()
+        if asset_id:
+            seen.add(asset_id)
+        inventory_row = inventory_by_asset.get(asset_id)
+        if inventory_row:
+            row["final_status"] = EE_VERIFIED_STATUS
+            row["ee_asset_exists"] = "yes"
+            row["ee_verified_at"] = str(inventory_row.get("listed_at", "") or row.get("ee_verified_at", ""))
+            row["verification_source"] = row.get("verification_source", "") or "ee_asset_inventory.csv"
+            if not str(row.get("source_utm_tiles", "") or "").strip():
+                asset_name = str(inventory_row.get("asset_name", "") or "").strip() or asset_name_from_asset_id(asset_id)
+                row["source_utm_tiles"] = json.dumps(inferred_source_tiles_from_text(row.get("local_file", "") or asset_name))
+            if not str(row.get("output_grid", "") or "").strip():
+                tiles = [tile for tile in parse_json_list(row.get("source_utm_tiles", "")) if tile]
+                row["output_grid"] = tiles[0] if len(tiles) == 1 else ""
+        merged.append(row)
+
+    for asset_id, inventory_row in inventory_by_asset.items():
+        if asset_id not in seen:
+            merged.append(inventory_verified_upload_row(inventory_row))
+    return merged
+
+
 def cleanup_path_size(path: Path) -> int:
     """Return file size or zero when unavailable."""
     try:
@@ -469,6 +552,7 @@ def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]
     mosaic_manifest = config_path(config, "mosaic", "manifest_csv")
     artifacts = config.get("artifacts", {})
     upload_report = Path(str(artifacts.get("report_csv", ""))) if isinstance(artifacts, Mapping) else Path("")
+    ee_inventory = Path(str(artifacts.get("ee_asset_inventory_csv", ""))) if isinstance(artifacts, Mapping) else Path("")
 
     candidates: Dict[Path, CleanupCandidate] = {}
 
@@ -495,7 +579,11 @@ def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]
                     size_bytes=cleanup_path_size(path),
                 )
 
-    for row in read_csv_rows(upload_report):
+    upload_rows = merge_upload_rows_with_ee_inventory(
+        read_csv_rows(upload_report),
+        read_csv_rows(ee_inventory),
+    )
+    for row in upload_rows:
         if row.get("final_status", "").upper() not in UPLOAD_CLEANUP_STATUSES:
             continue
         path = Path(row.get("local_file", ""))
@@ -522,7 +610,10 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     extract_rows = read_csv_rows(config_path(config, "extract", "manifest_csv"))
     mosaic_rows = read_csv_rows(config_path(config, "mosaic", "manifest_csv"))
     artifacts = config.get("artifacts", {})
-    upload_rows = read_csv_rows(artifacts.get("report_csv", "")) if isinstance(artifacts, Mapping) else []
+    upload_report_rows = read_csv_rows(artifacts.get("report_csv", "")) if isinstance(artifacts, Mapping) else []
+    ee_inventory_rows = read_csv_rows(artifacts.get("ee_asset_inventory_csv", "")) if isinstance(artifacts, Mapping) else []
+    ee_inventory_images = ee_inventory_image_rows(ee_inventory_rows)
+    upload_rows = merge_upload_rows_with_ee_inventory(upload_report_rows, ee_inventory_rows)
     workflow_rows = read_csv_rows(logs_folder / "workflow_manifest.csv")
 
     stage_counts: Counter[tuple[str, str]] = Counter()
@@ -773,7 +864,9 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Unique mosaic output grids observed"] = str(len(mosaic_output_grid_counter))
     metrics["Completed common-CRS/non-UTM mosaics"] = str(common_crs_mosaic_count)
     metrics["Unique mosaic source UTM tiles observed"] = str(len(mosaic_source_tile_counter))
-    metrics["Upload report rows"] = str(len(upload_rows))
+    metrics["Upload report rows"] = str(len(upload_report_rows))
+    metrics["EE inventory image assets"] = str(len(ee_inventory_images))
+    metrics["Effective upload rows after EE inventory merge"] = str(len(upload_rows))
     metrics["Uploaded/already-existing assets recorded"] = str(len(uploaded_rows))
     metrics["EE-verified existing assets recorded"] = str(len(ee_verified_upload_rows))
     metrics["Upload rows filtered by UTM selection"] = str(len(filtered_upload_rows))

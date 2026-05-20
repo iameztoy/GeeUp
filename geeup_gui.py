@@ -466,6 +466,8 @@ class LauncherApp:
         self.download_progress_var = tk.DoubleVar(value=0.0)
         self.download_progress_text_var = tk.StringVar(value="Progress: not started")
         self.download_stop_event: threading.Event | None = None
+        self.upload_progress_var = tk.DoubleVar(value=0.0)
+        self.upload_progress_text_var = tk.StringVar(value="Progress: not started")
         self.extract_progress_var = tk.DoubleVar(value=0.0)
         self.extract_progress_text_var = tk.StringVar(value="Progress: not started")
         self.mosaic_progress_var = tk.DoubleVar(value=0.0)
@@ -1293,20 +1295,40 @@ class LauncherApp:
             command=self.open_manual_login_browser,
         ).grid(row=0, column=0, sticky="w")
         ttk.Button(
-            buttons, text="Run Dry Run", command=self.save_and_run_dry_run
+            buttons,
+            text="Sync EE Assets",
+            command=self.sync_ee_assets,
         ).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Button(
-            buttons, text="Run Real Upload", command=self.save_and_run_real
+            buttons, text="Run Dry Run", command=self.save_and_run_dry_run
         ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Button(
+            buttons, text="Run Real Upload", command=self.save_and_run_real
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
         ttk.Label(
             buttons,
-            text="List clicks update the optional UTM filter immediately. Use Validate Typed Tiles only to check typed or pasted IDs before running; use Run Dry Run or Run Real Upload to execute.",
+            text="List clicks update the optional UTM filter immediately. Use Sync EE Assets after uploads finish if the report still shows SUBMITTED rows; use Run Dry Run or Run Real Upload to execute.",
             foreground="#555555",
             wraplength=900,
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        progress = ttk.Frame(parent)
+        progress.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        progress.columnconfigure(0, weight=1)
+        ttk.Progressbar(
+            progress,
+            variable=self.upload_progress_var,
+            maximum=100,
+            mode="determinate",
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Label(
+            progress,
+            textvariable=self.upload_progress_text_var,
+            foreground="#555555",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         notes = ttk.LabelFrame(parent, text="Notes", padding=12)
-        notes.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        notes.grid(row=4, column=0, sticky="ew", pady=(14, 0))
         ttk.Label(
             notes,
             text=(
@@ -1340,7 +1362,7 @@ class LauncherApp:
             foreground="#184a8b",
             justify="left",
         )
-        status.grid(row=4, column=0, sticky="w", pady=(14, 0))
+        status.grid(row=5, column=0, sticky="w", pady=(14, 0))
 
     def build_statistics_tab(self, parent: ttk.Frame) -> None:
         """Create project statistics, plots, and QA controls."""
@@ -1361,7 +1383,7 @@ class LauncherApp:
         ttk.Button(
             actions,
             text="Refresh Statistics",
-            command=self.refresh_project_statistics,
+            command=self.refresh_project_statistics_async,
         ).grid(row=0, column=0, sticky="w")
 
         inner = ttk.Notebook(parent)
@@ -4138,7 +4160,7 @@ class LauncherApp:
             self.clear_treeview(tree)
         self.cleanup_candidates = []
         self.populate_cleanup_tree([])
-        self.draw_bar_chart(self.stats_stage_chart_canvas, [], "Rows by processing stage")
+        self.draw_bar_chart(self.stats_stage_chart_canvas, [], "Completed rows by processing stage")
         self.draw_bar_chart(self.stats_tile_chart_canvas, [], "Top UTM tiles by recorded files")
         self.statistics_summary_var.set("")
         self.cleanup_status_var.set("Open a project, then preview safe cleanup candidates.")
@@ -4287,11 +4309,17 @@ class LauncherApp:
         for stage, _status, count in insights.stage_status_counts:
             if stage == "workflow":
                 continue
+            if stage == "upload" and _status.upper() not in {
+                "COMPLETED",
+                "SKIPPED_ALREADY_EXISTS",
+                "EE_VERIFIED_EXISTS",
+            }:
+                continue
             stage_totals[stage] = stage_totals.get(stage, 0) + count
         self.draw_bar_chart(
             self.stats_stage_chart_canvas,
             list(stage_totals.items()),
-            "Rows by processing stage",
+            "Completed rows by processing stage",
         )
         self.draw_bar_chart(
             self.stats_tile_chart_canvas,
@@ -4329,7 +4357,78 @@ class LauncherApp:
     def refresh_project_statistics_if_active(self, source: str) -> None:
         """Refresh statistics silently when a project is open."""
         if self.current_project_root_var.get().strip():
-            self.refresh_project_statistics(notify=False, source=source)
+            self.refresh_project_statistics_async(notify=False, source=source)
+
+    def refresh_project_statistics_async(
+        self,
+        notify: bool = True,
+        source: str = "",
+    ) -> None:
+        """Refresh project statistics in a background thread."""
+        if not self.current_project_root_var.get().strip():
+            if notify:
+                self.require_active_project("refresh project statistics")
+            return
+        config = self.build_config()
+        self.statistics_status_var.set("Refreshing project statistics in the background...")
+        thread = threading.Thread(
+            target=self.run_project_statistics_refresh,
+            args=(config, notify, source),
+            daemon=True,
+        )
+        thread.start()
+
+    def run_project_statistics_refresh(
+        self,
+        config: dict[str, Any],
+        notify: bool,
+        source: str,
+    ) -> None:
+        """Compute and save statistics off the Tkinter UI thread."""
+        try:
+            insights = collect_project_insights(config)
+        except Exception as exc:
+            self.root.after(0, self.finish_project_statistics_error, exc, notify)
+            return
+
+        snapshot_text = ""
+        try:
+            snapshot_path = write_project_insights_snapshot(config, insights)
+            snapshot_text = f" Saved to {snapshot_path}."
+        except OSError as exc:
+            snapshot_text = f" Could not save statistics snapshot: {exc}"
+        self.root.after(
+            0,
+            self.finish_project_statistics_refresh,
+            insights,
+            notify,
+            source,
+            snapshot_text,
+        )
+
+    def finish_project_statistics_error(self, exc: Exception, notify: bool) -> None:
+        """Show a background statistics refresh failure."""
+        self.statistics_status_var.set(f"Could not refresh project statistics: {exc}")
+        if notify:
+            messagebox.showerror(
+                "Could not refresh statistics",
+                f"Failed to read project manifests or folders:\n{exc}",
+            )
+
+    def finish_project_statistics_refresh(
+        self,
+        insights: Any,
+        notify: bool,
+        source: str,
+        snapshot_text: str,
+    ) -> None:
+        """Render a completed background statistics refresh."""
+        suffix = f" after {source}" if source else ""
+        self.display_project_statistics(
+            insights,
+            status_text=f"Project statistics refreshed{suffix}.{snapshot_text}",
+            include_cleanup=True,
+        )
 
     def refresh_project_statistics(
         self,
@@ -4680,7 +4779,17 @@ class LauncherApp:
             return
         self.launch_uploader(dry_run=False)
 
-    def launch_uploader(self, dry_run: bool) -> None:
+    def sync_ee_assets(self) -> None:
+        """Sync Earth Engine assets into the upload report without uploading."""
+        if not self.save_config(
+            notify=False,
+            validate_upload=True,
+            validate_mosaic=False,
+        ):
+            return
+        self.launch_uploader(dry_run=False, sync_only=True)
+
+    def launch_uploader(self, dry_run: bool, sync_only: bool = False) -> None:
         """Start the CLI uploader in a new console window when possible."""
         upload_report_path = self.current_upload_report_path()
         upload_report_mtime = self.file_mtime_ns(upload_report_path)
@@ -4692,6 +4801,8 @@ class LauncherApp:
         ]
         if dry_run:
             uploader_command.append("--dry-run")
+        if sync_only:
+            uploader_command.append("--sync-only")
 
         creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         command = ["cmd.exe", "/k", subprocess.list2cmdline(uploader_command)]
@@ -4704,7 +4815,11 @@ class LauncherApp:
             )
             return
 
-        run_type = "dry run" if dry_run else "real upload"
+        run_type = "EE asset sync" if sync_only else "dry run" if dry_run else "real upload"
+        self.upload_progress_var.set(0.0)
+        self.upload_progress_text_var.set(
+            f"Progress: started {run_type}; waiting for report updates..."
+        )
         self.start_upload_statistics_watcher(upload_report_path, upload_report_mtime)
         self.status_var.set(
             f"Started {run_type} in a separate console window. That window now stays open after the run finishes."
@@ -4732,6 +4847,57 @@ class LauncherApp:
         except OSError:
             return None
 
+    def upload_report_status_counts(self, report_path: Path) -> dict[str, int]:
+        """Return final-status counts from the upload report."""
+        counts: dict[str, int] = {}
+        try:
+            with report_path.open("r", encoding="utf-8", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    status = str(row.get("final_status", "") or "UNKNOWN").strip().upper()
+                    counts[status] = counts.get(status, 0) + 1
+        except OSError:
+            return counts
+        return counts
+
+    def update_upload_progress_from_report(self, report_path: Path) -> None:
+        """Update Upload progress widgets from upload_report.csv status counts."""
+        counts = self.upload_report_status_counts(report_path)
+        if not counts:
+            self.upload_progress_var.set(0.0)
+            self.upload_progress_text_var.set(
+                "Progress: waiting for upload report rows..."
+            )
+            return
+
+        planned = counts.get("PLANNED_UPLOAD", 0)
+        dry_planned = counts.get("PLANNED_DRY_RUN", 0)
+        filtered = counts.get("FILTERED_UTM_TILE", 0)
+        submitted = counts.get("SUBMITTED", 0)
+        active = counts.get("READY", 0) + counts.get("RUNNING", 0)
+        completed = (
+            counts.get("COMPLETED", 0)
+            + counts.get("SKIPPED_ALREADY_EXISTS", 0)
+            + counts.get("EE_VERIFIED_EXISTS", 0)
+        )
+        errors = (
+            counts.get("FAILED", 0)
+            + counts.get("ERROR", 0)
+            + counts.get("UNKNOWN_AFTER_CLICK", 0)
+        )
+        eligible = planned + dry_planned + submitted + active + completed + errors
+        if eligible:
+            progressed = dry_planned + submitted + active + completed + errors
+            percent = min(100.0, max(0.0, progressed / eligible * 100.0))
+        else:
+            percent = 100.0 if filtered else 0.0
+        self.upload_progress_var.set(percent)
+        self.upload_progress_text_var.set(
+            "Progress: "
+            f"{percent:.0f}% | planned pending {planned}, dry-run planned {dry_planned}, "
+            f"submitted {submitted}, active {active}, completed/skipped/verified {completed}, "
+            f"errors {errors}, filtered {filtered}."
+        )
+
     def start_upload_statistics_watcher(
         self,
         report_path: Path,
@@ -4747,7 +4913,7 @@ class LauncherApp:
         if not str(report_path):
             return
         self.upload_stats_poll_after_id = self.root.after(
-            10000,
+            2000,
             self.poll_upload_statistics_report,
             str(report_path),
             previous_mtime,
@@ -4763,6 +4929,8 @@ class LauncherApp:
         """Refresh Statistics when the upload report changes."""
         report_path = Path(report_path_text)
         current_mtime = self.file_mtime_ns(report_path)
+        if current_mtime is not None:
+            self.update_upload_progress_from_report(report_path)
         if current_mtime is not None and current_mtime != previous_mtime:
             self.refresh_project_statistics_if_active("upload report")
             previous_mtime = current_mtime
@@ -4770,7 +4938,7 @@ class LauncherApp:
             self.upload_stats_poll_after_id = None
             return
         self.upload_stats_poll_after_id = self.root.after(
-            30000,
+            5000,
             self.poll_upload_statistics_report,
             report_path_text,
             previous_mtime,
