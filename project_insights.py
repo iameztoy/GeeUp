@@ -155,6 +155,17 @@ def format_bytes(value: int) -> str:
     return f"{size:.1f} TB"
 
 
+def compact_count_keys(counter: Counter[str], limit: int = 8) -> str:
+    """Return a compact comma-separated summary of counted keys."""
+    if not counter:
+        return ""
+    parts = [f"{key} ({count})" for key, count in counter.most_common(limit)]
+    remaining = len(counter) - len(parts)
+    if remaining > 0:
+        parts.append(f"+{remaining} more")
+    return ", ".join(parts)
+
+
 def parse_json_list(value: str) -> List[str]:
     """Parse a JSON list stored in a CSV cell."""
     if not value:
@@ -682,6 +693,9 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     ee_verified_upload_rows = [
         row for row in upload_rows if row.get("final_status", "").upper() == "EE_VERIFIED_EXISTS"
     ]
+    submitted_upload_rows = [
+        row for row in upload_rows if row.get("final_status", "").upper() == "SUBMITTED"
+    ]
     filtered_upload_rows = [
         row
         for row in upload_rows
@@ -693,6 +707,7 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         for row in upload_rows
     )
     uploaded_tile_counter: Counter[str] = Counter()
+    submitted_tile_counter: Counter[str] = Counter()
     uploaded_date_counter: Counter[str] = Counter()
     uploaded_level_counter: Counter[str] = Counter()
     uploaded_grid_counter: Counter[str] = Counter()
@@ -702,6 +717,12 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     mosaic_tiles_by_output = mosaic_source_tile_lookup(complete_mosaic_rows)
     for row in upload_rows:
         status = str(row.get("final_status", "") or "UNKNOWN").upper()
+        if status == "SUBMITTED":
+            submitted_tiles = upload_row_source_tiles(row, mosaic_tiles_by_output)
+            if not submitted_tiles:
+                submitted_tiles = ["UNKNOWN"]
+            for tile in submitted_tiles:
+                submitted_tile_counter[tile] += 1
         if status not in UPLOAD_CLEANUP_STATUSES and status != "FILTERED_UTM_TILE":
             error_text = str(row.get("error_message", "") or "").strip()
             if not error_text:
@@ -869,6 +890,9 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Effective upload rows after EE inventory merge"] = str(len(upload_rows))
     metrics["Uploaded/already-existing assets recorded"] = str(len(uploaded_rows))
     metrics["EE-verified existing assets recorded"] = str(len(ee_verified_upload_rows))
+    metrics["Submitted uploads awaiting EE verification"] = str(len(submitted_upload_rows))
+    metrics["Unique submitted source UTM tiles awaiting verification"] = str(len([tile for tile in submitted_tile_counter if tile != "UNKNOWN"]))
+    metrics["Submitted source UTM tiles awaiting verification"] = compact_count_keys(submitted_tile_counter)
     metrics["Upload rows filtered by UTM selection"] = str(len(filtered_upload_rows))
     metrics["Unique uploaded source UTM tiles"] = str(len([tile for tile in uploaded_tile_counter if tile != "UNKNOWN"]))
     metrics["Unique uploaded dates"] = str(len(uploaded_date_counter))

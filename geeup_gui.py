@@ -345,6 +345,10 @@ class LauncherApp:
         )
         self.upload_visible_utm_tiles = list(self.all_utm_tiles)
         self.upload_selected_tiles = set(upload_tiles)
+        self.cached_available_upload_tiles: list[str] = []
+        self.cached_completed_upload_tiles: list[str] = []
+        self.upload_tile_scan_after_id: str | None = None
+        self.upload_tile_scan_generation = 0
         self.batch_size_var = tk.StringVar(
             value=str(self.data.get("upload", {}).get("batch_size", 50))
         )
@@ -480,6 +484,8 @@ class LauncherApp:
             value="Open a project, then preview safe cleanup candidates."
         )
         self.cleanup_candidates: list[CleanupCandidate] = []
+        self.cleanup_preview_generation = 0
+        self.cleanup_delete_running = False
 
         self.build_layout()
         self.try_auto_open_project_from_config()
@@ -1180,7 +1186,7 @@ class LauncherApp:
         ttk.Button(
             selected_upload_frame,
             text="Refresh Available Tiles",
-            command=self.refresh_upload_tile_list,
+            command=lambda: self.refresh_upload_tile_list(async_scan=True),
         ).grid(row=3, column=0, sticky="ew", pady=(4, 0))
         ttk.Label(
             selected_upload_frame,
@@ -1344,17 +1350,17 @@ class LauncherApp:
 
         self.upload_tile_filter_var.trace_add(
             "write",
-            lambda *_args: self.refresh_upload_tile_list(),
+            lambda *_args: self.render_cached_upload_tile_list(),
         )
         self.folder_var.trace_add(
             "write",
-            lambda *_args: self.refresh_upload_tile_list(),
+            lambda *_args: self.refresh_upload_tile_list(async_scan=True),
         )
         self.recursive_var.trace_add(
             "write",
-            lambda *_args: self.refresh_upload_tile_list(),
+            lambda *_args: self.refresh_upload_tile_list(async_scan=True),
         )
-        self.refresh_upload_tile_list()
+        self.refresh_upload_tile_list(async_scan=True)
 
         status = ttk.Label(
             parent,
@@ -1385,6 +1391,11 @@ class LauncherApp:
             text="Refresh Statistics",
             command=self.refresh_project_statistics_async,
         ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            actions,
+            text="Sync EE Assets",
+            command=self.sync_ee_assets,
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
 
         inner = ttk.Notebook(parent)
         inner.grid(row=2, column=0, sticky="nsew")
@@ -2418,7 +2429,7 @@ class LauncherApp:
             upload_tiles = []
         self.upload_selected_tiles = set(upload_tiles)
         self.upload_selected_tiles_var.set(", ".join(upload_tiles))
-        self.refresh_upload_tile_list()
+        self.refresh_upload_tile_list(async_scan=True)
         self.batch_size_var.set(str(upload_data.get("batch_size", 50)))
         self.max_active_var.set(str(upload_data.get("max_active_ingestions", 0)))
         self.prefix_var.set(upload_data.get("prefix", ""))
@@ -2629,10 +2640,12 @@ class LauncherApp:
         """Return the config value for the selected Upload scope."""
         return UPLOAD_SCOPE_LABELS.get(self.upload_scope_var.get(), "all")
 
-    def upload_report_successful_local_files(self) -> set[str]:
-        """Return local files already recorded as uploaded or EE-verified."""
+    def upload_report_successful_local_files_from_report(
+        self,
+        report_path: Path,
+    ) -> set[str]:
+        """Return local files in a report already recorded as uploaded or EE-verified."""
         uploaded: set[str] = set()
-        report_path = self.current_upload_report_path()
         for row in read_csv_rows(report_path):
             if str(row.get("final_status", "") or "").upper() not in UPLOAD_SUCCESS_STATUSES:
                 continue
@@ -2642,10 +2655,19 @@ class LauncherApp:
             uploaded.update(path_lookup_keys(local_file))
         return uploaded
 
-    def upload_report_completed_tiles(self) -> list[str]:
+    def upload_report_successful_local_files(self) -> set[str]:
+        """Return local files already recorded as uploaded or EE-verified."""
+        return self.upload_report_successful_local_files_from_report(
+            self.current_upload_report_path()
+        )
+
+    def upload_report_completed_tiles_from_report(
+        self,
+        report_path: Path,
+        mosaic_lookup: dict[str, list[str]],
+    ) -> list[str]:
         """Return source UTM tiles with completed or EE-verified upload rows."""
         completed: set[str] = set()
-        report_path = self.current_upload_report_path()
         unresolved_rows: list[dict[str, str]] = []
         for row in read_csv_rows(report_path):
             if str(row.get("final_status", "") or "").upper() not in UPLOAD_SUCCESS_STATUSES:
@@ -2656,10 +2678,16 @@ class LauncherApp:
             else:
                 unresolved_rows.append(row)
         if unresolved_rows:
-            mosaic_lookup = self.mosaic_source_tiles_by_output()
             for row in unresolved_rows:
                 completed.update(upload_row_source_tiles(row, mosaic_lookup))
         return sorted(tile for tile in completed if tile)
+
+    def upload_report_completed_tiles(self) -> list[str]:
+        """Return source UTM tiles with completed or EE-verified upload rows."""
+        return self.upload_report_completed_tiles_from_report(
+            self.current_upload_report_path(),
+            self.mosaic_source_tiles_by_output(),
+        )
 
     def compact_tile_list(self, tiles: Sequence[str], limit: int = 10) -> str:
         """Return a compact comma-separated tile summary for status labels."""
@@ -2682,12 +2710,12 @@ class LauncherApp:
         available = (
             sorted(available_tiles)
             if available_tiles is not None
-            else self.available_upload_tiles()
+            else list(self.cached_available_upload_tiles)
         )
         completed = (
             sorted(completed_tiles)
             if completed_tiles is not None
-            else self.upload_report_completed_tiles()
+            else list(self.cached_completed_upload_tiles)
         )
         selected = sorted(self.upload_selected_tiles)
         parts: list[str] = []
@@ -2724,10 +2752,12 @@ class LauncherApp:
 
         self.upload_tile_status_var.set(" ".join(parts))
 
-    def mosaic_source_tiles_by_output(self) -> dict[str, list[str]]:
-        """Return source UTM tiles for mosaic outputs from the mosaic manifest."""
+    def mosaic_source_tiles_by_output_from_manifest(
+        self,
+        manifest_path: Path,
+    ) -> dict[str, list[str]]:
+        """Return source UTM tiles for mosaic outputs from a mosaic manifest."""
         lookup: dict[str, list[str]] = {}
-        manifest_path = Path(self.mosaic_manifest_var.get().strip())
         for row in read_csv_rows(manifest_path):
             output = str(row.get("output_file", "") or "").strip()
             if not output:
@@ -2738,6 +2768,12 @@ class LauncherApp:
             for key in path_lookup_keys(output):
                 lookup[key] = tiles
         return lookup
+
+    def mosaic_source_tiles_by_output(self) -> dict[str, list[str]]:
+        """Return source UTM tiles for mosaic outputs from the mosaic manifest."""
+        return self.mosaic_source_tiles_by_output_from_manifest(
+            Path(self.mosaic_manifest_var.get().strip())
+        )
 
     def upload_file_source_tiles(
         self,
@@ -2754,33 +2790,59 @@ class LauncherApp:
         tile = normalize_utm_tile_token(parsed.fields.get("coordinate_system", ""))
         return [tile] if tile else []
 
-    def available_upload_tiles(self) -> list[str]:
-        """Return UTM tiles represented by local upload candidates not already uploaded."""
-        folder = Path(self.folder_var.get().strip())
+    def scan_available_upload_tiles(
+        self,
+        folder: Path,
+        recursive: bool,
+        report_path: Path,
+        manifest_path: Path,
+    ) -> tuple[list[str], list[str]]:
+        """Scan upload candidates and report completed tiles without touching Tk widgets."""
         if not folder.exists() or not folder.is_dir():
-            return []
-        uploaded_keys = self.upload_report_successful_local_files()
-        mosaic_lookup = self.mosaic_source_tiles_by_output()
+            mosaic_lookup = self.mosaic_source_tiles_by_output_from_manifest(manifest_path)
+            completed_tiles = self.upload_report_completed_tiles_from_report(
+                report_path,
+                mosaic_lookup,
+            )
+            return [], completed_tiles
+        mosaic_lookup = self.mosaic_source_tiles_by_output_from_manifest(manifest_path)
+        uploaded_keys = self.upload_report_successful_local_files_from_report(report_path)
+        completed_tiles = self.upload_report_completed_tiles_from_report(
+            report_path,
+            mosaic_lookup,
+        )
         patterns = ("*.tif", "*.tiff")
         tiles: set[str] = set()
         for pattern in patterns:
-            iterator = folder.rglob(pattern) if self.recursive_var.get() else folder.glob(pattern)
+            iterator = folder.rglob(pattern) if recursive else folder.glob(pattern)
             for path in iterator:
                 if not path.is_file():
                     continue
                 if any(key in uploaded_keys for key in path_lookup_keys(path)):
                     continue
                 tiles.update(self.upload_file_source_tiles(path, mosaic_lookup))
-        return sorted(tile for tile in tiles if tile)
+        return sorted(tile for tile in tiles if tile), completed_tiles
 
-    def refresh_upload_tile_list(self) -> None:
-        """Refresh the filtered Upload UTM listbox while preserving selection."""
+    def available_upload_tiles(self) -> list[str]:
+        """Return UTM tiles represented by local upload candidates not already uploaded."""
+        available_tiles, _completed_tiles = self.scan_available_upload_tiles(
+            Path(self.folder_var.get().strip()),
+            bool(self.recursive_var.get()),
+            self.current_upload_report_path(),
+            Path(self.mosaic_manifest_var.get().strip()),
+        )
+        return available_tiles
+
+    def render_upload_tile_list(
+        self,
+        available_tiles: Sequence[str],
+        completed_tiles: Sequence[str],
+    ) -> None:
+        """Render the filtered Upload UTM listbox from already-computed tile lists."""
         if not hasattr(self, "upload_tile_listbox"):
             return
         self.upload_tile_listbox.delete(0, tk.END)
         needle = self.upload_tile_filter_var.get().strip().upper()
-        available_tiles = self.available_upload_tiles()
-        completed_tiles = self.upload_report_completed_tiles()
         if available_tiles:
             base_tiles = sorted(set(available_tiles) | set(self.upload_selected_tiles))
             self.upload_tile_availability_var.set(
@@ -2803,6 +2865,108 @@ class LauncherApp:
             completed_tiles=completed_tiles,
         )
 
+    def render_cached_upload_tile_list(self) -> None:
+        """Refresh the Upload UTM listbox from the latest background scan cache."""
+        self.render_upload_tile_list(
+            self.cached_available_upload_tiles,
+            self.cached_completed_upload_tiles,
+        )
+
+    def refresh_upload_tile_list(self, async_scan: bool = False) -> None:
+        """Refresh the Upload UTM listbox, scanning large folders off the UI thread."""
+        if not hasattr(self, "upload_tile_listbox"):
+            return
+        if not async_scan:
+            available_tiles, completed_tiles = self.scan_available_upload_tiles(
+                Path(self.folder_var.get().strip()),
+                bool(self.recursive_var.get()),
+                self.current_upload_report_path(),
+                Path(self.mosaic_manifest_var.get().strip()),
+            )
+            self.cached_available_upload_tiles = list(available_tiles)
+            self.cached_completed_upload_tiles = list(completed_tiles)
+            self.render_upload_tile_list(available_tiles, completed_tiles)
+            return
+
+        self.upload_tile_scan_generation += 1
+        generation = self.upload_tile_scan_generation
+        if self.upload_tile_scan_after_id is not None:
+            try:
+                self.root.after_cancel(self.upload_tile_scan_after_id)
+            except tk.TclError:
+                pass
+            self.upload_tile_scan_after_id = None
+        self.render_cached_upload_tile_list()
+        self.upload_tile_availability_var.set(
+            "Scanning current origin folder for upload-ready UTM tiles in the background..."
+        )
+        self.upload_tile_scan_after_id = self.root.after(
+            250,
+            self.start_upload_tile_scan,
+            generation,
+        )
+
+    def start_upload_tile_scan(self, generation: int) -> None:
+        """Start an upload tile scan from a stable snapshot of current GUI values."""
+        self.upload_tile_scan_after_id = None
+        folder = Path(self.folder_var.get().strip())
+        recursive = bool(self.recursive_var.get())
+        report_path = self.current_upload_report_path()
+        manifest_path = Path(self.mosaic_manifest_var.get().strip())
+        thread = threading.Thread(
+            target=self.run_upload_tile_scan,
+            args=(generation, folder, recursive, report_path, manifest_path),
+            daemon=True,
+        )
+        thread.start()
+
+    def run_upload_tile_scan(
+        self,
+        generation: int,
+        folder: Path,
+        recursive: bool,
+        report_path: Path,
+        manifest_path: Path,
+    ) -> None:
+        """Compute Upload tile availability away from the Tkinter main thread."""
+        try:
+            available_tiles, completed_tiles = self.scan_available_upload_tiles(
+                folder,
+                recursive,
+                report_path,
+                manifest_path,
+            )
+        except Exception as exc:
+            self.root.after(0, self.finish_upload_tile_scan_error, generation, exc)
+            return
+        self.root.after(
+            0,
+            self.finish_upload_tile_scan,
+            generation,
+            available_tiles,
+            completed_tiles,
+        )
+
+    def finish_upload_tile_scan(
+        self,
+        generation: int,
+        available_tiles: Sequence[str],
+        completed_tiles: Sequence[str],
+    ) -> None:
+        """Render a completed background Upload tile scan."""
+        if generation != self.upload_tile_scan_generation:
+            return
+        self.cached_available_upload_tiles = list(available_tiles)
+        self.cached_completed_upload_tiles = list(completed_tiles)
+        self.render_upload_tile_list(available_tiles, completed_tiles)
+
+    def finish_upload_tile_scan_error(self, generation: int, exc: Exception) -> None:
+        """Show a failed background Upload tile scan."""
+        if generation != self.upload_tile_scan_generation:
+            return
+        self.upload_tile_availability_var.set(f"Could not scan upload tiles: {exc}")
+        self.update_upload_tile_status(prefix="Upload tile scan failed.")
+
     def on_upload_tile_select(self, _event: tk.Event | None = None) -> None:
         """Add the current Upload listbox selection to the selected tile state."""
         if not hasattr(self, "upload_tile_listbox"):
@@ -2814,7 +2978,7 @@ class LauncherApp:
         self.upload_selected_tiles_var.set(
             ", ".join(sorted(self.upload_selected_tiles))
         )
-        self.refresh_upload_tile_list()
+        self.render_cached_upload_tile_list()
         self.update_upload_tile_status(prefix="List selection updated.")
 
     def apply_upload_tiles_from_text(self) -> None:
@@ -2826,14 +2990,14 @@ class LauncherApp:
             return
         self.upload_selected_tiles = set(tiles)
         self.upload_selected_tiles_var.set(", ".join(tiles))
-        self.refresh_upload_tile_list()
+        self.render_cached_upload_tile_list()
         self.update_upload_tile_status(prefix="Typed upload tiles validated.")
 
     def clear_upload_tiles(self) -> None:
         """Clear Upload UTM tile selection."""
         self.upload_selected_tiles.clear()
         self.upload_selected_tiles_var.set("")
-        self.refresh_upload_tile_list()
+        self.render_cached_upload_tile_list()
         self.update_upload_tile_status(prefix="Upload tile selection cleared.")
 
     def current_upload_tiles(self) -> list[str]:
@@ -4319,7 +4483,7 @@ class LauncherApp:
         self.draw_bar_chart(
             self.stats_stage_chart_canvas,
             list(stage_totals.items()),
-            "Completed rows by processing stage",
+            "Completed/verified rows by processing stage",
         )
         self.draw_bar_chart(
             self.stats_tile_chart_canvas,
@@ -4328,10 +4492,32 @@ class LauncherApp:
         )
 
         coverage = insights.metrics.get("Date coverage", "") or "not available"
-        self.statistics_summary_var.set(
-            f"Date coverage: {coverage}."
+        summary_parts = [f"Date coverage: {coverage}."]
+        submitted_uploads = self.metric_int(
+            insights.metrics.get("Submitted uploads awaiting EE verification", "0")
         )
+        if submitted_uploads:
+            submitted_tiles = insights.metrics.get(
+                "Submitted source UTM tiles awaiting verification",
+                "",
+            )
+            tile_text = f" Source tiles: {submitted_tiles}." if submitted_tiles else ""
+            summary_parts.append(
+                f"{submitted_uploads} upload row(s) are still SUBMITTED and are not counted as uploaded until Sync EE Assets verifies them.{tile_text}"
+            )
+            status_text = (
+                f"{status_text} Upload verification pending: click Sync EE Assets after Earth Engine ingestion finishes."
+            )
+        self.statistics_summary_var.set(" ".join(summary_parts))
         self.statistics_status_var.set(status_text)
+
+    @staticmethod
+    def metric_int(value: Any) -> int:
+        """Return an integer metric value, or zero when unavailable."""
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return 0
 
     def load_saved_project_statistics(self) -> None:
         """Load the last saved statistics snapshot for the active project."""
@@ -4514,15 +4700,57 @@ class LauncherApp:
         """Load conservative cleanup candidates into the Cleanup table."""
         if not self.require_active_project("preview cleanup candidates"):
             return
+        config = self.build_config()
+        self.cleanup_preview_generation += 1
+        generation = self.cleanup_preview_generation
+        self.cleanup_status_var.set("Scanning cleanup candidates in the background...")
+        thread = threading.Thread(
+            target=self.run_cleanup_preview,
+            args=(generation, config, notify),
+            daemon=True,
+        )
+        thread.start()
+
+    def run_cleanup_preview(
+        self,
+        generation: int,
+        config: dict[str, Any],
+        notify: bool,
+    ) -> None:
+        """Compute cleanup candidates away from the Tkinter UI thread."""
         try:
-            self.cleanup_candidates = plan_cleanup_candidates(self.build_config())
+            candidates = plan_cleanup_candidates(config)
         except Exception as exc:
-            self.cleanup_status_var.set(f"Could not preview cleanup candidates: {exc}")
+            self.root.after(0, self.finish_cleanup_preview_error, generation, exc, notify)
+            return
+        self.root.after(0, self.finish_cleanup_preview, generation, candidates, notify)
+
+    def finish_cleanup_preview_error(
+        self,
+        generation: int,
+        exc: Exception,
+        notify: bool,
+    ) -> None:
+        """Show a background cleanup preview failure."""
+        if generation != self.cleanup_preview_generation:
+            return
+        self.cleanup_status_var.set(f"Could not preview cleanup candidates: {exc}")
+        if notify:
             messagebox.showerror(
                 "Could not preview cleanup",
                 f"Failed to inspect project manifests:\n{exc}",
             )
+
+    def finish_cleanup_preview(
+        self,
+        generation: int,
+        candidates: Sequence[CleanupCandidate],
+        notify: bool,
+    ) -> None:
+        """Render cleanup candidates after a background preview scan."""
+        if generation != self.cleanup_preview_generation:
             return
+        self.cleanup_candidates = list(candidates)
         self.populate_cleanup_tree(self.cleanup_candidates)
         total_size = sum(candidate.size_bytes for candidate in self.cleanup_candidates)
         self.cleanup_status_var.set(
@@ -4577,10 +4805,8 @@ class LauncherApp:
         """Delete all currently previewed cleanup candidates after confirmation."""
         if not self.cleanup_candidates:
             self.preview_cleanup_candidates(notify=False)
-        if not self.cleanup_candidates:
-            messagebox.showinfo(
-                "No cleanup candidates",
-                "No cleanup candidates are currently available.",
+            self.cleanup_status_var.set(
+                "Cleanup preview started. Review the candidates, then click Delete All Cleanup Candidates again."
             )
             return
         self.delete_cleanup_files(self.cleanup_candidates, "all cleanup candidates")
@@ -4591,6 +4817,12 @@ class LauncherApp:
         label: str,
     ) -> None:
         """Delete a cleanup candidate set after an explicit confirmation."""
+        if self.cleanup_delete_running:
+            messagebox.showinfo(
+                "Cleanup already running",
+                "A cleanup deletion is already running. Wait for it to finish before starting another one.",
+            )
+            return
         total_size = sum(candidate.size_bytes for candidate in candidates)
         confirmed = messagebox.askyesno(
             "Delete cleanup files",
@@ -4603,9 +4835,45 @@ class LauncherApp:
         )
         if not confirmed:
             return
-        deleted, bytes_deleted, errors = delete_cleanup_candidates(candidates)
+        self.cleanup_delete_running = True
+        self.cleanup_status_var.set(
+            f"Deleting {len(candidates)} cleanup candidate file(s) in the background..."
+        )
+        thread = threading.Thread(
+            target=self.run_cleanup_delete,
+            args=(list(candidates),),
+            daemon=True,
+        )
+        thread.start()
+
+    def run_cleanup_delete(self, candidates: Sequence[CleanupCandidate]) -> None:
+        """Delete cleanup files away from the Tkinter UI thread."""
+        try:
+            deleted, bytes_deleted, errors = delete_cleanup_candidates(candidates)
+        except Exception as exc:
+            self.root.after(0, self.finish_cleanup_delete_error, exc)
+            return
+        self.root.after(0, self.finish_cleanup_delete, deleted, bytes_deleted, errors)
+
+    def finish_cleanup_delete_error(self, exc: Exception) -> None:
+        """Show an unexpected background cleanup deletion failure."""
+        self.cleanup_delete_running = False
+        self.cleanup_status_var.set(f"Cleanup deletion failed: {exc}")
+        messagebox.showerror(
+            "Cleanup failed",
+            f"Cleanup deletion failed unexpectedly:\n{exc}",
+        )
+
+    def finish_cleanup_delete(
+        self,
+        deleted: int,
+        bytes_deleted: int,
+        errors: Sequence[str],
+    ) -> None:
+        """Refresh UI state after a background cleanup deletion."""
+        self.cleanup_delete_running = False
         self.preview_cleanup_candidates(notify=False)
-        self.refresh_project_statistics()
+        self.refresh_project_statistics_async(notify=False, source="cleanup")
         message = (
             f"Deleted {deleted} files and freed {format_insight_bytes(bytes_deleted)}."
         )

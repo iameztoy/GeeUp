@@ -388,7 +388,7 @@ class GuiLayoutTests(unittest.TestCase):
                 app = LauncherApp(root)
                 app.processing_logs_var.set(str(logs))
                 app.folder_var.set(str(origin))
-                app.refresh_upload_tile_list()
+                app.refresh_upload_tile_list(async_scan=False)
 
                 values = listbox_values(app.upload_tile_listbox)
 
