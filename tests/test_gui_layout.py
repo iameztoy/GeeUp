@@ -6,10 +6,12 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from geeup_gui import LauncherApp
 from geeup_project import create_project, load_project_tile_profiles
+from utm_map_selector import DisplayTile, UTMDisplayGeometry
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -184,6 +186,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Processing Levels Across Stages", collect_label_texts(statistics_tab))
             self.assertIn("Upload Status Counts", collect_label_texts(statistics_tab))
             self.assertIn("Pipeline Completeness By UTM Tile", collect_label_texts(statistics_tab))
+            self.assertIn("UTM Pipeline Status Map", collect_label_texts(statistics_tab))
         finally:
             root.destroy()
 
@@ -499,6 +502,62 @@ class GuiLayoutTests(unittest.TestCase):
 
                 self.assertIn(("Raw NetCDF files on disk", "1"), reloaded_metrics)
                 self.assertIn("Loaded saved project statistics", app.statistics_status_var.get())
+        finally:
+            root.destroy()
+
+    def test_statistics_display_updates_status_map(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            geometry = UTMDisplayGeometry(
+                bounds=(0.0, 0.0, 10.0, 10.0),
+                tiles={
+                    "UTM34M": DisplayTile(
+                        token="UTM34M",
+                        bounds=(0.0, 0.0, 10.0, 10.0),
+                        polygons=[
+                            [
+                                (0.0, 0.0),
+                                (10.0, 0.0),
+                                (10.0, 10.0),
+                                (0.0, 10.0),
+                                (0.0, 0.0),
+                            ]
+                        ],
+                    )
+                },
+                continents=[],
+            )
+            insights = SimpleNamespace(
+                metrics={"Date coverage": "2026-01-01 to 2026-01-02"},
+                stage_status_counts=[],
+                tile_counts=[],
+                date_counts=[],
+                processing_level_counts=[],
+                processing_level_tile_counts=[],
+                mosaic_output_grid_counts=[],
+                mosaic_source_tile_counts=[],
+                upload_status_counts=[],
+                uploaded_tile_counts=[],
+                uploaded_date_counts=[],
+                uploaded_processing_level_counts=[],
+                uploaded_grid_counts=[],
+                upload_error_counts=[],
+                upload_qa_tile_rows=[("UTM34M", 2, 2, 2, 2, 0)],
+                ready_not_uploaded_rows=[],
+                cleanup_candidates=[],
+            )
+
+            with mock.patch("geeup_gui.load_display_geometry", return_value=geometry):
+                app.display_project_statistics(
+                    insights,
+                    status_text="Project statistics refreshed.",
+                    include_cleanup=False,
+                )
+
+            self.assertEqual(app.stats_status_map.tile_status("UTM34M").status, "uploaded")
+            self.assertIn("Uploaded/EE verified: 1", app.stats_status_map.status_var.get())
         finally:
             root.destroy()
 

@@ -146,7 +146,7 @@ from swot_download_tool import (
     write_download_report,
 )
 from swot_metadata import parse_swot_l2_hr_raster_metadata
-from utm_map_selector import UTMMapSelectorDialog, load_display_geometry
+from utm_map_selector import UTMMapSelectorDialog, UTMPipelineStatusMap, load_display_geometry
 
 
 def load_config() -> Dict[str, Any]:
@@ -1405,7 +1405,9 @@ class LauncherApp:
         levels = ttk.Frame(inner, padding=8)
         mosaics = ttk.Frame(inner, padding=8)
         uploaded = ttk.Frame(inner, padding=8)
+        status_map = ttk.Frame(inner, padding=8)
         inner.add(overview, text="Overview")
+        inner.add(status_map, text="Status Map")
         inner.add(tiles, text="Tiles And Dates")
         inner.add(levels, text="Processing Levels")
         inner.add(mosaics, text="Mosaics")
@@ -1455,6 +1457,11 @@ class LauncherApp:
             background="white",
         )
         self.stats_tile_chart_canvas.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+        status_map.columnconfigure(0, weight=1)
+        status_map.rowconfigure(0, weight=1)
+        self.stats_status_map = UTMPipelineStatusMap(status_map)
+        self.stats_status_map.grid(row=0, column=0, sticky="nsew")
 
         tiles.columnconfigure(0, weight=1)
         tiles.columnconfigure(1, weight=1)
@@ -4324,12 +4331,30 @@ class LauncherApp:
             self.clear_treeview(tree)
         self.cleanup_candidates = []
         self.populate_cleanup_tree([])
-        self.draw_bar_chart(self.stats_stage_chart_canvas, [], "Completed rows by processing stage")
+        self.draw_bar_chart(
+            self.stats_stage_chart_canvas,
+            [],
+            "Completed/verified rows by processing stage",
+        )
         self.draw_bar_chart(self.stats_tile_chart_canvas, [], "Top UTM tiles by recorded files")
+        self.stats_status_map.clear_statuses()
         self.statistics_summary_var.set("")
         self.cleanup_status_var.set("Open a project, then preview safe cleanup candidates.")
         if message:
             self.statistics_status_var.set(message)
+
+    def update_statistics_status_map(self, insights: Any) -> None:
+        """Refresh the read-only UTM pipeline status map from project insights."""
+        if self.stats_status_map.geometry_data is None:
+            try:
+                self.stats_status_map.set_geometry(load_display_geometry())
+            except Exception as exc:
+                self.stats_status_map.status_var.set(
+                    f"Could not load UTM status map geometry: {exc}"
+                )
+                return
+        self.stats_status_map.set_tile_statuses(insights.upload_qa_tile_rows)
+        self.stats_status_map.set_missing_upload_rows(insights.ready_not_uploaded_rows)
 
     def display_project_statistics(
         self,
@@ -4437,6 +4462,7 @@ class LauncherApp:
                     str(missing_upload),
                 ),
             )
+        self.update_statistics_status_map(insights)
 
         self.clear_treeview(self.stats_ready_not_uploaded_tree)
         for output_file, source_tiles, date_text, grid in insights.ready_not_uploaded_rows:
@@ -4667,11 +4693,12 @@ class LauncherApp:
 
         top = 32
         left = 92
-        right_pad = 42
         row_height = max(14, min(22, (height - top - 8) // max(1, len(values))))
         bar_height = max(8, row_height - 5)
         max_value = max(count for _label, count in values) or 1
         palette = ["#2878b5", "#d95f02", "#4d9221", "#7b3294", "#c51b7d", "#5c5c5c"]
+        largest_label = str(max_value)
+        reserved_value_width = max(54, len(largest_label) * 7 + 16)
 
         for index, (label, count) in enumerate(values):
             y = top + index * row_height
@@ -4679,7 +4706,7 @@ class LauncherApp:
                 break
             short_label = label if len(label) <= 12 else f"{label[:11]}..."
             canvas.create_text(8, y + bar_height / 2, anchor="w", text=short_label)
-            available = max(20, width - left - right_pad)
+            available = max(20, width - left - reserved_value_width - 8)
             bar_width = int(available * (count / max_value))
             canvas.create_rectangle(
                 left,
@@ -4689,12 +4716,25 @@ class LauncherApp:
                 fill=palette[index % len(palette)],
                 outline="",
             )
-            canvas.create_text(
-                left + bar_width + 5,
-                y + bar_height / 2,
-                anchor="w",
-                text=str(count),
-            )
+            value_text = str(count)
+            value_x = left + bar_width + 5
+            estimated_text_width = max(18, len(value_text) * 7)
+            if value_x + estimated_text_width <= width - 4:
+                canvas.create_text(
+                    value_x,
+                    y + bar_height / 2,
+                    anchor="w",
+                    text=value_text,
+                    fill="#222222",
+                )
+            else:
+                canvas.create_text(
+                    max(left + 4, left + bar_width - 5),
+                    y + bar_height / 2,
+                    anchor="e",
+                    text=value_text,
+                    fill="white",
+                )
 
     def preview_cleanup_candidates(self, notify: bool = True) -> None:
         """Load conservative cleanup candidates into the Cleanup table."""

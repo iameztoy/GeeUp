@@ -981,7 +981,7 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
             for (status, message), count in upload_error_counter.most_common(100)
         ],
         upload_qa_tile_rows=upload_qa_rows,
-        ready_not_uploaded_rows=ready_not_uploaded[:500],
+        ready_not_uploaded_rows=ready_not_uploaded,
         cleanup_candidates=cleanup_candidates,
     )
 

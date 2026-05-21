@@ -179,6 +179,435 @@ def ring_to_canvas_points(transform: CanvasTransform, ring: Ring) -> List[float]
     return points
 
 
+PIPELINE_STATUS_STYLES = {
+    "none": {
+        "label": "No project records",
+        "fill": "#f1f1f1",
+        "outline": "#d2d2d2",
+    },
+    "downloaded": {
+        "label": "Downloaded only",
+        "fill": "#5b8fd6",
+        "outline": "#2f5e9e",
+    },
+    "extracted": {
+        "label": "Extracted, not mosaicked",
+        "fill": "#31a6a6",
+        "outline": "#197272",
+    },
+    "mosaicked": {
+        "label": "Mosaicked, not uploaded",
+        "fill": "#e89b33",
+        "outline": "#a46212",
+    },
+    "uploaded": {
+        "label": "Uploaded/EE verified",
+        "fill": "#4f9f50",
+        "outline": "#2d6b2f",
+    },
+    "attention": {
+        "label": "Partially uploaded; missing files",
+        "fill": "#d95f5f",
+        "outline": "#8f2f2f",
+    },
+}
+
+
+@dataclass
+class TilePipelineStatus:
+    """Per-tile project status used by the Statistics status map."""
+
+    token: str
+    downloaded: int = 0
+    extracted: int = 0
+    mosaic_sources: int = 0
+    uploaded: int = 0
+    missing_upload: int = 0
+    status: str = "none"
+
+    @property
+    def label(self) -> str:
+        """Return a human-readable status label."""
+        return PIPELINE_STATUS_STYLES.get(
+            self.status,
+            PIPELINE_STATUS_STYLES["none"],
+        )["label"]
+
+
+def pipeline_status_key(
+    downloaded: int,
+    extracted: int,
+    mosaic_sources: int,
+    uploaded: int,
+    missing_upload: int,
+) -> str:
+    """Classify one UTM tile by the furthest verified pipeline stage reached."""
+    values = [downloaded, extracted, mosaic_sources, uploaded, missing_upload]
+    downloaded, extracted, mosaic_sources, uploaded, missing_upload = [
+        max(0, int(value)) for value in values
+    ]
+    if not any((downloaded, extracted, mosaic_sources, uploaded, missing_upload)):
+        return "none"
+    if uploaded > 0 and missing_upload > 0:
+        return "attention"
+    if uploaded > 0:
+        return "uploaded"
+    if mosaic_sources > 0:
+        return "mosaicked"
+    if extracted > 0:
+        return "extracted"
+    return "downloaded"
+
+
+def pipeline_status_from_qa_row(row: Sequence[object]) -> TilePipelineStatus:
+    """Create a tile pipeline status from a ProjectInsights upload QA row."""
+    if len(row) < 6:
+        raise ValueError("Pipeline QA row must contain six values.")
+    token = str(row[0])
+    try:
+        normalized = normalize_utm_tiles([token])[0]
+    except ValueError:
+        normalized = token.strip().upper()
+    downloaded, extracted, mosaic_sources, uploaded, missing_upload = [
+        int(value) for value in row[1:6]
+    ]
+    return TilePipelineStatus(
+        token=normalized,
+        downloaded=downloaded,
+        extracted=extracted,
+        mosaic_sources=mosaic_sources,
+        uploaded=uploaded,
+        missing_upload=missing_upload,
+        status=pipeline_status_key(
+            downloaded,
+            extracted,
+            mosaic_sources,
+            uploaded,
+            missing_upload,
+        ),
+    )
+
+
+class UTMPipelineStatusMap(ttk.Frame):
+    """Read-only UTM status map for project pipeline QA/QC."""
+
+    canvas_width = 940
+    canvas_height = 520
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        geometry: UTMDisplayGeometry | None = None,
+    ) -> None:
+        super().__init__(master)
+        self.geometry_data = geometry
+        self.tile_statuses: Dict[str, TilePipelineStatus] = {}
+        self.transform = CanvasTransform(
+            geometry.bounds if geometry is not None else (-180.0, -80.0, 180.0, 84.0),
+            self.canvas_width,
+            self.canvas_height,
+            padding=16,
+        )
+        self.status_var = tk.StringVar(
+            value="Refresh statistics to populate the UTM pipeline status map."
+        )
+        self.missing_upload_rows_by_tile: Dict[str, List[Tuple[str, str, str]]] = {}
+        self.show_labels_var = tk.BooleanVar(value=True)
+        self.build_layout()
+        self.draw_map()
+
+    def build_layout(self) -> None:
+        """Build the read-only map, legend, and status controls."""
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        controls = ttk.Frame(self, padding=(0, 0, 0, 8))
+        controls.grid(row=0, column=0, sticky="ew")
+        controls.columnconfigure(0, weight=1)
+        ttk.Label(
+            controls,
+            text="UTM Pipeline Status Map",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            controls,
+            text="Show UTM labels",
+            variable=self.show_labels_var,
+            command=self.draw_map,
+        ).grid(row=0, column=1, sticky="e")
+
+        self.canvas = tk.Canvas(
+            self,
+            width=self.canvas_width,
+            height=self.canvas_height,
+            background="#f7f8f5",
+            highlightthickness=1,
+            highlightbackground="#b7b7b7",
+        )
+        self.canvas.grid(row=1, column=0, sticky="nsew")
+        self.canvas.bind("<Configure>", self.on_canvas_configure)
+        self.canvas.bind("<Motion>", self.on_canvas_motion)
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas.bind("<Leave>", self.on_canvas_leave)
+
+        legend = ttk.Frame(self, padding=(0, 8, 0, 0))
+        legend.grid(row=2, column=0, sticky="ew")
+        legend.columnconfigure(0, weight=1)
+        for index, key in enumerate(
+            ("downloaded", "extracted", "mosaicked", "uploaded", "attention", "none")
+        ):
+            style = PIPELINE_STATUS_STYLES[key]
+            item = ttk.Frame(legend)
+            item.grid(row=0, column=index, sticky="w", padx=(0, 12))
+            swatch = tk.Canvas(item, width=16, height=12, highlightthickness=0)
+            swatch.grid(row=0, column=0, sticky="w")
+            swatch.create_rectangle(
+                0,
+                0,
+                16,
+                12,
+                fill=style["fill"],
+                outline=style["outline"],
+            )
+            ttk.Label(item, text=style["label"]).grid(row=0, column=1, sticky="w", padx=(4, 0))
+
+        ttk.Label(
+            self,
+            textvariable=self.status_var,
+            foreground="#184a8b",
+            wraplength=900,
+        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+    def set_geometry(self, geometry: UTMDisplayGeometry) -> None:
+        """Set display geometry and redraw the status map."""
+        self.geometry_data = geometry
+        self.transform = CanvasTransform(
+            geometry.bounds,
+            self.canvas_width,
+            self.canvas_height,
+            padding=16,
+        )
+        self.draw_map()
+
+    def set_tile_statuses(self, rows: Sequence[Sequence[object]]) -> None:
+        """Update map statuses from ProjectInsights upload QA rows."""
+        statuses: Dict[str, TilePipelineStatus] = {}
+        for row in rows:
+            status = pipeline_status_from_qa_row(row)
+            statuses[status.token] = status
+        self.tile_statuses = statuses
+        self.draw_map()
+        self.update_summary_status()
+
+    def set_missing_upload_rows(self, rows: Sequence[Sequence[object]]) -> None:
+        """Track upload-ready mosaic rows that are not yet uploaded/verified."""
+        missing_by_tile: Dict[str, List[Tuple[str, str, str]]] = {}
+        for row in rows:
+            if len(row) < 4:
+                continue
+            output_file = str(row[0])
+            source_tiles = [
+                part.strip().upper()
+                for part in str(row[1]).replace(";", ",").split(",")
+                if part.strip()
+            ]
+            date_text = str(row[2])
+            grid = str(row[3])
+            for tile in source_tiles:
+                missing_by_tile.setdefault(tile, []).append((output_file, date_text, grid))
+        self.missing_upload_rows_by_tile = missing_by_tile
+
+    def clear_statuses(self) -> None:
+        """Clear all project status data from the map."""
+        self.tile_statuses = {}
+        self.missing_upload_rows_by_tile = {}
+        self.draw_map()
+        self.status_var.set("Refresh statistics to populate the UTM pipeline status map.")
+
+    def tile_status(self, token: str) -> TilePipelineStatus:
+        """Return current status for a tile, defaulting to no project records."""
+        return self.tile_statuses.get(token, TilePipelineStatus(token=token))
+
+    def draw_map(self) -> None:
+        """Redraw continents, tiles, labels, and status colors."""
+        if not hasattr(self, "canvas"):
+            return
+        self.canvas.delete("all")
+        if self.geometry_data is None:
+            self.canvas.create_text(
+                12,
+                16,
+                anchor="nw",
+                text="Status map geometry is not loaded yet.",
+                fill="#555555",
+            )
+            return
+
+        self.draw_continents(fill="#e1e5dc", outline="#b8beb2", width=0.7)
+        for token, tile in self.geometry_data.tiles.items():
+            status = self.tile_status(token)
+            style = PIPELINE_STATUS_STYLES.get(status.status, PIPELINE_STATUS_STYLES["none"])
+            width = 1.1 if status.status != "none" else 0.5
+            for ring in tile.polygons:
+                points = ring_to_canvas_points(self.transform, ring)
+                if len(points) >= 8:
+                    self.canvas.create_polygon(
+                        points,
+                        fill=style["fill"],
+                        outline=style["outline"],
+                        width=width,
+                    )
+        self.draw_continents(fill="", outline="#69715f", width=1.1)
+        if self.show_labels_var.get():
+            self.draw_utm_labels()
+
+    def draw_continents(self, fill: str, outline: str, width: float) -> None:
+        """Draw continent polygons on the map canvas."""
+        if self.geometry_data is None:
+            return
+        for continent in self.geometry_data.continents:
+            for ring in continent.polygons:
+                points = ring_to_canvas_points(self.transform, ring)
+                if len(points) >= 8:
+                    self.canvas.create_polygon(
+                        points,
+                        fill=fill,
+                        outline=outline,
+                        width=width,
+                    )
+
+    def draw_utm_labels(self) -> None:
+        """Draw compact UTM zone and latitude-band reference labels."""
+        if self.geometry_data is None:
+            return
+        zone_bounds: Dict[int, List[float]] = {}
+        band_bounds: Dict[str, List[float]] = {}
+        for token, tile in self.geometry_data.tiles.items():
+            zone = int(token[3:5])
+            band = token[5]
+            minx, miny, maxx, maxy = tile.bounds
+            if zone not in zone_bounds:
+                zone_bounds[zone] = [minx, maxx]
+            else:
+                zone_bounds[zone][0] = min(zone_bounds[zone][0], minx)
+                zone_bounds[zone][1] = max(zone_bounds[zone][1], maxx)
+            if band not in band_bounds:
+                band_bounds[band] = [miny, maxy]
+            else:
+                band_bounds[band][0] = min(band_bounds[band][0], miny)
+                band_bounds[band][1] = max(band_bounds[band][1], maxy)
+
+        label_color = "#3f4750"
+        top_y = self.transform.offset_y + 9
+        for zone, (minx, maxx) in sorted(zone_bounds.items()):
+            x, _y = self.transform.world_to_canvas(
+                ((minx + maxx) / 2.0, self.geometry_data.bounds[3])
+            )
+            self.canvas.create_text(
+                x,
+                top_y,
+                text=f"{zone:02d}",
+                fill=label_color,
+                font=("Segoe UI", 6),
+            )
+
+        left_x = self.transform.offset_x + 8
+        right_x = self.transform.offset_x + (
+            self.geometry_data.bounds[2] - self.geometry_data.bounds[0]
+        ) * self.transform.scale - 8
+        for band, (miny, maxy) in sorted(band_bounds.items(), key=lambda item: item[1][0]):
+            _x, y = self.transform.world_to_canvas(
+                (self.geometry_data.bounds[0], (miny + maxy) / 2.0)
+            )
+            self.canvas.create_text(
+                left_x,
+                y,
+                text=band,
+                fill=label_color,
+                font=("Segoe UI", 7, "bold"),
+            )
+            self.canvas.create_text(
+                right_x,
+                y,
+                text=band,
+                fill=label_color,
+                font=("Segoe UI", 7, "bold"),
+            )
+
+    def on_canvas_configure(self, event: tk.Event) -> None:
+        """Re-fit the status map when the canvas is resized."""
+        if self.geometry_data is None or event.width < 20 or event.height < 20:
+            return
+        self.transform = CanvasTransform(
+            self.geometry_data.bounds,
+            int(event.width),
+            int(event.height),
+            padding=16,
+        )
+        self.draw_map()
+
+    def tile_at_canvas_event(self, event: tk.Event) -> str | None:
+        """Return the tile token under a canvas event."""
+        if self.geometry_data is None:
+            return None
+        world_point = self.transform.canvas_to_world((float(event.x), float(event.y)))
+        return hit_test_tile(self.geometry_data, world_point)
+
+    def on_canvas_motion(self, event: tk.Event) -> None:
+        """Show details for the tile under the pointer."""
+        token = self.tile_at_canvas_event(event)
+        if token is None:
+            self.update_summary_status()
+            return
+        self.update_tile_status(token)
+
+    def on_canvas_click(self, event: tk.Event) -> None:
+        """Show details for the clicked tile without changing selection."""
+        token = self.tile_at_canvas_event(event)
+        if token is None:
+            self.update_summary_status()
+            return
+        self.update_tile_status(token)
+
+    def on_canvas_leave(self, _event: tk.Event) -> None:
+        """Restore the summary status when the pointer leaves the map."""
+        self.update_summary_status()
+
+    def update_tile_status(self, token: str) -> None:
+        """Show a detailed status message for one tile."""
+        status = self.tile_status(token)
+        self.status_var.set(
+            f"{token}: {status.label}. "
+            f"Downloaded {status.downloaded}; extracted {status.extracted}; "
+            f"mosaic sources {status.mosaic_sources}; uploaded/verified {status.uploaded}; "
+            f"missing upload {status.missing_upload}."
+        )
+        missing_rows = self.missing_upload_rows_by_tile.get(token, [])
+        if missing_rows:
+            output_file, date_text, grid = missing_rows[0]
+            extra = "" if len(missing_rows) == 1 else f" +{len(missing_rows) - 1} more"
+            self.status_var.set(
+                f"{self.status_var.get()} First missing mosaic: {Path(output_file).name} "
+                f"({date_text}, {grid}){extra}. Full path is listed in Uploaded > QA > "
+                "Ready Mosaics Not Uploaded/Verified."
+            )
+
+    def update_summary_status(self) -> None:
+        """Show a compact project status summary."""
+        counts: Dict[str, int] = {}
+        for status in self.tile_statuses.values():
+            counts[status.status] = counts.get(status.status, 0) + 1
+        if not counts:
+            self.status_var.set("No per-tile project records are available yet.")
+            return
+        ordered = [
+            f"{PIPELINE_STATUS_STYLES[key]['label']}: {counts[key]}"
+            for key in ("downloaded", "extracted", "mosaicked", "uploaded", "attention")
+            if counts.get(key)
+        ]
+        self.status_var.set("Project tile status. " + "; ".join(ordered) + ".")
+
+
 class UTMMapSelectorDialog(tk.Toplevel):
     """Visual UTM selector dialog with click-to-toggle tile selection."""
 
