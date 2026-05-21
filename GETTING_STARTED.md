@@ -171,6 +171,7 @@ Set **GDAL Python** to a valid GDAL conda Python executable, then choose:
 - CRS mode
 - optional year or file limits
 - skip-existing behavior
+- parallel workers; use `1` for the original one-by-one behavior
 
 Click `Plan Extraction`, then `Run Extraction`.
 
@@ -178,7 +179,7 @@ Click `Plan Extraction`, then `Run Extraction`.
 
 Use Mosaic when you want fewer GeoTIFFs before upload.
 
-Set **GDAL Python**, input folder, output folder, and grouping mode. Then click `Plan Mosaics` and `Run Mosaic`.
+Set **GDAL Python**, input folder, output folder, grouping mode, and parallel workers. Keep Mosaic workers at `1` for the original cautious one-by-one behavior; try `2` only when disk space, RAM, and disk speed are comfortable. Then click `Plan Mosaics` and `Run Mosaic`.
 
 If extraction keeps the original SWOT UTM/grid CRS, per-output UTM tile statistics are meaningful. If extraction reprojects everything to a common CRS such as `LAEA` or `WGS84`, use the Statistics tab's source UTM tile table instead.
 

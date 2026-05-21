@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import csv
 import re
 import textwrap
@@ -51,6 +52,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "skip_existing": True,
         "skip_manifest_existing": True,
         "resampling_alg": "near",
+        "workers": 1,
         "manifest_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/extract_manifest.csv",
         "errors_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/extract_errors.csv",
     },
@@ -111,6 +113,7 @@ class ExtractConfig:
     skip_existing: bool = True
     skip_manifest_existing: bool = True
     resampling_alg: str = "near"
+    workers: int = 1
     manifest_csv: Path = Path(DEFAULT_CONFIG["extract"]["manifest_csv"])
     errors_csv: Path = Path(DEFAULT_CONFIG["extract"]["errors_csv"])
     base_dir: Path = Path.cwd()
@@ -187,6 +190,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> ExtractConfig:
         skip_existing=bool(extract_data.get("skip_existing", True)),
         skip_manifest_existing=bool(extract_data.get("skip_manifest_existing", True)),
         resampling_alg=str(extract_data.get("resampling_alg", "near")).strip() or "near",
+        workers=normalize_workers(extract_data.get("workers", 1)),
         manifest_csv=resolve_path(
             extract_data.get("manifest_csv", f"{logs_folder}/extract_manifest.csv"),
             base_dir,
@@ -210,6 +214,8 @@ def validate_config(config: ExtractConfig) -> None:
         )
     if config.limit_files is not None and config.limit_files < 0:
         raise ValueError("extract.limit_files cannot be negative.")
+    if config.workers < 1:
+        raise ValueError("extract.workers must be at least 1.")
     if config.input_folder.exists() and not config.input_folder.is_dir():
         raise ValueError(f"Extraction input path is not a directory: {config.input_folder}")
     if config.output_folder.exists() and not config.output_folder.is_dir():
@@ -221,6 +227,13 @@ def normalize_limit_files(value: Any) -> Optional[int]:
     if value in (None, ""):
         return None
     return int(value)
+
+
+def normalize_workers(value: Any) -> int:
+    """Normalize optional worker count; 1 preserves sequential processing."""
+    if value in (None, ""):
+        return 1
+    return max(1, int(value))
 
 
 def parse_filename(path: Path) -> Optional[Dict[str, Any]]:
@@ -591,6 +604,8 @@ def process_one_file(
     output_path = build_output_path(source.path, config.output_folder, config.target_crs_mode)
     record_id = extract_record_id(source, config)
     if config.skip_existing and output_path.exists():
+        if gdal is None:
+            gdal = require_gdal()
         info = validate_output_geotiff(output_path, gdal)
         return {
             "record_id": record_id,
@@ -623,6 +638,8 @@ def process_one_file(
             **source.metadata,
         }
 
+    if gdal is None:
+        gdal = require_gdal()
     vrt_dataset, vrt_path = build_two_band_vrt(source.path, gdal)
     try:
         export_geotiff_from_vrt(vrt_dataset, output_path, config, gdal)
@@ -645,6 +662,30 @@ def process_one_file(
         "known_from_manifest": "no",
         **source.metadata,
     }
+
+
+def process_one_file_worker(
+    index: int,
+    source: ExtractSource,
+    config: ExtractConfig,
+    manifest_row: Optional[Dict[str, str]],
+) -> Tuple[int, str, Dict[str, Any]]:
+    """Process one extraction source in a child process."""
+    try:
+        record_id = extract_record_id(source, config)
+        existing_manifest = {record_id: manifest_row} if manifest_row else {}
+        row = process_one_file(source, config, None, existing_manifest)
+        return index, "result", row
+    except Exception as exc:  # noqa: BLE001
+        return (
+            index,
+            "error",
+            {
+                "input_nc": str(source.path),
+                "error": f"{type(exc).__name__}: {exc}",
+                **source.metadata,
+            },
+        )
 
 
 def unmatched_error_rows(plan: ExtractPlan) -> List[Dict[str, Any]]:
@@ -694,32 +735,99 @@ def run_extract(
     config.output_folder.mkdir(parents=True, exist_ok=True)
     results: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = unmatched_error_rows(plan)
-    gdal = require_gdal()
     existing_manifest = read_extract_manifest(config.manifest_csv)
     total = len(plan.selected)
     if progress_callback is not None:
-        progress_callback(0, total, "Starting extraction")
+        mode = "sequential" if config.workers <= 1 else f"{config.workers} workers"
+        progress_callback(0, total, f"Starting extraction ({mode})")
 
-    iterator = plan.selected if progress_callback is not None else iter_with_progress(plan.selected)
-    for index, source in enumerate(iterator, start=1):
-        if progress_callback is not None:
-            progress_callback(index - 1, total, f"Processing {source.path.name}")
-        status = "done"
-        try:
-            row = process_one_file(source, config, gdal, existing_manifest)
-            results.append(row)
-            status = row.get("status", "done")
-        except Exception as exc:  # noqa: BLE001
-            status = "error"
-            errors.append(
-                {
-                    "input_nc": str(source.path),
-                    "error": f"{type(exc).__name__}: {exc}",
-                    **source.metadata,
-                }
+    if config.workers <= 1 or total <= 1:
+        gdal = require_gdal()
+        iterator = plan.selected if progress_callback is not None else iter_with_progress(plan.selected)
+        for index, source in enumerate(iterator, start=1):
+            if progress_callback is not None:
+                progress_callback(index - 1, total, f"Processing {source.path.name}")
+            status = "done"
+            try:
+                row = process_one_file(source, config, gdal, existing_manifest)
+                results.append(row)
+                status = row.get("status", "done")
+            except Exception as exc:  # noqa: BLE001
+                status = "error"
+                errors.append(
+                    {
+                        "input_nc": str(source.path),
+                        "error": f"{type(exc).__name__}: {exc}",
+                        **source.metadata,
+                    }
+                )
+            if progress_callback is not None:
+                progress_callback(index, total, f"{status}: {source.path.name}")
+    else:
+        indexed_results: List[Tuple[int, Dict[str, Any]]] = []
+        indexed_errors: List[Tuple[int, Dict[str, Any]]] = []
+        workers = min(config.workers, total)
+        completed = 0
+        work_items = [
+            (
+                index,
+                source,
+                existing_manifest.get(extract_record_id(source, config)),
             )
-        if progress_callback is not None:
-            progress_callback(index, total, f"{status}: {source.path.name}")
+            for index, source in enumerate(plan.selected, start=1)
+        ]
+        next_item = 0
+        active: Dict[Any, Tuple[int, ExtractSource]] = {}
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            while next_item < len(work_items) and len(active) < workers:
+                index, source, manifest_row = work_items[next_item]
+                future = executor.submit(
+                    process_one_file_worker,
+                    index,
+                    source,
+                    config,
+                    manifest_row,
+                )
+                active[future] = (index, source)
+                next_item += 1
+
+            while active:
+                done, _pending = wait(active, return_when=FIRST_COMPLETED)
+                for future in done:
+                    index, source = active.pop(future)
+                    try:
+                        result_index, result_type, payload = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        result_index = index
+                        result_type = "error"
+                        payload = {
+                            "input_nc": str(source.path),
+                            "error": f"{type(exc).__name__}: {exc}",
+                            **source.metadata,
+                        }
+                    if result_type == "result":
+                        indexed_results.append((result_index, payload))
+                        status = str(payload.get("status", "done"))
+                    else:
+                        indexed_errors.append((result_index, payload))
+                        status = "error"
+                    completed += 1
+                    if progress_callback is not None:
+                        progress_callback(completed, total, f"{status}: {source.path.name}")
+
+                while next_item < len(work_items) and len(active) < workers:
+                    index, source, manifest_row = work_items[next_item]
+                    future = executor.submit(
+                        process_one_file_worker,
+                        index,
+                        source,
+                        config,
+                        manifest_row,
+                    )
+                    active[future] = (index, source)
+                    next_item += 1
+        results.extend(row for _index, row in sorted(indexed_results, key=lambda item: item[0]))
+        errors.extend(row for _index, row in sorted(indexed_errors, key=lambda item: item[0]))
 
     write_extract_manifest(config, results)
     write_csv(config.errors_csv, ERROR_COLUMNS, errors)

@@ -110,6 +110,9 @@ extract:
   # Matches the notebook default used for reprojection.
   resampling_alg: "near"
 
+  # Use 1 for the original one-by-one behavior. Increase cautiously for parallel extraction.
+  workers: 1
+
   manifest_csv: "C:/path/to/SWOT_Processing/00_logs/extract_manifest.csv"
   errors_csv: "C:/path/to/SWOT_Processing/00_logs/extract_errors.csv"
 
@@ -146,6 +149,9 @@ mosaic:
   # Write a .tfw world file beside each mosaic GeoTIFF. The GeoTIFF itself also
   # keeps embedded georeferencing.
   write_world_file: true
+
+  # Use 1 for the original one-by-one behavior. Increase cautiously because mosaics are disk/RAM intensive.
+  workers: 1
 
   # File extensions to include in mosaic planning.
   extensions:

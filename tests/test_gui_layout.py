@@ -155,10 +155,12 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Input NetCDF folder", collect_label_texts(extract_tab))
             self.assertIn("Output GeoTIFF folder", collect_label_texts(extract_tab))
             self.assertIn("CRS mode", collect_label_texts(extract_tab))
+            self.assertIn("Parallel workers", collect_label_texts(extract_tab))
             self.assertIn("Skip NetCDFs already recorded in the extraction manifest", collect_label_texts(extract_tab))
             self.assertIn("GDAL Python", collect_label_texts(mosaic_tab))
             self.assertIn("Grouping mode", collect_label_texts(mosaic_tab))
             self.assertIn("Target CRS label", collect_label_texts(mosaic_tab))
+            self.assertIn("Parallel workers", collect_label_texts(mosaic_tab))
             self.assertIn("Mosaic manifest CSV", collect_label_texts(mosaic_tab))
             self.assertIn("Skip mosaics already recorded with the same source set", collect_label_texts(mosaic_tab))
             self.assertIn("Write .tfw world files beside mosaic GeoTIFFs", collect_label_texts(mosaic_tab))
@@ -363,6 +365,8 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertEqual(config["upload"]["utm_tiles"], ["UTM34M", "UTM35M"])
             self.assertTrue(config["upload"]["ee_sync_before_upload"])
             self.assertTrue(config["artifacts"]["ee_asset_inventory_csv"].endswith("ee_asset_inventory.csv"))
+            self.assertEqual(config["extract"]["workers"], 1)
+            self.assertEqual(config["mosaic"]["workers"], 1)
         finally:
             root.destroy()
 

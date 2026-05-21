@@ -17,6 +17,7 @@ from ee_mosaic_tool import (
     cleanup_temporary_output,
     group_source_signature,
     is_disk_space_error,
+    load_config_file,
     promote_temporary_output,
     run_mosaic,
     temporary_mosaic_path,
@@ -240,6 +241,31 @@ class MosaicPlanningTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 2)
             self.assertEqual(rows[0]["status"], "INVALID_FILENAME")
+
+    def test_load_config_file_reads_worker_count(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            input_folder = root / "input"
+            input_folder.mkdir()
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "mosaic:",
+                        f"  input_folder: \"{input_folder.as_posix()}\"",
+                        f"  output_folder: \"{(root / 'out').as_posix()}\"",
+                        f"  report_csv: \"{(root / 'report.csv').as_posix()}\"",
+                        f"  manifest_csv: \"{(root / 'manifest.csv').as_posix()}\"",
+                        "  workers: 2",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config_file(config_path)
+
+            self.assertEqual(config.workers, 2)
 
     def test_manifest_skip_avoids_rebuilding_deleted_mosaic(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

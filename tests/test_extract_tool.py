@@ -148,6 +148,7 @@ class ExtractPlanningTests(unittest.TestCase):
                         "  year_selection: \"2024,2025\"",
                         "  limit_files: 5",
                         "  skip_existing: false",
+                        "  workers: 3",
                         f"  manifest_csv: \"{(root / 'manifest.csv').as_posix()}\"",
                         f"  errors_csv: \"{(root / 'errors.csv').as_posix()}\"",
                         "",
@@ -164,6 +165,7 @@ class ExtractPlanningTests(unittest.TestCase):
             self.assertEqual(config.year_selection, "2024,2025")
             self.assertEqual(config.limit_files, 5)
             self.assertFalse(config.skip_existing)
+            self.assertEqual(config.workers, 3)
 
     def test_process_one_file_can_skip_from_manifest_without_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -311,6 +311,9 @@ class LauncherApp:
         self.extract_limit_files_var = tk.StringVar(
             value="" if limit_files in (None, "") else str(limit_files)
         )
+        self.extract_workers_var = tk.StringVar(
+            value=str(extract_data.get("workers", 1))
+        )
         self.extract_manifest_var = tk.StringVar(
             value=extract_data.get("manifest_csv", f"{processing_logs}/extract_manifest.csv")
         )
@@ -394,6 +397,9 @@ class LauncherApp:
         )
         self.mosaic_target_crs_label_var = tk.StringVar(
             value=mosaic_data.get("target_crs_label", "")
+        )
+        self.mosaic_workers_var = tk.StringVar(
+            value=str(mosaic_data.get("workers", 1))
         )
         self.mosaic_report_var = tk.StringVar(
             value=mosaic_data.get("report_csv", f"{processing_logs}/mosaic_report.csv")
@@ -1010,6 +1016,13 @@ class LauncherApp:
             "Limit files",
             self.extract_limit_files_var,
             "Optional testing limit; leave blank to process all selected files",
+        )
+        row = self.add_entry_row(
+            form,
+            row,
+            "Parallel workers",
+            self.extract_workers_var,
+            "Use 1 for the current one-by-one behavior; try 2-4 only when disk/RAM are comfortable",
         )
         row = self.add_path_row(
             form,
@@ -1910,6 +1923,13 @@ class LauncherApp:
         row = self.add_entry_row(
             form,
             row,
+            "Parallel workers",
+            self.mosaic_workers_var,
+            "Use 1 for the current one-by-one behavior; try 2 cautiously because mosaics are disk/RAM intensive",
+        )
+        row = self.add_entry_row(
+            form,
+            row,
             "Mosaic report CSV",
             self.mosaic_report_var,
             "CSV report path for planned, created, skipped, and invalid groups",
@@ -2411,6 +2431,7 @@ class LauncherApp:
         self.extract_year_selection_var.set(str(extract_data.get("year_selection", "all")))
         limit_files = extract_data.get("limit_files")
         self.extract_limit_files_var.set("" if limit_files in (None, "") else str(limit_files))
+        self.extract_workers_var.set(str(extract_data.get("workers", 1)))
         self.extract_manifest_var.set(
             extract_data.get("manifest_csv", f"{processing_logs}/extract_manifest.csv")
         )
@@ -2461,6 +2482,7 @@ class LauncherApp:
             )
         )
         self.mosaic_target_crs_label_var.set(mosaic_data.get("target_crs_label", ""))
+        self.mosaic_workers_var.set(str(mosaic_data.get("workers", 1)))
         self.mosaic_report_var.set(
             mosaic_data.get("report_csv", f"{processing_logs}/mosaic_report.csv")
         )
@@ -3599,6 +3621,10 @@ class LauncherApp:
                 "skip_existing": self.extract_skip_existing_var.get(),
                 "skip_manifest_existing": self.extract_skip_manifest_existing_var.get(),
                 "resampling_alg": "near",
+                "workers": max(
+                    1,
+                    self.parse_int_or_default(self.extract_workers_var.get(), 1),
+                ),
                 "manifest_csv": self.extract_manifest_var.get().strip()
                 or f"{DEFAULT_PROCESSING_PATHS['logs']}/extract_manifest.csv",
                 "errors_csv": self.extract_errors_var.get().strip()
@@ -3615,6 +3641,10 @@ class LauncherApp:
                 "recursive": self.mosaic_recursive_var.get(),
                 "overwrite": self.mosaic_overwrite_var.get(),
                 "write_world_file": self.mosaic_write_world_file_var.get(),
+                "workers": max(
+                    1,
+                    self.parse_int_or_default(self.mosaic_workers_var.get(), 1),
+                ),
                 "extensions": [".tif", ".tiff"],
                 "report_csv": mosaic_report_csv,
                 "manifest_csv": self.mosaic_manifest_var.get().strip()

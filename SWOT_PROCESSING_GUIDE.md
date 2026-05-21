@@ -109,6 +109,11 @@ Output naming:
 
 The extraction step follows the notebook logic and writes uncompressed GeoTIFFs.
 
+Extraction can run sequentially or with multiple worker processes. `extract.workers: 1`
+keeps the original one-file-at-a-time behavior. Higher values process independent
+NetCDF inputs in parallel, while the main process still writes the cumulative
+manifest, error CSV, and workflow manifest after collecting worker results.
+
 ## Mosaic Grouping
 
 Default grouping mode is `utm_zone`.
@@ -137,6 +142,13 @@ That mode is intended for already reprojected extraction outputs and groups by:
 It ignores the original UTM token in the filename, but still validates actual raster compatibility before merging.
 
 In common-CRS mode, do not interpret mosaic outputs as per-UTM-tile products. The output grid is the configured common CRS, while the source-tile statistics and `input_files` manifest column preserve the UTM provenance needed to audit coverage.
+
+Mosaic can also run sequentially or with multiple worker processes. `mosaic.workers: 1`
+keeps the original one-group-at-a-time behavior and is the safest default.
+Higher values process independent mosaic groups in parallel, using temporary
+`.part.tif` outputs that are promoted only after a group succeeds. Increase this
+cautiously because mosaicking can saturate disk I/O, use substantial RAM, and fail
+earlier if the output drive is nearly full.
 
 ## Upload Selection And Verification
 

@@ -13,8 +13,8 @@ python geeup_gui.py
 - **Projects:** one folder per AOI or workflow, with project-specific raw downloads, extracted GeoTIFFs, mosaics, logs, presets, and settings.
 - **Download:** searches and downloads PO.DAAC SWOT L2 HR Raster 100 m data through `earthaccess`, with date and UTM tile filtering.
 - **Duplicate Removal:** moves older local raw granule versions when several CRID/product-counter versions exist.
-- **Extraction:** converts SWOT NetCDF files into two-band GeoTIFFs with `wse` and `wse_qual`.
-- **Mosaic:** reduces GeoTIFF counts before upload, while keeping SWOT-compatible naming and metadata parsing.
+- **Extraction:** converts SWOT NetCDF files into two-band GeoTIFFs with `wse` and `wse_qual`, with optional worker-based parallelism.
+- **Mosaic:** reduces GeoTIFF counts before upload, while keeping SWOT-compatible naming and metadata parsing, with optional cautious group parallelism.
 - **Upload:** uploads GeoTIFFs to Google Earth Engine through Chrome/Selenium, with optional UTM/source-tile filtering and Earth Engine asset verification.
 - **Statistics:** summarizes project coverage, processing status, file counts, dates, UTM tiles, uploads, and QA tables.
 - **Cleanup:** previews and deletes safe intermediate-file cleanup candidates with downstream manifest proof.

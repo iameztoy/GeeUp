@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import csv
 import json
 import re
@@ -59,6 +60,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "manifest_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/mosaic_manifest.csv",
         "skip_manifest_existing": True,
         "mixed_crid_report_csv": "",
+        "workers": 1,
     },
 }
 
@@ -127,6 +129,7 @@ class MosaicConfig:
     manifest_csv: Path = Path(f"{DEFAULT_PROCESSING_PATHS['logs']}/mosaic_manifest.csv")
     skip_manifest_existing: bool = True
     mixed_crid_report_csv: Optional[Path] = None
+    workers: int = 1
     base_dir: Path = Path.cwd()
 
 
@@ -220,6 +223,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> MosaicConfig:
             mosaic_data.get("mixed_crid_report_csv", ""),
             base_dir,
         ),
+        workers=normalize_workers(mosaic_data.get("workers", 1)),
         base_dir=base_dir,
     )
     validate_config(config)
@@ -245,11 +249,20 @@ def validate_config(config: MosaicConfig) -> None:
         raise ValueError(
             "mosaic.target_crs_label may contain only letters, numbers, and underscores."
         )
+    if config.workers < 1:
+        raise ValueError("mosaic.workers must be at least 1.")
 
 
 def normalize_crs_label(value: Any) -> str:
     """Normalize the optional common-CRS label used in output filenames."""
     return str(value or "").strip().upper()
+
+
+def normalize_workers(value: Any) -> int:
+    """Normalize optional worker count; 1 preserves sequential processing."""
+    if value in (None, ""):
+        return 1
+    return max(1, int(value))
 
 
 def collect_input_files(config: MosaicConfig) -> List[Path]:
@@ -501,6 +514,130 @@ def build_output_stem(sources: Sequence[MosaicSource], key: MosaicGroupKey) -> s
     )
 
 
+def preflight_mosaic_group(
+    group: MosaicGroup,
+    config: MosaicConfig,
+    existing_manifest: Dict[str, Dict[str, str]],
+    dry_run: bool,
+) -> Tuple[Optional[Dict[str, str]], str]:
+    """Return a non-writing report row for dry-run/skipped groups, or None."""
+    signature = group_source_signature(group)
+    manifest_row = existing_manifest.get(mosaic_record_id(group))
+    previous_signature = (manifest_row or {}).get("source_signature", "")
+    if dry_run:
+        status = "PLANNED_COPY" if len(group.sources) == 1 else "PLANNED_MOSAIC"
+        return (
+            add_mosaic_tracking_fields(
+                report_row_for_group(
+                    group,
+                    status,
+                    "Dry run only. No output written.",
+                ),
+                group,
+                signature,
+            ),
+            signature,
+        )
+
+    if group.output_file.exists() and not config.overwrite:
+        stale = bool(previous_signature and previous_signature != signature)
+        status = "STALE_EXISTS" if stale else "SKIPPED_EXISTS"
+        message = (
+            "Output exists, but the current source set differs from the recorded mosaic manifest. "
+            "Enable overwrite or remove the output to rebuild."
+            if stale
+            else "Output exists and overwrite is disabled."
+        )
+        return (
+            add_mosaic_tracking_fields(
+                report_row_for_group(group, status, message),
+                group,
+                signature,
+                stale=stale,
+            ),
+            signature,
+        )
+
+    if (
+        config.skip_manifest_existing
+        and mosaic_manifest_completed(manifest_row)
+        and previous_signature == signature
+    ):
+        return (
+            add_mosaic_tracking_fields(
+                report_row_for_group(
+                    group,
+                    "SKIPPED_MANIFEST",
+                    "Mosaic output is already recorded in the cumulative mosaic manifest.",
+                ),
+                group,
+                signature,
+                known_from_manifest=True,
+            ),
+            signature,
+        )
+
+    return None, signature
+
+
+def execute_mosaic_group(group: MosaicGroup, config: MosaicConfig, signature: str) -> Dict[str, str]:
+    """Write one mosaic output and return its report row."""
+    try:
+        if len(group.sources) == 1:
+            copy_singleton(group, config)
+            return add_mosaic_tracking_fields(
+                report_row_for_group(
+                    group,
+                    "COPIED_SINGLETON",
+                    "Single-file group written to mosaic output folder.",
+                ),
+                group,
+                signature,
+            )
+        validate_raster_group(group.sources)
+        merge_group(group, config)
+        return add_mosaic_tracking_fields(
+            report_row_for_group(
+                group,
+                "MOSAIC_CREATED",
+                "Merged with current wse priority and wse_qual fallback over class 3.",
+            ),
+            group,
+            signature,
+        )
+    except IncompatibleRasterGroupError as exc:
+        return add_mosaic_tracking_fields(
+            report_row_for_group(group, "SKIPPED_INCOMPATIBLE", str(exc)),
+            group,
+            signature,
+        )
+    except Exception as exc:  # noqa: BLE001
+        status = ERROR_DISK_SPACE_STATUS if is_disk_space_error(exc) else "ERROR"
+        message = str(exc)
+        if status == ERROR_DISK_SPACE_STATUS:
+            message = (
+                f"{message} Mosaic run stopped early because this looks like a disk-space "
+                "or low-level GeoTIFF write failure. Free space, then rerun Mosaic with "
+                "overwrite off and manifest skipping on."
+            )
+        cleanup_temporary_output(group.output_file)
+        return add_mosaic_tracking_fields(
+            report_row_for_group(group, status, message),
+            group,
+            signature,
+        )
+
+
+def execute_mosaic_group_worker(
+    index: int,
+    group: MosaicGroup,
+    config: MosaicConfig,
+    signature: str,
+) -> Tuple[int, Dict[str, str]]:
+    """Write one mosaic output in a child process."""
+    return index, execute_mosaic_group(group, config, signature)
+
+
 def run_mosaic(
     config: MosaicConfig,
     dry_run: bool = False,
@@ -509,139 +646,85 @@ def run_mosaic(
     """Plan and optionally write all mosaic outputs."""
     plan = build_mosaic_plan(config)
     rows = list(plan.report_rows)
+    group_rows: List[Tuple[int, Dict[str, str]]] = []
     existing_manifest = read_mosaic_manifest(config.manifest_csv)
     total = len(plan.groups)
     if progress_callback is not None:
-        progress_callback(0, total, "Starting mosaic planning" if dry_run else "Starting mosaic run")
+        if dry_run:
+            message = "Starting mosaic planning"
+        elif config.workers <= 1:
+            message = "Starting mosaic run (sequential)"
+        else:
+            message = f"Starting mosaic run ({config.workers} workers)"
+        progress_callback(0, total, message)
 
+    completed = 0
+    work_items: List[Tuple[int, MosaicGroup, str]] = []
+    stopped_for_disk = False
     for index, group in enumerate(plan.groups, start=1):
         if progress_callback is not None:
-            progress_callback(index - 1, total, f"Processing {group.output_file.name}")
-        status = "PLANNED"
-        signature = group_source_signature(group)
-        manifest_row = existing_manifest.get(mosaic_record_id(group))
-        previous_signature = (manifest_row or {}).get("source_signature", "")
-        if dry_run:
-            status = "PLANNED_COPY" if len(group.sources) == 1 else "PLANNED_MOSAIC"
-            rows.append(
-                add_mosaic_tracking_fields(
-                    report_row_for_group(
-                        group,
-                        status,
-                        "Dry run only. No output written.",
-                    ),
-                    group,
-                    signature,
-                )
-            )
+            progress_callback(completed, total, f"Planning {group.output_file.name}")
+        row, signature = preflight_mosaic_group(group, config, existing_manifest, dry_run)
+        if row is not None:
+            group_rows.append((index, row))
+            completed += 1
             if progress_callback is not None:
-                progress_callback(index, total, f"{status}: {group.output_file.name}")
+                progress_callback(completed, total, f"{row['status']}: {group.output_file.name}")
             continue
+        work_items.append((index, group, signature))
 
-        if group.output_file.exists() and not config.overwrite:
-            stale = bool(previous_signature and previous_signature != signature)
-            status = "STALE_EXISTS" if stale else "SKIPPED_EXISTS"
-            message = (
-                "Output exists, but the current source set differs from the recorded mosaic manifest. "
-                "Enable overwrite or remove the output to rebuild."
-                if stale
-                else "Output exists and overwrite is disabled."
-            )
-            rows.append(
-                add_mosaic_tracking_fields(
-                    report_row_for_group(group, status, message),
-                    group,
-                    signature,
-                    stale=stale,
-                )
-            )
-            if progress_callback is not None:
-                progress_callback(index, total, f"{status}: {group.output_file.name}")
-            continue
+    if not dry_run and work_items:
+        if config.workers <= 1:
+            for index, group, signature in work_items:
+                if progress_callback is not None:
+                    progress_callback(completed, total, f"Processing {group.output_file.name}")
+                row = execute_mosaic_group(group, config, signature)
+                group_rows.append((index, row))
+                completed += 1
+                if progress_callback is not None:
+                    progress_callback(completed, total, f"{row['status']}: {group.output_file.name}")
+                if row["status"] == ERROR_DISK_SPACE_STATUS:
+                    stopped_for_disk = True
+                    break
+        else:
+            workers = min(config.workers, len(work_items))
+            next_item = 0
+            active: Dict[Any, Tuple[int, MosaicGroup]] = {}
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                while next_item < len(work_items) and len(active) < workers:
+                    index, group, signature = work_items[next_item]
+                    future = executor.submit(execute_mosaic_group_worker, index, group, config, signature)
+                    active[future] = (index, group)
+                    next_item += 1
 
-        if (
-            config.skip_manifest_existing
-            and mosaic_manifest_completed(manifest_row)
-            and previous_signature == signature
-        ):
-            status = "SKIPPED_MANIFEST"
-            rows.append(
-                add_mosaic_tracking_fields(
-                    report_row_for_group(
-                        group,
-                        status,
-                        "Mosaic output is already recorded in the cumulative mosaic manifest.",
-                    ),
-                    group,
-                    signature,
-                    known_from_manifest=True,
-                )
-            )
-            if progress_callback is not None:
-                progress_callback(index, total, f"{status}: {group.output_file.name}")
-            continue
+                while active:
+                    done, _pending = wait(active, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        index, group = active.pop(future)
+                        try:
+                            result_index, row = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            row = add_mosaic_tracking_fields(
+                                report_row_for_group(group, "ERROR", f"{type(exc).__name__}: {exc}"),
+                                group,
+                                group_source_signature(group),
+                            )
+                            result_index = index
+                            cleanup_temporary_output(group.output_file)
+                        group_rows.append((result_index, row))
+                        completed += 1
+                        if progress_callback is not None:
+                            progress_callback(completed, total, f"{row['status']}: {group.output_file.name}")
+                        if row["status"] == ERROR_DISK_SPACE_STATUS:
+                            stopped_for_disk = True
 
-        try:
-            if len(group.sources) == 1:
-                copy_singleton(group, config)
-                status = "COPIED_SINGLETON"
-                rows.append(
-                    add_mosaic_tracking_fields(
-                        report_row_for_group(
-                            group,
-                            status,
-                            "Single-file group written to mosaic output folder.",
-                        ),
-                        group,
-                        signature,
-                    )
-                )
-            else:
-                validate_raster_group(group.sources)
-                merge_group(group, config)
-                status = "MOSAIC_CREATED"
-                rows.append(
-                    add_mosaic_tracking_fields(
-                        report_row_for_group(
-                            group,
-                            status,
-                            "Merged with current wse priority and wse_qual fallback over class 3.",
-                        ),
-                        group,
-                        signature,
-                    )
-                )
-        except IncompatibleRasterGroupError as exc:
-            status = "SKIPPED_INCOMPATIBLE"
-            rows.append(
-                add_mosaic_tracking_fields(
-                    report_row_for_group(group, status, str(exc)),
-                    group,
-                    signature,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            status = ERROR_DISK_SPACE_STATUS if is_disk_space_error(exc) else "ERROR"
-            message = str(exc)
-            if status == ERROR_DISK_SPACE_STATUS:
-                message = (
-                    f"{message} Mosaic run stopped early because this looks like a disk-space "
-                    "or low-level GeoTIFF write failure. Free space, then rerun Mosaic with "
-                    "overwrite off and manifest skipping on."
-                )
-            rows.append(
-                add_mosaic_tracking_fields(
-                    report_row_for_group(group, status, message),
-                    group,
-                    signature,
-                )
-            )
-            cleanup_temporary_output(group.output_file)
-        if progress_callback is not None:
-            progress_callback(index, total, f"{status}: {group.output_file.name}")
-        if status == ERROR_DISK_SPACE_STATUS:
-            break
+                    while not stopped_for_disk and next_item < len(work_items) and len(active) < workers:
+                        index, group, signature = work_items[next_item]
+                        future = executor.submit(execute_mosaic_group_worker, index, group, config, signature)
+                        active[future] = (index, group)
+                        next_item += 1
 
+    rows.extend(row for _index, row in sorted(group_rows, key=lambda item: item[0]))
     write_report(config.report_csv, rows)
     write_mixed_crid_report(config.mixed_crid_report_csv, rows)
     if not dry_run:
