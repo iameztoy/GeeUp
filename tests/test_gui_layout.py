@@ -112,6 +112,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertEqual(
                 tab_texts,
                 [
+                    "Home",
                     "Download",
                     "Duplicate Removal",
                     "Extraction",
@@ -125,8 +126,12 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Open Project", collect_button_texts(app.root))
             self.assertIn("Save Project", collect_button_texts(app.root))
             self.assertIn("Prepare Update", collect_button_texts(app.root))
+            self.assertIn("Download Data", collect_button_texts(app.root))
+            self.assertIn("View Statistics", collect_button_texts(app.root))
+            self.assertIn("GitHub", collect_button_texts(app.root))
             self.assertNotIn("Save Config", collect_button_texts(app.root))
             (
+                home_tab,
                 download_tab,
                 duplicate_tab,
                 extract_tab,
@@ -135,6 +140,10 @@ class GuiLayoutTests(unittest.TestCase):
                 statistics_tab,
                 cleanup_tab,
             ) = notebook.winfo_children()
+            self.assertIn("Current Project", collect_label_texts(home_tab))
+            self.assertIn("Workflow Shortcuts", collect_label_texts(home_tab))
+            self.assertIn("Selected Download Tiles", collect_label_texts(home_tab))
+            self.assertIn("Project Folders", collect_label_texts(home_tab))
             self.assertIn("Collection", collect_label_texts(download_tab))
             self.assertIn("Product version filter", collect_label_texts(download_tab))
             self.assertIn("Start date", collect_label_texts(download_tab))

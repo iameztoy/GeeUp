@@ -88,6 +88,8 @@ python geeup_gui.py
 
 Create or open a project before running workflow actions. GeeUp projects keep paths, reports, manifests, presets, and processing history tied to one AOI or production workflow.
 
+GeeUp opens on the **Home** tab. Use it for the project summary, selected-tile overview, workflow shortcuts, and GitHub link; use the processing tabs for the actual work.
+
 ## Create Or Open A Project
 
 Use one project per main AOI or workflow, for example:

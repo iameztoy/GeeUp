@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import textwrap
+import webbrowser
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
@@ -18,6 +19,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+ASSETS_DIR = PROJECT_ROOT / "assets"
+HOME_BANNER_PATH = ASSETS_DIR / "geeup_home_banner.png"
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 CONFIG_EXAMPLE_PATH = PROJECT_ROOT / "config.example.yaml"
 UPLOADER_SCRIPT = PROJECT_ROOT / "ee_ui_uploader.py"
@@ -25,6 +28,9 @@ EXTRACT_SCRIPT = PROJECT_ROOT / "swot_extract_tool.py"
 MOSAIC_SCRIPT = PROJECT_ROOT / "ee_mosaic_tool.py"
 DUPLICATE_SCRIPT = PROJECT_ROOT / "swot_duplicate_remover.py"
 PROGRESS_PREFIX = "GEEUP_PROGRESS\t"
+APP_NAME = "GeeUp"
+APP_VERSION = "v0.3.0+"
+GITHUB_URL = "https://github.com/iameztoy/GeeUp"
 DEFAULT_PROCESSING_ROOT = "./SWOT_Processing"
 DEFAULT_PROCESSING_PATHS = {
     "root": DEFAULT_PROCESSING_ROOT,
@@ -161,9 +167,9 @@ class LauncherApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("SWOT Processing Tools")
-        self.root.geometry("860x760")
-        self.root.minsize(780, 620)
+        self.root.title(f"{APP_NAME} SWOT Workflow")
+        self.root.geometry("1080x820")
+        self.root.minsize(820, 650)
 
         self.data = load_config()
         processing_data = self.data.get("processing", {})
@@ -276,6 +282,10 @@ class LauncherApp:
         self.project_status_var = tk.StringVar(
             value="No project is open. Create or open a project before previewing, downloading, or running processing steps."
         )
+        self.home_project_summary_var = tk.StringVar(value="")
+        self.home_tile_summary_var = tk.StringVar(value="")
+        self.home_path_summary_var = tk.StringVar(value="")
+        self.home_workflow_summary_var = tk.StringVar(value="")
         self.project_created_at = ""
         self.project_download_history: list[dict[str, Any]] = []
         self.tile_preset_var = tk.StringVar(value="")
@@ -505,7 +515,7 @@ class LauncherApp:
 
         title = ttk.Label(
             outer,
-            text="SWOT Processing Tools",
+            text=APP_NAME,
             font=("Segoe UI", 16, "bold"),
         )
         title.grid(row=0, column=0, sticky="w")
@@ -513,8 +523,8 @@ class LauncherApp:
         intro = ttk.Label(
             outer,
             text=(
-                "Process SWOT files in separated steps: remove duplicate downloads, mosaic extracted GeoTIFFs, then upload to Earth Engine.\n"
-                "Heavy raster processing runs through the configured GDAL conda runtime."
+                "SWOT HR Raster 100 m download, processing, QA/QC, and Earth Engine upload.\n"
+                "Open a project, then move through the workflow tabs from Download to Cleanup."
             ),
             justify="left",
         )
@@ -522,24 +532,37 @@ class LauncherApp:
 
         self.build_project_bar(outer)
 
-        notebook = ttk.Notebook(outer)
-        notebook.grid(row=3, column=0, sticky="nsew")
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.grid(row=3, column=0, sticky="nsew")
 
-        download_tab = ttk.Frame(notebook, padding=12)
-        duplicate_tab = ttk.Frame(notebook, padding=12)
-        extract_tab = ttk.Frame(notebook, padding=12)
-        mosaic_tab = ttk.Frame(notebook, padding=12)
-        upload_tab = ttk.Frame(notebook, padding=12)
-        statistics_tab = ttk.Frame(notebook, padding=12)
-        cleanup_tab = ttk.Frame(notebook, padding=12)
-        notebook.add(download_tab, text="Download")
-        notebook.add(duplicate_tab, text="Duplicate Removal")
-        notebook.add(extract_tab, text="Extraction")
-        notebook.add(mosaic_tab, text="Mosaic")
-        notebook.add(upload_tab, text="Upload")
-        notebook.add(statistics_tab, text="Statistics")
-        notebook.add(cleanup_tab, text="Cleanup")
+        home_tab = ttk.Frame(self.notebook, padding=12)
+        download_tab = ttk.Frame(self.notebook, padding=12)
+        duplicate_tab = ttk.Frame(self.notebook, padding=12)
+        extract_tab = ttk.Frame(self.notebook, padding=12)
+        mosaic_tab = ttk.Frame(self.notebook, padding=12)
+        upload_tab = ttk.Frame(self.notebook, padding=12)
+        statistics_tab = ttk.Frame(self.notebook, padding=12)
+        cleanup_tab = ttk.Frame(self.notebook, padding=12)
+        self.tabs_by_name = {
+            "Home": home_tab,
+            "Download": download_tab,
+            "Duplicate Removal": duplicate_tab,
+            "Extraction": extract_tab,
+            "Mosaic": mosaic_tab,
+            "Upload": upload_tab,
+            "Statistics": statistics_tab,
+            "Cleanup": cleanup_tab,
+        }
+        self.notebook.add(home_tab, text="Home")
+        self.notebook.add(download_tab, text="Download")
+        self.notebook.add(duplicate_tab, text="Duplicate Removal")
+        self.notebook.add(extract_tab, text="Extraction")
+        self.notebook.add(mosaic_tab, text="Mosaic")
+        self.notebook.add(upload_tab, text="Upload")
+        self.notebook.add(statistics_tab, text="Statistics")
+        self.notebook.add(cleanup_tab, text="Cleanup")
 
+        self.build_home_tab(home_tab)
         self.build_download_tab(download_tab)
         self.build_duplicate_tab(duplicate_tab)
         self.build_extract_tab(extract_tab)
@@ -547,6 +570,251 @@ class LauncherApp:
         self.build_upload_tab(upload_tab)
         self.build_statistics_tab(statistics_tab)
         self.build_cleanup_tab(cleanup_tab)
+        self.refresh_home_summary()
+
+    def build_home_tab(self, parent: ttk.Frame) -> None:
+        """Create the first landing tab with project shortcuts and workflow context."""
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(2, weight=1)
+
+        hero = ttk.Frame(parent)
+        hero.grid(row=0, column=0, sticky="ew")
+        hero.columnconfigure(0, weight=1)
+        self.home_banner_canvas = tk.Canvas(
+            hero,
+            height=300,
+            borderwidth=0,
+            highlightthickness=0,
+            background="#07101f",
+        )
+        self.home_banner_canvas.grid(row=0, column=0, sticky="ew")
+        self.home_banner_image = None
+        if HOME_BANNER_PATH.exists():
+            try:
+                self.home_banner_image = tk.PhotoImage(file=str(HOME_BANNER_PATH))
+            except tk.TclError:
+                self.home_banner_image = None
+
+        if self.home_banner_image is not None:
+            image_item = self.home_banner_canvas.create_image(
+                0,
+                0,
+                image=self.home_banner_image,
+                anchor="nw",
+            )
+        else:
+            image_item = None
+            self.home_banner_canvas.create_rectangle(
+                0,
+                0,
+                1400,
+                300,
+                fill="#07101f",
+                outline="",
+            )
+            self.home_banner_canvas.create_oval(
+                70,
+                95,
+                1030,
+                650,
+                fill="#1d78b7",
+                outline="#55bde8",
+                width=2,
+            )
+            self.home_banner_canvas.create_line(
+                40,
+                250,
+                700,
+                215,
+                fill="#4dd4e8",
+                width=3,
+            )
+
+        self.home_banner_canvas.create_rectangle(
+            24,
+            24,
+            440,
+            144,
+            fill="#07101f",
+            outline="",
+            stipple="gray25",
+        )
+        self.home_banner_canvas.create_text(
+            42,
+            48,
+            text=APP_NAME,
+            anchor="nw",
+            fill="#f4f8ff",
+            font=("Segoe UI", 30, "bold"),
+        )
+        self.home_banner_canvas.create_text(
+            44,
+            96,
+            text="SWOT HR Raster workflow for Earth Engine",
+            anchor="nw",
+            fill="#d7ecff",
+            font=("Segoe UI", 13),
+        )
+        self.home_banner_canvas.create_text(
+            44,
+            124,
+            text=APP_VERSION,
+            anchor="nw",
+            fill="#7ed9ec",
+            font=("Segoe UI", 10, "bold"),
+        )
+
+        if image_item is not None:
+            def center_banner(event: tk.Event) -> None:
+                assert self.home_banner_image is not None
+                x = max(0, (event.width - self.home_banner_image.width()) // 2)
+                self.home_banner_canvas.coords(image_item, x, 0)
+
+            self.home_banner_canvas.bind("<Configure>", center_banner)
+
+        actions = ttk.Frame(parent)
+        actions.grid(row=1, column=0, sticky="ew", pady=(14, 12))
+        actions.columnconfigure(8, weight=1)
+        ttk.Button(actions, text="New Project", command=self.new_project).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(actions, text="Open Project", command=self.open_project).grid(
+            row=0, column=1, sticky="w", padx=(8, 0)
+        )
+        ttk.Button(
+            actions,
+            text="Download Data",
+            command=lambda: self.select_tab("Download"),
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="View Statistics",
+            command=lambda: self.select_tab("Statistics"),
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="GitHub",
+            command=self.open_github_repository,
+        ).grid(row=0, column=4, sticky="w", padx=(8, 0))
+
+        details = ttk.Frame(parent)
+        details.grid(row=2, column=0, sticky="nsew")
+        details.columnconfigure(0, weight=1)
+        details.columnconfigure(1, weight=1)
+        details.rowconfigure(1, weight=1)
+
+        project = ttk.LabelFrame(details, text="Current Project", padding=12)
+        project.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
+        project.columnconfigure(1, weight=1)
+        ttk.Label(project, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Label(project, textvariable=self.current_project_name_var).grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=(10, 0),
+        )
+        ttk.Label(project, text="Root").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(
+            project,
+            textvariable=self.current_project_root_var,
+            foreground="#555555",
+            wraplength=440,
+        ).grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(6, 0))
+        ttk.Label(
+            project,
+            textvariable=self.home_project_summary_var,
+            justify="left",
+            wraplength=520,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 0))
+
+        workflow = ttk.LabelFrame(details, text="Workflow Shortcuts", padding=12)
+        workflow.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
+        ttk.Label(
+            workflow,
+            text="Download > Duplicate Removal > Extraction > Mosaic > Upload > Statistics > Cleanup",
+            wraplength=470,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            workflow,
+            textvariable=self.home_workflow_summary_var,
+            foreground="#184a8b",
+            wraplength=470,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+        tiles = ttk.LabelFrame(details, text="Selected Download Tiles", padding=12)
+        tiles.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        tiles.columnconfigure(0, weight=1)
+        ttk.Label(
+            tiles,
+            textvariable=self.home_tile_summary_var,
+            wraplength=520,
+            justify="left",
+        ).grid(row=0, column=0, sticky="nw")
+
+        paths = ttk.LabelFrame(details, text="Project Folders", padding=12)
+        paths.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        paths.columnconfigure(0, weight=1)
+        ttk.Label(
+            paths,
+            textvariable=self.home_path_summary_var,
+            foreground="#555555",
+            wraplength=520,
+            justify="left",
+        ).grid(row=0, column=0, sticky="nw")
+
+    def select_tab(self, name: str) -> None:
+        """Select a top-level workflow tab by label."""
+        tab = getattr(self, "tabs_by_name", {}).get(name)
+        if tab is not None:
+            self.notebook.select(tab)
+
+    def open_github_repository(self) -> None:
+        """Open the GeeUp GitHub repository in the default browser."""
+        webbrowser.open(GITHUB_URL)
+
+    def refresh_home_summary(self) -> None:
+        """Refresh the Home tab's concise project and tile summary."""
+        if not hasattr(self, "home_project_summary_var"):
+            return
+        project_root = self.current_project_root_var.get().strip()
+        if project_root:
+            self.home_project_summary_var.set(
+                "Project mode is active. Saving the project keeps the current settings, "
+                "while manifests and reports keep the processing history."
+            )
+        else:
+            self.home_project_summary_var.set(
+                "No project is open. Create or open a project before running previews, "
+                "downloads, processing, uploads, or cleanup."
+            )
+
+        tiles = sorted(self.download_selected_tiles)
+        if tiles:
+            preview = ", ".join(tiles[:18])
+            if len(tiles) > 18:
+                preview = f"{preview}, ... +{len(tiles) - 18} more"
+            self.home_tile_summary_var.set(f"{len(tiles)} tile(s): {preview}")
+        else:
+            self.home_tile_summary_var.set(
+                "No UTM tiles selected. Use the Download tab, continent presets, or the UTM map selector."
+            )
+
+        self.home_path_summary_var.set(
+            "\n".join(
+                [
+                    f"Raw downloads: {self.processing_raw_downloads_var.get()}",
+                    f"Extracted GeoTIFFs: {self.processing_extracted_geotiffs_var.get()}",
+                    f"Mosaics: {self.processing_mosaics_var.get()}",
+                    f"Logs and manifests: {self.processing_logs_var.get()}",
+                ]
+            )
+        )
+        self.home_workflow_summary_var.set(
+            "Use Download for PO.DAAC search and retrieval, Statistics for QA/QC, "
+            "and Cleanup only after confirming downstream stages are complete."
+        )
 
     def build_project_bar(self, parent: ttk.Frame) -> None:
         """Create project controls above the processing tabs."""
@@ -1411,6 +1679,7 @@ class LauncherApp:
         ).grid(row=0, column=1, sticky="w", padx=(8, 0))
 
         inner = ttk.Notebook(parent)
+        self.statistics_notebook = inner
         inner.grid(row=2, column=0, sticky="nsew")
 
         overview = ttk.Frame(inner, padding=8)
@@ -2117,6 +2386,7 @@ class LauncherApp:
         )
         if selected:
             self.download_output_var.set(selected)
+            self.refresh_home_summary()
 
     def browse_download_report_file(self) -> None:
         """Let the user choose the download preview/report CSV path."""
@@ -2270,6 +2540,7 @@ class LauncherApp:
             data = self.build_config()
             self.write_config_data(data)
         self.load_saved_project_statistics()
+        self.refresh_home_summary()
 
     def try_auto_open_project_from_config(self) -> None:
         """Auto-open the project whose root is stored in the active config mirror."""
@@ -2291,6 +2562,7 @@ class LauncherApp:
         self.project_status_var.set(
             f"Project auto-opened from config.yaml: {project.name}"
         )
+        self.refresh_home_summary()
 
     def require_active_project(self, action: str = "continue") -> bool:
         """Require an explicitly active GUI project before writing or running tools."""
@@ -2502,6 +2774,7 @@ class LauncherApp:
         self.metadata_require_match_var.set(bool(metadata_data.get("require_match", True)))
         self.metadata_add_end_time_var.set(bool(metadata_data.get("add_end_time", True)))
         self.load_download_report_preview(limit=100)
+        self.refresh_home_summary()
 
     def browse_gdal_python(self) -> None:
         """Let the user choose the Python executable from the GDAL conda env."""
@@ -2548,6 +2821,7 @@ class LauncherApp:
         )
         if selected:
             self.extract_output_var.set(selected)
+            self.refresh_home_summary()
 
     def browse_extract_manifest_file(self) -> None:
         """Let the user choose the extraction manifest CSV path."""
@@ -2590,6 +2864,7 @@ class LauncherApp:
         )
         if selected:
             self.mosaic_output_var.set(selected)
+            self.refresh_home_summary()
 
     def browse_profile_folder(self) -> None:
         """Let the user choose a dedicated Chrome profile folder."""
@@ -2640,6 +2915,7 @@ class LauncherApp:
             ", ".join(sorted(self.download_selected_tiles))
         )
         self.refresh_download_tile_list()
+        self.refresh_home_summary()
 
     def apply_download_tiles_from_text(self) -> None:
         """Parse the selected-tile text box and apply it to the listbox."""
@@ -2651,12 +2927,14 @@ class LauncherApp:
         self.download_selected_tiles = set(tiles)
         self.download_selected_tiles_var.set(", ".join(tiles))
         self.refresh_download_tile_list()
+        self.refresh_home_summary()
 
     def clear_download_tiles(self) -> None:
         """Clear all selected UTM tiles."""
         self.download_selected_tiles.clear()
         self.download_selected_tiles_var.set("")
         self.refresh_download_tile_list()
+        self.refresh_home_summary()
 
     def set_download_tiles(self, tiles: list[str]) -> None:
         """Set the Download tab's canonical selected UTM tiles."""
@@ -2664,6 +2942,7 @@ class LauncherApp:
         self.download_selected_tiles = set(normalized)
         self.download_selected_tiles_var.set(", ".join(normalized))
         self.refresh_download_tile_list()
+        self.refresh_home_summary()
 
     def selected_upload_scope(self) -> str:
         """Return the config value for the selected Upload scope."""

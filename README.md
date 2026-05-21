@@ -1,5 +1,7 @@
 # GeeUp
 
+![GeeUp SWOT workflow banner](assets/geeup_home_banner.png)
+
 GeeUp is a local desktop workflow for SWOT L2 HR Raster 100 m data. It helps you download SWOT raster NetCDF files from NASA Earthdata / PO.DAAC, clean repeated product versions, extract GeoTIFFs, optionally build mosaics, upload outputs to Google Earth Engine, and audit the project afterwards.
 
 The main entry point is:
@@ -11,6 +13,7 @@ python geeup_gui.py
 ## What GeeUp Does
 
 - **Projects:** one folder per AOI or workflow, with project-specific raw downloads, extracted GeoTIFFs, mosaics, logs, presets, and settings.
+- **Home:** a visual landing tab with project status, workflow shortcuts, GitHub access, and selected-tile summary.
 - **Download:** searches and downloads PO.DAAC SWOT L2 HR Raster 100 m data through `earthaccess`, with date and UTM tile filtering.
 - **Duplicate Removal:** moves older local raw granule versions when several CRID/product-counter versions exist.
 - **Extraction:** converts SWOT NetCDF files into two-band GeoTIFFs with `wse` and `wse_qual`, with optional worker-based parallelism.
@@ -90,7 +93,7 @@ Large NetCDF, GeoTIFF, mosaic, report, and debug files stay in the project folde
 
 ## Repository Map
 
-- `geeup_gui.py`: desktop launcher with Download, Duplicate Removal, Extraction, Mosaic, Upload, Statistics, and Cleanup tools.
+- `geeup_gui.py`: desktop launcher with Home, Download, Duplicate Removal, Extraction, Mosaic, Upload, Statistics, and Cleanup tools.
 - `geeup_project.py`: project metadata, project folders, history, and tile profile helpers.
 - `swot_download_tool.py`: Earthdata / PO.DAAC search, preview, manifest, and download logic.
 - `swot_duplicate_remover.py`: local raw-file duplicate cleanup.
@@ -105,7 +108,9 @@ Large NetCDF, GeoTIFF, mosaic, report, and debug files stay in the project folde
 - `config.example.yaml`: tracked configuration template.
 - `environment_swot_gdal.yml`: conda environment definition for GDAL processing.
 - `requirements.txt`: `.venv` dependencies for the launcher, downloader, uploader, and Earth Engine utilities.
+- `assets/geeup_home_banner.png`: original GeeUp home banner displayed in the desktop app.
 - `Utils/delete_ee_collection_children.py`: optional Earth Engine ImageCollection cleanup utility.
+- `Utils/generate_home_banner.py`: standard-library utility that regenerates the bundled home banner asset.
 
 ## Documentation
 
