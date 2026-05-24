@@ -543,6 +543,62 @@ def cleanup_path_size(path: Path) -> int:
         return 0
 
 
+def geotiff_sidecar_paths(path: Path) -> List[Path]:
+    """Return expected GDAL sidecars for a GeoTIFF path."""
+    if path.suffix.lower() not in {".tif", ".tiff"}:
+        return []
+    return [
+        path.with_suffix(".tfw"),
+        path.with_suffix(f"{path.suffix}.aux.xml"),
+    ]
+
+
+def add_cleanup_candidate(
+    candidates: Dict[Path, CleanupCandidate],
+    *,
+    stage: str,
+    path: Path,
+    reason: str,
+    protected_by: str,
+) -> None:
+    """Add one existing file to the cleanup candidate map."""
+    if path.exists() and path.is_file():
+        candidates[path] = CleanupCandidate(
+            stage=stage,
+            path=path,
+            reason=reason,
+            protected_by=protected_by,
+            size_bytes=cleanup_path_size(path),
+        )
+
+
+def add_geotiff_candidate_with_sidecars(
+    candidates: Dict[Path, CleanupCandidate],
+    *,
+    stage: str,
+    path: Path,
+    reason: str,
+    sidecar_reason: str,
+    protected_by: str,
+) -> None:
+    """Add a GeoTIFF cleanup candidate and any existing GDAL sidecars."""
+    add_cleanup_candidate(
+        candidates,
+        stage=stage,
+        path=path,
+        reason=reason,
+        protected_by=protected_by,
+    )
+    for sidecar in geotiff_sidecar_paths(path):
+        add_cleanup_candidate(
+            candidates,
+            stage=stage,
+            path=sidecar,
+            reason=sidecar_reason,
+            protected_by=protected_by,
+        )
+
+
 def completed_extract_rows(rows: Iterable[Mapping[str, str]]) -> Iterable[Mapping[str, str]]:
     """Yield extract manifest rows that prove extraction happened."""
     for row in rows:
@@ -569,26 +625,25 @@ def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]
 
     for row in completed_extract_rows(read_csv_rows(extract_manifest)):
         path = Path(row.get("input_nc", ""))
-        if path.exists() and path.is_file():
-            candidates[path] = CleanupCandidate(
-                stage="raw",
-                path=path,
-                reason="Raw NetCDF has a completed extraction manifest row.",
-                protected_by=str(extract_manifest),
-                size_bytes=cleanup_path_size(path),
-            )
+        add_cleanup_candidate(
+            candidates,
+            stage="raw",
+            path=path,
+            reason="Raw NetCDF has a completed extraction manifest row.",
+            protected_by=str(extract_manifest),
+        )
 
     for row in completed_mosaic_rows(read_csv_rows(mosaic_manifest)):
         for source in parse_json_list(row.get("input_files", "")):
             path = Path(source)
-            if path.exists() and path.is_file():
-                candidates[path] = CleanupCandidate(
-                    stage="extracted",
-                    path=path,
-                    reason="Extracted GeoTIFF is recorded as a source of a completed mosaic group.",
-                    protected_by=str(mosaic_manifest),
-                    size_bytes=cleanup_path_size(path),
-                )
+            add_geotiff_candidate_with_sidecars(
+                candidates,
+                stage="extracted",
+                path=path,
+                reason="Extracted GeoTIFF is recorded as a source of a completed mosaic group.",
+                sidecar_reason="Extracted GeoTIFF sidecar belongs to a completed mosaic source.",
+                protected_by=str(mosaic_manifest),
+            )
 
     upload_rows = merge_upload_rows_with_ee_inventory(
         read_csv_rows(upload_report),
@@ -598,14 +653,14 @@ def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]
         if row.get("final_status", "").upper() not in UPLOAD_CLEANUP_STATUSES:
             continue
         path = Path(row.get("local_file", ""))
-        if path.exists() and path.is_file():
-            candidates[path] = CleanupCandidate(
-                stage="mosaic",
-                path=path,
-                reason="Mosaic GeoTIFF is recorded as uploaded or already existing in Earth Engine.",
-                protected_by=str(upload_report),
-                size_bytes=cleanup_path_size(path),
-            )
+        add_geotiff_candidate_with_sidecars(
+            candidates,
+            stage="mosaic",
+            path=path,
+            reason="Mosaic GeoTIFF is recorded as uploaded or already existing in Earth Engine.",
+            sidecar_reason="Mosaic GeoTIFF sidecar belongs to an uploaded or EE-verified mosaic.",
+            protected_by=str(upload_report),
+        )
 
     return sorted(candidates.values(), key=lambda item: (item.stage, str(item.path).lower()))
 

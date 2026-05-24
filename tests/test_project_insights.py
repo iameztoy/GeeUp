@@ -84,6 +84,10 @@ class ProjectInsightsTests(unittest.TestCase):
             for path in (raw, moved, extracted, mosaic):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"12345")
+            extracted.with_suffix(".tfw").write_bytes(b"tfw")
+            extracted.with_suffix(".tif.aux.xml").write_bytes(b"aux")
+            mosaic.with_suffix(".tfw").write_bytes(b"tfw")
+            mosaic.with_suffix(".tif.aux.xml").write_bytes(b"aux")
 
             logs = root / "00_logs"
             write_csv(
@@ -202,7 +206,12 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertIn(("UTM34M", 3), insights.tile_counts)
             self.assertIn(("UTM34M", 1), insights.mosaic_output_grid_counts)
             self.assertIn(("UTM34M", 1), insights.mosaic_source_tile_counts)
-            self.assertEqual([candidate.stage for candidate in candidates], ["extracted", "mosaic", "raw"])
+            self.assertEqual(
+                [candidate.stage for candidate in candidates],
+                ["extracted", "extracted", "extracted", "mosaic", "mosaic", "mosaic", "raw"],
+            )
+            self.assertIn(extracted.with_suffix(".tfw"), [candidate.path for candidate in candidates])
+            self.assertIn(mosaic.with_suffix(".tif.aux.xml"), [candidate.path for candidate in candidates])
 
     def test_ee_inventory_recovers_filtered_upload_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -214,6 +223,8 @@ class ProjectInsightsTests(unittest.TestCase):
             )
             mosaic.parent.mkdir(parents=True, exist_ok=True)
             mosaic.write_bytes(b"12345")
+            mosaic.with_suffix(".tfw").write_bytes(b"tfw")
+            mosaic.with_suffix(".tif.aux.xml").write_bytes(b"aux")
             asset_id = "projects/example/assets/SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_20260102T000000_20260102T010000_PGD0_02"
             logs = root / "00_logs"
             write_csv(
@@ -246,7 +257,42 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertIn(("EE_VERIFIED_EXISTS", 1), insights.upload_status_counts)
             self.assertIn(("UTM34M", 1), insights.uploaded_tile_counts)
             self.assertEqual(insights.metrics["Uploaded/already-existing assets recorded"], "1")
-            self.assertEqual([candidate.stage for candidate in candidates], ["mosaic"])
+            self.assertEqual([candidate.stage for candidate in candidates], ["mosaic", "mosaic", "mosaic"])
+
+    def test_orphan_uploaded_mosaic_sidecars_are_cleanup_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            mosaic = root / "03_mosaics" / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_"
+                "20260102T000000_20260102T010000_PGD0_02.tif"
+            )
+            mosaic.parent.mkdir(parents=True, exist_ok=True)
+            mosaic.with_suffix(".tfw").write_bytes(b"tfw")
+            mosaic.with_suffix(".tif.aux.xml").write_bytes(b"aux")
+            write_csv(
+                root / "00_logs" / "upload_report.csv",
+                [
+                    {
+                        "local_file": str(mosaic),
+                        "asset_id": "projects/example/assets/mosaic",
+                        "final_status": "EE_VERIFIED_EXISTS",
+                    }
+                ],
+            )
+
+            candidates = plan_cleanup_candidates(config)
+            deleted, bytes_deleted, errors = delete_cleanup_candidates(candidates)
+
+            self.assertCountEqual([candidate.path.name for candidate in candidates], [
+                mosaic.with_suffix(".tif.aux.xml").name,
+                mosaic.with_suffix(".tfw").name,
+            ])
+            self.assertEqual(deleted, 2)
+            self.assertEqual(bytes_deleted, 6)
+            self.assertEqual(errors, [])
+            self.assertFalse(mosaic.with_suffix(".tfw").exists())
+            self.assertFalse(mosaic.with_suffix(".tif.aux.xml").exists())
 
     def test_common_crs_mosaic_reports_source_tile_participation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

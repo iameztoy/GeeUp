@@ -1370,7 +1370,35 @@ class LauncherApp:
 
     def build_upload_tab(self, parent: ttk.Frame) -> None:
         """Create the existing Earth Engine upload controls."""
+        outer_parent = parent
+        outer_parent.columnconfigure(0, weight=1)
+        outer_parent.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(outer_parent, borderwidth=0, highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(outer_parent, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        content = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(window_id, width=event.width),
+        )
+        parent = content
         parent.columnconfigure(0, weight=1)
+
+        execution = ttk.LabelFrame(outer_parent, text="Execution", padding=12)
+        execution.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        execution.columnconfigure(4, weight=1)
+
+        progress_footer = ttk.Frame(outer_parent)
+        progress_footer.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
         form = ttk.Frame(parent)
         form.grid(row=0, column=0, sticky="nsew")
@@ -1572,8 +1600,7 @@ class LauncherApp:
             variable=self.metadata_add_end_time_var,
         ).grid(row=4, column=0, sticky="w", padx=(0, 18), pady=4)
 
-        buttons = ttk.LabelFrame(parent, text="Execution", padding=12)
-        buttons.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        buttons = execution
         buttons.columnconfigure(0, weight=1)
 
         ttk.Button(
@@ -1599,8 +1626,7 @@ class LauncherApp:
             wraplength=900,
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
-        progress = ttk.Frame(parent)
-        progress.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        progress = progress_footer
         progress.columnconfigure(0, weight=1)
         ttk.Progressbar(
             progress,
@@ -1615,7 +1641,7 @@ class LauncherApp:
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         notes = ttk.LabelFrame(parent, text="Notes", padding=12)
-        notes.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        notes.grid(row=2, column=0, sticky="ew", pady=(14, 0))
         ttk.Label(
             notes,
             text=(
