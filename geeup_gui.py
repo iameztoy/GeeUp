@@ -291,6 +291,7 @@ class LauncherApp:
         self.tile_preset_var = tk.StringVar(value="")
         self.tile_preset_choices: dict[str, TilePreset] = {}
         self.upload_stats_poll_after_id: str | None = None
+        self.upload_report_update_callback: Optional[Callable[[], None]] = None
 
         self.duplicate_input_var = tk.StringVar(
             value=duplicate_data.get("input_folder", raw_downloads)
@@ -2088,27 +2089,33 @@ class LauncherApp:
 
         actions = ttk.Frame(parent)
         actions.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        actions.columnconfigure(3, weight=1)
+        actions.columnconfigure(4, weight=1)
+        ttk.Button(
+            actions,
+            text="Sync EE Assets + Preview Cleanup",
+            command=self.sync_ee_assets_for_cleanup,
+        ).grid(row=0, column=0, sticky="w")
         ttk.Button(
             actions,
             text="Preview Cleanup",
             command=self.preview_cleanup_candidates,
-        ).grid(row=0, column=0, sticky="w")
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Button(
             actions,
             text="Delete Selected Cleanup Files",
             command=self.delete_selected_cleanup_files,
-        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
         ttk.Button(
             actions,
             text="Delete All Cleanup Candidates",
             command=self.delete_all_cleanup_files,
-        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
 
         ttk.Label(
             parent,
             text=(
                 "Cleanup candidates are local intermediate files with downstream manifest proof. "
+                "Before deleting mosaics, sync Earth Engine assets so upload verification is current. "
                 "Preview first, then delete selected rows or all candidates."
             ),
             foreground="#555555",
@@ -5432,7 +5439,36 @@ class LauncherApp:
             return
         self.launch_uploader(dry_run=False, sync_only=True)
 
-    def launch_uploader(self, dry_run: bool, sync_only: bool = False) -> None:
+    def sync_ee_assets_for_cleanup(self) -> None:
+        """Sync EE assets, then refresh cleanup candidates when the report changes."""
+        if not self.save_config(
+            notify=False,
+            validate_upload=True,
+            validate_mosaic=False,
+        ):
+            return
+        self.cleanup_status_var.set(
+            "Started EE asset sync for cleanup. Waiting for upload_report.csv to update..."
+        )
+        self.launch_uploader(
+            dry_run=False,
+            sync_only=True,
+            after_report_update=self.preview_cleanup_after_ee_sync,
+        )
+
+    def preview_cleanup_after_ee_sync(self) -> None:
+        """Refresh cleanup candidates after an EE sync updates the upload report."""
+        self.cleanup_status_var.set(
+            "EE asset sync updated the upload report. Refreshing cleanup candidates..."
+        )
+        self.preview_cleanup_candidates(notify=False)
+
+    def launch_uploader(
+        self,
+        dry_run: bool,
+        sync_only: bool = False,
+        after_report_update: Optional[Callable[[], None]] = None,
+    ) -> None:
         """Start the CLI uploader in a new console window when possible."""
         upload_report_path = self.current_upload_report_path()
         upload_report_mtime = self.file_mtime_ns(upload_report_path)
@@ -5459,6 +5495,7 @@ class LauncherApp:
             return
 
         run_type = "EE asset sync" if sync_only else "dry run" if dry_run else "real upload"
+        self.upload_report_update_callback = after_report_update
         self.upload_progress_var.set(0.0)
         self.upload_progress_text_var.set(
             f"Progress: started {run_type}; waiting for report updates..."
@@ -5577,8 +5614,13 @@ class LauncherApp:
         if current_mtime is not None and current_mtime != previous_mtime:
             self.refresh_project_statistics_if_active("upload report")
             previous_mtime = current_mtime
+            callback = self.upload_report_update_callback
+            if callback is not None:
+                self.upload_report_update_callback = None
+                callback()
         if remaining_polls <= 0:
             self.upload_stats_poll_after_id = None
+            self.upload_report_update_callback = None
             return
         self.upload_stats_poll_after_id = self.root.after(
             5000,

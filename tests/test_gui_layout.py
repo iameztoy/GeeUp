@@ -187,6 +187,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertGreaterEqual(len(collect_widgets(upload_tab, ttk.Progressbar)), 1)
             self.assertIn("Refresh Statistics", collect_button_texts(statistics_tab))
             self.assertNotIn("Preview Cleanup", collect_button_texts(statistics_tab))
+            self.assertIn("Sync EE Assets + Preview Cleanup", collect_button_texts(cleanup_tab))
             self.assertIn("Preview Cleanup", collect_button_texts(cleanup_tab))
             self.assertIn("Delete Selected Cleanup Files", collect_button_texts(cleanup_tab))
             self.assertIn("Delete All Cleanup Candidates", collect_button_texts(cleanup_tab))
@@ -334,6 +335,41 @@ class GuiLayoutTests(unittest.TestCase):
                 refresh.assert_called_once_with("upload report")
             finally:
                 root.destroy()
+
+    def test_upload_report_poll_runs_one_shot_cleanup_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = Path(temp) / "upload_report.csv"
+            report.write_text("final_status\nCOMPLETED\n", encoding="utf-8")
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                app = LauncherApp(root)
+                callback = mock.Mock()
+                app.upload_report_update_callback = callback
+
+                app.poll_upload_statistics_report(str(report), None, 0)
+
+                callback.assert_called_once()
+                self.assertIsNone(app.upload_report_update_callback)
+            finally:
+                root.destroy()
+
+    def test_cleanup_sync_starts_sync_only_with_preview_callback(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            with mock.patch.object(app, "save_config", return_value=True) as save:
+                with mock.patch.object(app, "launch_uploader") as launch:
+                    app.sync_ee_assets_for_cleanup()
+
+            save.assert_called_once()
+            _args, kwargs = launch.call_args
+            self.assertFalse(kwargs["dry_run"])
+            self.assertTrue(kwargs["sync_only"])
+            self.assertEqual(kwargs["after_report_update"], app.preview_cleanup_after_ee_sync)
+        finally:
+            root.destroy()
 
     def test_upload_report_progress_counts_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
