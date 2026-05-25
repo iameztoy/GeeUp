@@ -104,7 +104,7 @@ Large NetCDF, GeoTIFF, mosaic, report, and debug files stay in the project folde
 - `utm_map_selector.py`: pure Tkinter visual UTM tile selector.
 - `build_spatial_presets.py`: offline builder for continent and UTM display preset JSON.
 - `swot_metadata.py`: shared SWOT filename parser.
-- `selectors.py`: Earth Engine web UI selectors used by the uploader.
+- `ee_selectors.py`: Earth Engine web UI selectors used by the uploader.
 - `config.example.yaml`: tracked configuration template.
 - `environment_swot_gdal.yml`: conda environment definition for GDAL processing.
 - `requirements.txt`: `.venv` dependencies for the launcher, downloader, uploader, and Earth Engine utilities.

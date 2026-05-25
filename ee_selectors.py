@@ -12,20 +12,11 @@ import sysconfig
 from typing import Dict, List, Tuple
 from pathlib import Path
 
-from selenium.webdriver.common.by import By
-
 Locator = Tuple[str, str]
 
 
 def _load_stdlib_selectors() -> None:
-    """Expose the real stdlib selectors symbols to avoid module shadowing issues.
-
-    This project intentionally uses the filename selectors.py because the user
-    asked for it. Python also has a standard-library module with the same name.
-    Selenium itself imports the stdlib version before this module is loaded, but
-    other libraries may import it later. Re-exporting the stdlib symbols here
-    keeps those later imports working.
-    """
+    """Expose real stdlib selectors symbols if legacy imports hit this module."""
 
     stdlib_path = Path(sysconfig.get_paths()["stdlib"]) / "selectors.py"
     spec = importlib.util.spec_from_file_location("_stdlib_selectors", stdlib_path)
@@ -40,6 +31,8 @@ def _load_stdlib_selectors() -> None:
 
 
 _load_stdlib_selectors()
+
+from selenium.webdriver.common.by import By
 
 
 def _ci_contains(text: str, target: str = ".") -> str:

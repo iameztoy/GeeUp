@@ -87,7 +87,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.select import Select
 from selenium.webdriver.support.ui import WebDriverWait
 
-import selectors as ee_selectors
+import ee_selectors
 from swot_metadata import (
     DEFAULT_METADATA_EXTRA_PROPERTIES,
     ParsedMetadata,
@@ -1891,7 +1891,7 @@ class EarthEngineUIUploader:
             time.sleep(self.config.execution.short_ui_wait_seconds)
         except TimeoutException:
             self.logger.warning(
-                "Pyramiding policy section was not found. Edit selectors.py if the UI changed."
+                "Pyramiding policy section was not found. Edit ee_selectors.py if the UI changed."
             )
             raise RetryableUIError("Could not find the pyramiding policy section.")
 
