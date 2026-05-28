@@ -10,7 +10,7 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 import tkinter as tk
 from tkinter import ttk
 
-from geeup_project import TilePreset
+from swotflow_project import TilePreset
 from swot_download_tool import normalize_utm_tiles
 
 
@@ -622,6 +622,7 @@ class UTMMapSelectorDialog(tk.Toplevel):
         apply_callback: Callable[[List[str]], None],
         preset_choices: Mapping[str, TilePreset] | None = None,
         coverage_tiles: Sequence[str] | None = None,
+        status_rows: Sequence[Sequence[object]] | None = None,
     ) -> None:
         super().__init__(master)
         self.title("UTM Tile Map Selector")
@@ -632,6 +633,13 @@ class UTMMapSelectorDialog(tk.Toplevel):
         self.preset_choices = dict(preset_choices or {})
         self.selected_tiles = set(normalize_utm_tiles(selected_tiles))
         self.coverage_tiles = set(normalize_utm_tiles(coverage_tiles or []))
+        self.tile_statuses: Dict[str, TilePipelineStatus] = {}
+        for row in status_rows or []:
+            try:
+                status = pipeline_status_from_qa_row(row)
+            except (TypeError, ValueError):
+                continue
+            self.tile_statuses[status.token] = status
         self.transform = CanvasTransform(
             self.geometry_data.bounds,
             self.canvas_width,
@@ -726,7 +734,13 @@ class UTMMapSelectorDialog(tk.Toplevel):
         for token, tile in self.geometry_data.tiles.items():
             is_selected = token in self.selected_tiles
             is_covered = token in self.coverage_tiles
-            if is_selected and is_covered:
+            status = self.tile_statuses.get(token)
+            if status is not None:
+                style = PIPELINE_STATUS_STYLES.get(status.status, PIPELINE_STATUS_STYLES["none"])
+                fill = style["fill"]
+                outline = "#184a8b" if is_selected else style["outline"]
+                width = 2.0 if is_selected else 0.9
+            elif is_selected and is_covered:
                 fill = "#2f9e7e"
                 outline = "#12614c"
                 width = 1.3

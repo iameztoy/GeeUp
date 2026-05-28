@@ -1,1 +1,1 @@
-"""Test package for GeeUp."""
+"""Test package for SWOTFlow."""

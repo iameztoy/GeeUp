@@ -1,19 +1,20 @@
-# GeeUp
+# SWOTFlow
 
-![GeeUp SWOT workflow banner](assets/geeup_home_banner.png)
+![SWOTFlow workflow banner](assets/swotflow_home_banner.png)
 
-GeeUp is a local desktop workflow for SWOT L2 HR Raster 100 m data. It helps you download SWOT raster NetCDF files from NASA Earthdata / PO.DAAC, clean repeated product versions, extract GeoTIFFs, optionally build mosaics, upload outputs to Google Earth Engine, and audit the project afterwards.
+SWOTFlow is a local desktop workflow for SWOT L2 HR Raster 100 m data. It helps you download SWOT raster NetCDF files from NASA Earthdata / PO.DAAC, clean repeated product versions, extract GeoTIFFs, optionally build mosaics, upload outputs to Google Earth Engine, and audit the project afterwards.
 
 The main entry point is:
 
 ```powershell
-python geeup_gui.py
+python swotflow_gui.py
 ```
 
-## What GeeUp Does
+## What SWOTFlow Does
 
 - **Projects:** one folder per AOI or workflow, with project-specific raw downloads, extracted GeoTIFFs, mosaics, logs, presets, and settings.
 - **Home:** a visual landing tab with project status, workflow shortcuts, GitHub access, and selected-tile summary.
+- **Automation:** runs the project workflow tile by tile after a required preflight, with resumable manifests and verified-stage cleanup.
 - **Download:** searches and downloads PO.DAAC SWOT L2 HR Raster 100 m data through `earthaccess`, with date and UTM tile filtering.
 - **Duplicate Removal:** moves older local raw granule versions when several CRID/product-counter versions exist.
 - **Extraction:** converts SWOT NetCDF files into two-band GeoTIFFs with `wse` and `wse_qual`, with optional worker-based parallelism.
@@ -24,7 +25,7 @@ python geeup_gui.py
 
 ## Basic Workflow
 
-1. Create or open a GeeUp project.
+1. Create or open a SWOTFlow project.
 2. In **Download**, authenticate with Earthdata, choose dates and UTM tiles, preview the search, then download.
 3. Run **Duplicate Removal** if you downloaded all product versions or want an extra local cleanup pass.
 4. In **Extraction**, convert cleaned raw NetCDF files to GeoTIFFs using the GDAL conda runtime.
@@ -35,11 +36,11 @@ python geeup_gui.py
 
 ## Important Warnings
 
-- GeeUp is an unofficial Earth Engine browser automation helper. If Google changes the Earth Engine web UI, selectors may need maintenance.
+- SWOTFlow is an unofficial Earth Engine browser automation helper. If Google changes the Earth Engine web UI, selectors may need maintenance.
 - Browser upload mode does **not** use Google Cloud Storage buckets. It uses a normal Chrome profile and sends local GeoTIFF paths to the Earth Engine upload dialog.
 - The project intentionally uses two Python environments: `.venv` for the GUI/download/upload utilities, and a GDAL conda environment for extraction and mosaicking.
 - Do not store Earthdata or Google credentials in `config.yaml`. Earthdata login is handled by `earthaccess`; Earth Engine login is handled through Chrome and, for asset listing, the Earth Engine Python API authentication.
-- Use a GeeUp project before previewing, downloading, processing, or uploading. `config.yaml` is only the active session mirror and may contain paths from a previous session.
+- Use a SWOTFlow project before previewing, downloading, processing, or uploading. `config.yaml` is only the active session mirror and may contain paths from a previous session.
 
 ## Quick Start
 
@@ -70,14 +71,14 @@ conda env create --prefix .\.conda\swot_gdal --file environment_swot_gdal.yml
 Start the desktop app:
 
 ```powershell
-python geeup_gui.py
+python swotflow_gui.py
 ```
 
 For full setup and first-run details, see [GETTING_STARTED.md](./GETTING_STARTED.md).
 
 ## Project Folder Structure
 
-A GeeUp project keeps settings and intermediate files together:
+A SWOTFlow project keeps settings and intermediate files together:
 
 ```text
 <project_root>\project.yaml
@@ -93,8 +94,9 @@ Large NetCDF, GeoTIFF, mosaic, report, and debug files stay in the project folde
 
 ## Repository Map
 
-- `geeup_gui.py`: desktop launcher with Home, Download, Duplicate Removal, Extraction, Mosaic, Upload, Statistics, and Cleanup tools.
-- `geeup_project.py`: project metadata, project folders, history, and tile profile helpers.
+- `swotflow_gui.py`: desktop launcher with Home, Automation, Download, Duplicate Removal, Extraction, Mosaic, Upload, Statistics, and Cleanup tools.
+- `swotflow_automation.py`: tile-by-tile unattended workflow orchestration.
+- `swotflow_project.py`: project metadata, project folders, history, and tile profile helpers.
 - `swot_download_tool.py`: Earthdata / PO.DAAC search, preview, manifest, and download logic.
 - `swot_duplicate_remover.py`: local raw-file duplicate cleanup.
 - `swot_extract_tool.py`: GDAL-backed SWOT NetCDF to GeoTIFF extraction.
@@ -108,7 +110,7 @@ Large NetCDF, GeoTIFF, mosaic, report, and debug files stay in the project folde
 - `config.example.yaml`: tracked configuration template.
 - `environment_swot_gdal.yml`: conda environment definition for GDAL processing.
 - `requirements.txt`: `.venv` dependencies for the launcher, downloader, uploader, and Earth Engine utilities.
-- `assets/geeup_home_banner.png`: original GeeUp home banner displayed in the desktop app.
+- `assets/swotflow_home_banner.png`: original SWOTFlow home banner displayed in the desktop app.
 - `Utils/delete_ee_collection_children.py`: optional Earth Engine ImageCollection cleanup utility.
 - `Utils/generate_home_banner.py`: standard-library utility that regenerates the bundled home banner asset.
 

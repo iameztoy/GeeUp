@@ -9,8 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from geeup_gui import LauncherApp
-from geeup_project import create_project, load_project_tile_profiles
+from swotflow_gui import LauncherApp
+from swotflow_project import create_project, load_project_tile_profiles
 from utm_map_selector import DisplayTile, UTMDisplayGeometry
 
 
@@ -113,6 +113,7 @@ class GuiLayoutTests(unittest.TestCase):
                 tab_texts,
                 [
                     "Home",
+                    "Automation",
                     "Download",
                     "Duplicate Removal",
                     "Extraction",
@@ -128,10 +129,14 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Prepare Update", collect_button_texts(app.root))
             self.assertIn("Download Data", collect_button_texts(app.root))
             self.assertIn("View Statistics", collect_button_texts(app.root))
+            self.assertIn("README", collect_button_texts(app.root))
+            self.assertIn("Getting Started", collect_button_texts(app.root))
+            self.assertIn("Processing Guide", collect_button_texts(app.root))
             self.assertIn("GitHub", collect_button_texts(app.root))
             self.assertNotIn("Save Config", collect_button_texts(app.root))
             (
                 home_tab,
+                automation_tab,
                 download_tab,
                 duplicate_tab,
                 extract_tab,
@@ -141,9 +146,19 @@ class GuiLayoutTests(unittest.TestCase):
                 cleanup_tab,
             ) = notebook.winfo_children()
             self.assertIn("Current Project", collect_label_texts(home_tab))
+            self.assertIn("Project And Documentation", collect_label_texts(home_tab))
             self.assertIn("Workflow Shortcuts", collect_label_texts(home_tab))
             self.assertIn("Selected Download Tiles", collect_label_texts(home_tab))
             self.assertIn("Project Folders", collect_label_texts(home_tab))
+            self.assertIn("Automation Settings", collect_label_texts(automation_tab))
+            self.assertIn("Automation UTM Tiles", collect_label_texts(automation_tab))
+            self.assertIn("Automation Queue And Results", collect_label_texts(automation_tab))
+            self.assertIn("Copy Download Date Range", collect_button_texts(automation_tab))
+            self.assertIn("Run Preflight", collect_button_texts(automation_tab))
+            self.assertIn("Start Automation", collect_button_texts(automation_tab))
+            self.assertIn("Stop After Current Stage", collect_button_texts(automation_tab))
+            self.assertGreaterEqual(len(collect_widgets(automation_tab, ttk.Progressbar)), 1)
+            self.assertGreaterEqual(len(collect_widgets(automation_tab, ttk.Treeview)), 1)
             self.assertIn("Collection", collect_label_texts(download_tab))
             self.assertIn("Product version filter", collect_label_texts(download_tab))
             self.assertIn("Start date", collect_label_texts(download_tab))
@@ -202,6 +217,53 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_automation_date_status_and_copy_from_download(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            app.download_start_date_var.set("2024-01-01")
+            app.download_end_date_var.set("2024-12-31")
+            app.automation_start_date_var.set("2024-01-01")
+            app.automation_end_date_var.set("2024-06-30")
+
+            app.update_automation_date_status()
+
+            self.assertIn("differ", app.automation_date_status_var.get())
+            self.assertFalse(app.automation_dates_match_download())
+
+            app.copy_download_dates_to_automation()
+
+            self.assertTrue(app.automation_dates_match_download())
+            self.assertEqual(app.automation_start_date_var.get(), "2024-01-01")
+            self.assertEqual(app.automation_end_date_var.get(), "2024-12-31")
+            self.assertIn("matches", app.automation_date_status_var.get())
+        finally:
+            root.destroy()
+
+    def test_automation_map_uses_cached_statistics_overlay(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            status_rows = [
+                ("UTM34M", 2, 2, 2, 2, 0),
+                ("UTM35M", 0, 1, 1, 0, 1),
+            ]
+            app.latest_project_insights = SimpleNamespace(upload_qa_tile_rows=status_rows)
+            app.set_automation_tiles(["UTM34M"])
+            with mock.patch("swotflow_gui.load_display_geometry", return_value=object()):
+                with mock.patch("swotflow_gui.collect_project_insights") as collect:
+                    with mock.patch("swotflow_gui.UTMMapSelectorDialog") as dialog:
+                        app.open_automation_map_selector()
+
+            collect.assert_not_called()
+            _args, kwargs = dialog.call_args
+            self.assertEqual(kwargs["status_rows"], status_rows)
+            self.assertEqual(kwargs["coverage_tiles"], ["UTM34M"])
+        finally:
+            root.destroy()
+
     def test_gui_auto_opens_project_from_config_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project_root = Path(temp) / "AutoProject"
@@ -209,7 +271,7 @@ class GuiLayoutTests(unittest.TestCase):
             root = tk.Tk()
             root.withdraw()
             try:
-                with mock.patch("geeup_gui.load_config", return_value=project.config):
+                with mock.patch("swotflow_gui.load_config", return_value=project.config):
                     app = LauncherApp(root)
 
                 self.assertEqual(app.current_project_name_var.get(), "Auto Project")
@@ -224,9 +286,9 @@ class GuiLayoutTests(unittest.TestCase):
             root = tk.Tk()
             root.withdraw()
             try:
-                with mock.patch("geeup_gui.load_config", return_value=config):
+                with mock.patch("swotflow_gui.load_config", return_value=config):
                     app = LauncherApp(root)
-                with mock.patch("geeup_gui.messagebox.showwarning") as warning:
+                with mock.patch("swotflow_gui.messagebox.showwarning") as warning:
                     saved = app.save_config(notify=False, validate_upload=False)
 
                 self.assertFalse(saved)
@@ -241,9 +303,9 @@ class GuiLayoutTests(unittest.TestCase):
         try:
             app = LauncherApp(root)
             app.set_download_tiles(["UTM34M", "UTM35M"])
-            with mock.patch("geeup_gui.load_display_geometry", return_value=object()):
-                with mock.patch("geeup_gui.manifest_downloaded_tiles", return_value=["UTM33M"]):
-                    with mock.patch("geeup_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("swotflow_gui.load_display_geometry", return_value=object()):
+                with mock.patch("swotflow_gui.manifest_downloaded_tiles", return_value=["UTM33M"]):
+                    with mock.patch("swotflow_gui.UTMMapSelectorDialog") as dialog:
                         app.open_utm_map_selector()
 
             args, kwargs = dialog.call_args
@@ -259,8 +321,8 @@ class GuiLayoutTests(unittest.TestCase):
         try:
             app = LauncherApp(root)
             app.set_download_tiles(["UTM34M", "UTM35M"])
-            with mock.patch("geeup_gui.load_display_geometry", return_value=object()):
-                with mock.patch("geeup_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("swotflow_gui.load_display_geometry", return_value=object()):
+                with mock.patch("swotflow_gui.UTMMapSelectorDialog") as dialog:
                     app.open_utm_map_selector()
 
             args, kwargs = dialog.call_args
@@ -294,7 +356,7 @@ class GuiLayoutTests(unittest.TestCase):
                 stdout="done",
                 stderr="",
             )
-            with mock.patch("geeup_gui.messagebox.showinfo"):
+            with mock.patch("swotflow_gui.messagebox.showinfo"):
                 with mock.patch.object(app, "refresh_project_statistics_if_active") as refresh:
                     app.finish_duplicate_process(result, dry_run=False)
 
@@ -313,7 +375,7 @@ class GuiLayoutTests(unittest.TestCase):
                 stdout="done",
                 stderr="",
             )
-            with mock.patch("geeup_gui.messagebox.showinfo"):
+            with mock.patch("swotflow_gui.messagebox.showinfo"):
                 with mock.patch.object(app, "refresh_project_statistics_if_active") as refresh:
                     app.finish_duplicate_process(result, dry_run=True)
 
@@ -473,8 +535,8 @@ class GuiLayoutTests(unittest.TestCase):
             app = LauncherApp(root)
             app.tile_preset_var.set("Continent: Africa")
             app.apply_tile_preset()
-            with mock.patch("geeup_gui.load_display_geometry", return_value=object()):
-                with mock.patch("geeup_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("swotflow_gui.load_display_geometry", return_value=object()):
+                with mock.patch("swotflow_gui.UTMMapSelectorDialog") as dialog:
                     app.open_utm_map_selector()
 
             args, _kwargs = dialog.call_args
@@ -598,7 +660,7 @@ class GuiLayoutTests(unittest.TestCase):
                 cleanup_candidates=[],
             )
 
-            with mock.patch("geeup_gui.load_display_geometry", return_value=geometry):
+            with mock.patch("swotflow_gui.load_display_geometry", return_value=geometry):
                 app.display_project_statistics(
                     insights,
                     status_text="Project statistics refreshed.",
@@ -635,8 +697,8 @@ class GuiLayoutTests(unittest.TestCase):
                 app.apply_project(project, write_config=False)
                 app.set_download_tiles(["UTM34K", "UTM34L"])
 
-                with mock.patch("geeup_gui.simpledialog.askstring", return_value="Okavango Delta"):
-                    with mock.patch("geeup_gui.messagebox.showinfo"):
+                with mock.patch("swotflow_gui.simpledialog.askstring", return_value="Okavango Delta"):
+                    with mock.patch("swotflow_gui.messagebox.showinfo"):
                         app.save_selected_tiles_as_preset()
 
                 presets = load_project_tile_profiles(project.root)

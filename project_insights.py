@@ -1,4 +1,4 @@
-"""Project statistics and conservative cleanup planning for GeeUp."""
+"""Project statistics and conservative cleanup planning for SWOTFlow."""
 
 from __future__ import annotations
 

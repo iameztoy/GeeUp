@@ -1,4 +1,4 @@
-"""Project and tile-preset helpers for GeeUp workflows."""
+"""Project and tile-preset helpers for SWOTFlow workflows."""
 
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ PROJECT_FOLDERS = {
 
 
 @dataclass
-class GeeUpProject:
-    """A saved GeeUp project rooted at one local folder."""
+class SWOTFlowProject:
+    """A saved SWOTFlow project rooted at one local folder."""
 
     name: str
     root: Path
@@ -74,7 +74,7 @@ def project_file_path(path: str | Path) -> Path:
 
 
 def project_paths(root: str | Path) -> Dict[str, Path]:
-    """Return the canonical folders for one GeeUp project root."""
+    """Return the canonical folders for one SWOTFlow project root."""
     root_path = Path(root)
     return {key: root_path / folder for key, folder in PROJECT_FOLDERS.items()}
 
@@ -154,8 +154,8 @@ def config_for_project(base_config: Mapping[str, Any], root: str | Path) -> Dict
     return config
 
 
-def save_project(project: GeeUpProject) -> Path:
-    """Write a GeeUp project YAML file."""
+def save_project(project: SWOTFlowProject) -> Path:
+    """Write a SWOTFlow project YAML file."""
     ensure_project_structure(project.root)
     created_at = project.created_at or now_iso()
     updated_at = now_iso()
@@ -178,12 +178,12 @@ def save_project(project: GeeUpProject) -> Path:
     return path
 
 
-def create_project(root: str | Path, name: str, base_config: Mapping[str, Any]) -> GeeUpProject:
+def create_project(root: str | Path, name: str, base_config: Mapping[str, Any]) -> SWOTFlowProject:
     """Create a project structure and initial project.yaml from a base config."""
     root_path = Path(root)
     ensure_project_structure(root_path)
-    project = GeeUpProject(
-        name=name.strip() or root_path.name or "GeeUp Project",
+    project = SWOTFlowProject(
+        name=name.strip() or root_path.name or "SWOTFlow Project",
         root=root_path,
         config=config_for_project(base_config, root_path),
         download_history=[],
@@ -193,7 +193,7 @@ def create_project(root: str | Path, name: str, base_config: Mapping[str, Any]) 
     return project
 
 
-def load_project(path: str | Path) -> GeeUpProject:
+def load_project(path: str | Path) -> SWOTFlowProject:
     """Load a project from a project root or project.yaml path."""
     project_file = project_file_path(path)
     with project_file.open("r", encoding="utf-8") as handle:
@@ -202,8 +202,8 @@ def load_project(path: str | Path) -> GeeUpProject:
     root = Path(project_data.get("root") or project_file.parent)
     if not root.is_absolute():
         root = (project_file.parent / root).resolve()
-    return GeeUpProject(
-        name=str(project_data.get("name") or root.name or "GeeUp Project"),
+    return SWOTFlowProject(
+        name=str(project_data.get("name") or root.name or "SWOTFlow Project"),
         root=root,
         config=document.get("config", {}) or {},
         download_history=list(document.get("download_history", []) or []),
@@ -220,8 +220,8 @@ def save_project_config(
     created_at: str = "",
 ) -> Path:
     """Save current config/history into an existing or new project root."""
-    project = GeeUpProject(
-        name=name.strip() or Path(root).name or "GeeUp Project",
+    project = SWOTFlowProject(
+        name=name.strip() or Path(root).name or "SWOTFlow Project",
         root=Path(root),
         config=deepcopy(dict(config)),
         download_history=[dict(item) for item in (download_history or [])],

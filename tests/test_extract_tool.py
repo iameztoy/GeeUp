@@ -110,6 +110,25 @@ class ExtractPlanningTests(unittest.TestCase):
             self.assertEqual(len(plan.unmatched), 1)
             self.assertEqual(plan.selected[0].metadata["year"], 2025)
 
+    def test_build_plan_applies_utm_tile_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / nc_name(utm="36M")).touch()
+            (root / nc_name(utm="35M")).touch()
+
+            config = ExtractConfig(
+                input_folder=root,
+                output_folder=root / "out",
+                utm_tiles=["UTM35M"],
+                manifest_csv=root / "manifest.csv",
+                errors_csv=root / "errors.csv",
+            )
+            plan = build_extraction_plan(config)
+
+            self.assertEqual(len(plan.selected), 1)
+            self.assertEqual(plan.selected[0].metadata["utm_zone"], "35")
+            self.assertEqual(plan.selected[0].metadata["mgrs_band"], "M")
+
     def test_dry_run_does_not_write_csvs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

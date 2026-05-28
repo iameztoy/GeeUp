@@ -1,6 +1,6 @@
 # Copy this file to config.yaml and edit the values for your machine.
 #
-# The GUI can also create/open GeeUp projects. A project writes the same config
+# The GUI can also create/open SWOTFlow projects. A project writes the same config
 # shape into <project_root>/project.yaml and repoints the processing folders to
 # that project root, while config.yaml remains the active session mirror.
 
@@ -54,7 +54,7 @@ download:
   # Preview and final download status report.
   report_csv: "C:/path/to/SWOT_Processing/00_logs/download_preview.csv"
 
-  # Cumulative project memory of granules already downloaded. This lets GeeUp
+  # Cumulative project memory of granules already downloaded. This lets SWOTFlow
   # skip previously completed granules even if raw NetCDF files are deleted
   # after duplicate cleanup/extraction.
   manifest_csv: "C:/path/to/SWOT_Processing/00_logs/download_manifest.csv"
@@ -87,6 +87,9 @@ duplicates:
   # Default false to match the original duplicate-cleanup script behavior.
   recursive: false
 
+  # Optional automation-only UTM scope. Leave empty for normal manual runs.
+  utm_tiles: []
+
 extract:
   # Second pipeline step: cleaned raw SWOT NetCDF files are read from here.
   input_folder: "C:/path/to/SWOT_Processing/01_raw_downloads"
@@ -113,12 +116,15 @@ extract:
   # Use 1 for the original one-by-one behavior. Increase cautiously for parallel extraction.
   workers: 1
 
+  # Optional automation-only UTM scope. Leave empty for normal manual runs.
+  utm_tiles: []
+
   manifest_csv: "C:/path/to/SWOT_Processing/00_logs/extract_manifest.csv"
   errors_csv: "C:/path/to/SWOT_Processing/00_logs/extract_errors.csv"
 
 gdal:
   # Python executable from the Miniforge/conda GDAL environment.
-  # GeeUp uses this runtime for mosaic processing and future NetCDF extraction.
+  # SWOTFlow uses this runtime for mosaic processing and future NetCDF extraction.
   python: "./.conda/swot_gdal/python.exe"
 
 mosaic:
@@ -152,6 +158,9 @@ mosaic:
 
   # Use 1 for the original one-by-one behavior. Increase cautiously because mosaics are disk/RAM intensive.
   workers: 1
+
+  # Optional automation-only UTM scope. Leave empty for normal manual runs.
+  utm_tiles: []
 
   # File extensions to include in mosaic planning.
   extensions:
@@ -300,3 +309,14 @@ artifacts:
   artifacts_dir: "C:/path/to/SWOT_Processing/00_logs/upload_artifacts"
   report_csv: "C:/path/to/SWOT_Processing/00_logs/upload_report.csv"
   ee_asset_inventory_csv: "C:/path/to/SWOT_Processing/00_logs/ee_asset_inventory.csv"
+
+automation:
+  # Unattended tile-by-tile workflow settings used by the Automation tab.
+  # Manual workflow tabs remain available and share the same project manifests.
+  utm_tiles: []
+  start_date: ""
+  end_date: ""
+  include_upload: false
+  cleanup_enabled: true
+  min_free_space_gb: 50
+  continue_on_tile_failure: true

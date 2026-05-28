@@ -1,4 +1,4 @@
-"""Generate the GeeUp home banner PNG using only the Python standard library."""
+"""Generate the SWOTFlow home banner PNG using only the Python standard library."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Iterable, Sequence
 
 WIDTH = 1000
 HEIGHT = 300
-OUTPUT = Path(__file__).resolve().parents[1] / "assets" / "geeup_home_banner.png"
+OUTPUT = Path(__file__).resolve().parents[1] / "assets" / "swotflow_home_banner.png"
 
 Color = tuple[int, int, int, int]
 Point = tuple[float, float]

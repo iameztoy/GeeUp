@@ -1,10 +1,10 @@
-# GeeUp Getting Started
+# SWOTFlow Getting Started
 
 This guide covers installation, first launch, project setup, and the normal GUI workflow. Detailed processing rules are kept in [SWOT_PROCESSING_GUIDE.md](./SWOT_PROCESSING_GUIDE.md).
 
 ## Environment Strategy
 
-GeeUp uses two Python environments on purpose:
+SWOTFlow uses two Python environments on purpose:
 
 - `.venv`: lightweight environment for the GUI, SWOT downloader, duplicate remover, Earth Engine uploader, and small Earth Engine API utilities.
 - GDAL conda environment: processing runtime for NetCDF extraction and mosaicking.
@@ -23,10 +23,10 @@ You need:
 
 ## Install Python Packages
 
-Open PowerShell in the GeeUp repository folder:
+Open PowerShell in the SWOTFlow repository folder:
 
 ```powershell
-cd C:\path\to\GeeUp
+cd C:\path\to\SWOTFlow
 ```
 
 Create and activate the local virtual environment:
@@ -51,12 +51,12 @@ python -m pip install -r requirements.txt
 
 ## Install The GDAL Processing Environment
 
-This is required for Extraction and Mosaic. It is not required if you only use Download, Duplicate Removal, Statistics, or Upload.
+This is required for Extraction, Mosaic, and full Automation runs. It is not required if you only use Download, Duplicate Removal, Statistics, or Upload.
 
 From Miniforge Prompt or another conda-capable shell:
 
 ```powershell
-cd C:\path\to\GeeUp
+cd C:\path\to\SWOTFlow
 conda env create --prefix .\.conda\swot_gdal --file environment_swot_gdal.yml
 ```
 
@@ -78,17 +78,19 @@ If your GDAL environment is outside the repository, use that environment's `pyth
 D:\SWOT\conda_envs\swot_gdal\python.exe
 ```
 
-## Start GeeUp
+## Start SWOTFlow
 
 Activate `.venv`, then run:
 
 ```powershell
-python geeup_gui.py
+python swotflow_gui.py
 ```
 
-Create or open a project before running workflow actions. GeeUp projects keep paths, reports, manifests, presets, and processing history tied to one AOI or production workflow.
+Create or open a project before running workflow actions. SWOTFlow projects keep paths, reports, manifests, presets, and processing history tied to one AOI or production workflow.
 
-GeeUp opens on the **Home** tab. Use it for the project summary, selected-tile overview, workflow shortcuts, and GitHub link; use the processing tabs for the actual work.
+SWOTFlow opens on the **Home** tab. Use it for the project summary, selected-tile overview, workflow shortcuts, and GitHub link; use the processing tabs for the actual work.
+
+The **Automation** tab is for unattended tile-by-tile runs inside an open project. Select tiles, choose the date range, run `Run Preflight`, then start automation only after the preflight passes. Upload is optional because browser-based Earth Engine upload still needs an untouched Chrome/session.
 
 ## Create Or Open A Project
 
@@ -116,7 +118,7 @@ The project folder contains:
 
 ## Chrome Profile For Earth Engine Upload
 
-GeeUp uploads through the Earth Engine web interface using Google Chrome and Selenium.
+SWOTFlow uploads through the Earth Engine web interface using Google Chrome and Selenium.
 
 The default Chrome profile folder is:
 
@@ -124,7 +126,7 @@ The default Chrome profile folder is:
 .\chrome-profile
 ```
 
-Use a dedicated profile for GeeUp. This keeps the Earth Engine login separate from your normal browser profile and avoids profile-lock conflicts. If Chrome says the profile is locked, close other Chrome windows that may be using the same profile.
+Use a dedicated profile for SWOTFlow. This keeps the Earth Engine login separate from your normal browser profile and avoids profile-lock conflicts. If Chrome says the profile is locked, close other Chrome windows that may be using the same profile.
 
 ## Earthdata Authentication
 
@@ -136,7 +138,7 @@ Recommended options:
 - Use `EARTHDATA_USERNAME` and `EARTHDATA_PASSWORD` environment variables for a session.
 - Click `Authenticate` in the GUI and follow the interactive prompt.
 
-GeeUp does not write Earthdata passwords to `config.yaml` or `project.yaml`.
+SWOTFlow does not write Earthdata passwords to `config.yaml` or `project.yaml`.
 
 ## Normal GUI Workflow
 
@@ -203,9 +205,9 @@ List clicks update the optional UTM filter immediately. `Validate Typed Tiles` o
 
 Dry run is recommended when you changed the origin folder, destination collection, upload scope, selected tiles, naming prefix/suffix, or metadata settings. If only retrying the same checked setup, you can run the real upload directly. The dry-run console prints only a short preview; the full per-file plan is written to `upload_report.csv`. The Upload tab progress bar reads that report and summarizes planned, submitted, completed, failed, and filtered rows.
 
-If a real upload was submitted but the console was closed before GeeUp finished monitoring Earth Engine tasks, `upload_report.csv` may still show `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It lists the destination collection and marks matching local mosaics as `EE_VERIFIED_EXISTS`, which also updates Statistics and Cleanup eligibility.
+If a real upload was submitted but the console was closed before SWOTFlow finished monitoring Earth Engine tasks, `upload_report.csv` may still show `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It lists the destination collection and marks matching local mosaics as `EE_VERIFIED_EXISTS`, which also updates Statistics and Cleanup eligibility.
 
-Before planning uploads, GeeUp can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the local upload report is incomplete. The Upload tile list also excludes local files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS` in `upload_report.csv`; the status text shows which source tiles are already completed or verified.
+Before planning uploads, SWOTFlow can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the local upload report is incomplete. The Upload tile list also excludes local files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS` in `upload_report.csv`; the status text shows which source tiles are already completed or verified.
 
 ### 6. Statistics
 
@@ -226,7 +228,7 @@ The Statistics tab reads project manifests, reports, and local folders. It summa
 - grouped upload failures and warning messages
 - observed SWOT cycles, passes, scenes, CRIDs, and product counters
 
-Use `Refresh Statistics` when you want an immediate update. GeeUp also refreshes statistics automatically after major workflow steps.
+Use `Refresh Statistics` when you want an immediate update. SWOTFlow also refreshes statistics automatically after major workflow steps.
 
 Each refresh writes a saved statistics snapshot under:
 
@@ -234,11 +236,11 @@ Each refresh writes a saved statistics snapshot under:
 <project_root>\00_logs\statistics
 ```
 
-When you reopen a project, GeeUp reloads the latest saved snapshot so the Statistics tab is not blank. Click `Refresh Statistics` again whenever files or manifests have changed and you want to recompute and resave the statistics.
+When you reopen a project, SWOTFlow reloads the latest saved snapshot so the Statistics tab is not blank. Click `Refresh Statistics` again whenever files or manifests have changed and you want to recompute and resave the statistics.
 
 ### 7. Cleanup
 
-Cleanup is a separate tab because it can delete local intermediate files. Click `Preview Cleanup` first; GeeUp only offers files with downstream manifest proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine. Then delete selected rows, or delete all previewed candidates when you are sure the project stage is complete.
+Cleanup is a separate tab because it can delete local intermediate files. Click `Preview Cleanup` first; SWOTFlow only offers files with downstream manifest proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine. Then delete selected rows, or delete all previewed candidates when you are sure the project stage is complete.
 
 ## Manual CLI Commands
 

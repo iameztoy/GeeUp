@@ -2,7 +2,7 @@
 
 Portable usage note:
 - dependencies: Python standard library plus earthengine-api;
-- install outside GeeUp with: python -m pip install earthengine-api;
+- install outside SWOTFlow with: python -m pip install earthengine-api;
 - authenticate once with: earthengine authenticate;
 - dry-run with: python delete_ee_collection_children.py --asset ASSET_ID;
 - delete with: python delete_ee_collection_children.py --asset ASSET_ID --execute --yes;

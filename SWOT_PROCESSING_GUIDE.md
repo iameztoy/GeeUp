@@ -19,7 +19,7 @@ Default working folders:
 - `<LOCAL_PROCESSING_ROOT>\03_mosaics`
 - `<LOCAL_PROCESSING_ROOT>\00_logs`
 
-When a GeeUp project is open, `<LOCAL_PROCESSING_ROOT>` is the project root and the same folder names are created inside that project. The active `config.yaml` remains a mirror of the open project so CLI tools still use the same workflow settings.
+When a SWOTFlow project is open, `<LOCAL_PROCESSING_ROOT>` is the project root and the same folder names are created inside that project. The active `config.yaml` remains a mirror of the open project so CLI tools still use the same workflow settings.
 
 The detailed sections below prioritize the main processing path: download, extraction, mosaicking, upload compatibility, and runtime setup. Optional cleanup and maintenance utilities are documented at the end.
 
@@ -70,11 +70,11 @@ For project time-series updates, `Prepare Update` uses the last successful proje
 
 After a preview or download run, the report is written with `downloaded`, `raw_exists`, and `known_from_manifest` columns. `downloaded=yes` means the matched granule is accounted for either by a complete raw file or by `download_manifest.csv`. `raw_exists=no` and `known_from_manifest=yes` means the project has already downloaded that granule before, even if the raw NetCDF has since been deleted. `no` means the granule is still missing, failed, or was cancelled before it was attempted. The GUI summary reports accounted-for granules versus matched granules.
 
-GeeUp downloads granules in batches. `Download threads` is passed to `earthaccess.download()` as the number of parallel workers for a batch, while `Batch size` controls how many granules are submitted to one earthaccess call. Use `Batch size = 1` for the old one-file-at-a-time behavior. For large runs, start with `threads = 6` and `batch_size = 25`; increase carefully if the network and PO.DAAC responses remain stable.
+SWOTFlow downloads granules in batches. `Download threads` is passed to `earthaccess.download()` as the number of parallel workers for a batch, while `Batch size` controls how many granules are submitted to one earthaccess call. Use `Batch size = 1` for the old one-file-at-a-time behavior. For large runs, start with `threads = 6` and `batch_size = 25`; increase carefully if the network and PO.DAAC responses remain stable.
 
 `Stop Download` is cooperative. It requests the download loop to stop after the current batch finishes or fails, writes the report with remaining files marked `CANCELLED` or `MISSING`, and leaves already downloaded files in place. Restart the same search with `skip_existing` and `skip_manifest_existing` enabled to continue.
 
-The visual UTM selector uses two different ideas: blue tiles are active query selections for the next preview/download, green tiles have at least one granule recorded in the project download manifest, and teal tiles are both selected and already covered. Keeping previously downloaded covered tiles selected is safe: GeeUp will skip manifest-known granules and only download new matching granules unless manifest skipping is disabled.
+The visual UTM selector uses two different ideas: blue tiles are active query selections for the next preview/download, green tiles have at least one granule recorded in the project download manifest, and teal tiles are both selected and already covered. Keeping previously downloaded covered tiles selected is safe: SWOTFlow will skip manifest-known granules and only download new matching granules unless manifest skipping is disabled.
 
 Extraction, mosaic, and upload now also contribute to cumulative stage tracking:
 
@@ -86,11 +86,13 @@ Extraction, mosaic, and upload now also contribute to cumulative stage tracking:
 
 Use the `Statistics` tab after any major run to audit the active project. It reads the project manifests and local folders to summarize total project files and size, file counts per processing level, duplicate files moved, files per UTM tile, dates covered, recorded downloads, remote matches excluded as older versions, completed extractions, mosaics, upload status, EE-verified existing assets, UTM-filtered upload rows, known cumulative download size, and observed SWOT cycles, passes, scenes, CRIDs, and product counters. The Processing Levels view treats the processing level as a future-proof `CRID_productCounter` label such as `PGD0_01`; it reports remote matches, selected downloads, accounted downloads, completed extractions, mosaic source participation, and uploaded/verified rows per level, plus the same breakdown by UTM tile. The Uploaded view reports upload status counts, uploaded/verified assets by source tile, date, processing level, and output grid, plus QA tables for pipeline completeness by UTM tile, ready mosaics not yet uploaded/verified, and grouped upload failures or warnings. It also draws lightweight bar plots for stage counts and top UTM tiles. The Mosaics statistics view reports completed mosaics by output tile/grid and completed mosaic participation by source UTM tile.
 
-Statistics refresh automatically after completed Download, Duplicate Removal, Extraction, Mosaic, and Cleanup actions. Upload runs in a separate console window, so GeeUp watches the configured `upload_report.csv` and refreshes statistics when that report changes. You can still click `Refresh Statistics` at any time. Each refresh saves the latest statistics under `00_logs/statistics` as `project_statistics_snapshot.json` plus CSV tables for metrics, stage statuses, UTM tiles, dates, processing levels, processing levels by tile, mosaic output grids, mosaic source tiles, upload statuses, uploaded tiles/dates/levels/grids, upload QA by tile, ready-not-uploaded mosaics, and upload errors. When a project is reopened, the GUI loads the latest saved snapshot immediately; refresh again to recompute from current files and manifests.
+Statistics refresh automatically after completed Download, Duplicate Removal, Extraction, Mosaic, and Cleanup actions. Upload runs in a separate console window, so SWOTFlow watches the configured `upload_report.csv` and refreshes statistics when that report changes. You can still click `Refresh Statistics` at any time. Each refresh saves the latest statistics under `00_logs/statistics` as `project_statistics_snapshot.json` plus CSV tables for metrics, stage statuses, UTM tiles, dates, processing levels, processing levels by tile, mosaic output grids, mosaic source tiles, upload statuses, uploaded tiles/dates/levels/grids, upload QA by tile, ready-not-uploaded mosaics, and upload errors. When a project is reopened, the GUI loads the latest saved snapshot immediately; refresh again to recompute from current files and manifests.
+
+The Automation tab uses the same project manifests and reports as the manual tabs. Its preflight classifies selected UTM tiles as already complete, partial/resumable, needing update, or new for the requested date range. Automation writes run logs under `00_logs/automation_runs/<run_id>` and deletes intermediate files only when downstream manifests or Earth Engine verification prove the next stage exists.
 
 The separate `Cleanup` tab provides conservative cleanup controls. `Preview Cleanup` lists only files with downstream manifest proof: raw NetCDFs that have completed extraction rows, extracted GeoTIFFs that belong to completed non-stale mosaic rows, and mosaic GeoTIFFs that are recorded as uploaded or already present in Earth Engine. Delete selected rows when you want fine control, or delete all previewed candidates when the project stage is complete and storage is the priority.
 
-For common-CRS whole pass/date mosaics, a newly added tile can change an existing mosaic group. GeeUp therefore compares the current source signature with the recorded mosaic manifest. If an output file already exists but the source set changed, the mosaic report marks that row `STALE_EXISTS`; enable overwrite or remove the stale output before rebuilding that mosaic group.
+For common-CRS whole pass/date mosaics, a newly added tile can change an existing mosaic group. SWOTFlow therefore compares the current source signature with the recorded mosaic manifest. If an output file already exists but the source set changed, the mosaic report marks that row `STALE_EXISTS`; enable overwrite or remove the stale output before rebuilding that mosaic group.
 
 Mosaic-per-tile statistics depend on the output CRS. When extraction keeps the original SWOT tile/grid CRS, the mosaic output grid is a UTM tile token and the output-grid count is the direct "mosaics per tile" count. When extraction reprojects to a common CRS such as `LAEA` or `WGS84`, the mosaic output no longer belongs to one UTM tile. In those cases, use the source UTM tile participation table: it parses each completed mosaic row's `input_files` from `mosaic_manifest.csv` and counts which original SWOT tiles contributed to each common-CRS mosaic.
 
@@ -154,7 +156,7 @@ earlier if the output drive is nearly full.
 
 Upload defaults to scanning every GeoTIFF in the configured origin folder. When `upload.scope` is `selected_utm`, only files whose output UTM tile or mosaic source UTM tiles intersect `upload.utm_tiles` are eligible. Original-CRS products are matched from the filename coordinate token. Common-CRS mosaics such as `LAEA` and `WGS84` use `mosaic_manifest.csv` `input_files` to recover the original source UTM tiles. The Upload tab's tile list prefers tiles that are actually represented by files in the current origin folder and are not already recorded as completed, skipped-existing, or EE-verified in `upload_report.csv`; if it cannot derive any local upload-ready tiles, it falls back to the global UTM list.
 
-Before upload planning, GeeUp can list the destination Earth Engine collection with `ee.data.listAssets`. Existing asset IDs are written as `EE_VERIFIED_EXISTS` in `upload_report.csv` and skipped. This is more reliable than trusting the local upload report alone after an interrupted run. The latest listing is cached in `ee_asset_inventory.csv`. The Upload tab's tile list shows local upload-ready source tiles after filtering out files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS`; the status line also summarizes tiles already completed or verified in the upload report.
+Before upload planning, SWOTFlow can list the destination Earth Engine collection with `ee.data.listAssets`. Existing asset IDs are written as `EE_VERIFIED_EXISTS` in `upload_report.csv` and skipped. This is more reliable than trusting the local upload report alone after an interrupted run. The latest listing is cached in `ee_asset_inventory.csv`. The Upload tab's tile list shows local upload-ready source tiles after filtering out files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS`; the status line also summarizes tiles already completed or verified in the upload report.
 
 Dry runs are optional but useful after changing upload settings. They do not upload anything; they write the full per-file plan to `upload_report.csv` and print only a short console preview to avoid flooding the terminal for large projects. Real runs write `PLANNED_UPLOAD` rows before the confirmation prompt, then update those rows as files are submitted and completed. The Upload tab progress bar is derived from these report statuses.
 
@@ -179,7 +181,7 @@ Example:
 SWOT_L2_HR_Raster_100m_UTM28P_N_x_x_x_034_266_MOSA_20250618T055612_20250618T055713_PID0_01.tif
 ```
 
-`MOSA` is the scene ID and is the only mosaic marker in new output names. Older outputs with an extra `_mosaic` suffix remain parseable, but GeeUp no longer creates that suffix.
+`MOSA` is the scene ID and is the only mosaic marker in new output names. Older outputs with an extra `_mosaic` suffix remain parseable, but SWOTFlow no longer creates that suffix.
 
 When a mosaic combines different source CRIDs, the filename uses `MIXD` in the CRID position. The main mosaic report records the source CRIDs, source product counters, dominant CRID, preferred CRID by rank, and a `mixed_crid` flag. The focused `mixed_crid_mosaics.csv` report contains only mixed-CRID groups.
 
@@ -286,7 +288,7 @@ Utils/delete_ee_collection_children.py
 Dependency:
 
 - `earthengine-api` is included in `requirements.txt`, so a fresh `.venv` installation gets it with `python -m pip install -r requirements.txt`.
-- The script can also run outside GeeUp if that Python environment has `earthengine-api` installed and Earth Engine authentication configured.
+- The script can also run outside SWOTFlow if that Python environment has `earthengine-api` installed and Earth Engine authentication configured.
 
 Recommended workflow:
 

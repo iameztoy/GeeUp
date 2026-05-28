@@ -4,7 +4,7 @@ from datetime import date
 from pathlib import Path
 
 from build_spatial_presets import normalize_grid_token
-from geeup_project import (
+from swotflow_project import (
     PROJECT_FILE_NAME,
     append_download_history,
     config_for_project,

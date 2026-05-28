@@ -1,4 +1,4 @@
-"""Shared cumulative workflow ledger for GeeUp project stages."""
+"""Shared cumulative workflow ledger for SWOTFlow project stages."""
 
 from __future__ import annotations
 

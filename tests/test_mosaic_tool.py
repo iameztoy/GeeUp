@@ -88,6 +88,24 @@ class MosaicPlanningTests(unittest.TestCase):
             self.assertEqual(plan.groups[0].key.coordinate_system, "LAEA")
             self.assertEqual(plan.groups[0].key.descriptor, "100m_LAEA_N_x_x_x")
 
+    def test_utm_tile_filter_limits_mosaic_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / swot_name(utm="UTM36M", scene="000A")).touch()
+            (root / swot_name(utm="UTM35M", scene="001A")).touch()
+
+            config = MosaicConfig(
+                input_folder=root,
+                output_folder=root / "out",
+                report_csv=root / "report.csv",
+                utm_tiles=["UTM35M"],
+            )
+            plan = build_mosaic_plan(config)
+
+            self.assertEqual(len(plan.groups), 1)
+            self.assertEqual(plan.groups[0].key.coordinate_system, "UTM35M")
+            self.assertEqual(len(plan.groups[0].sources), 1)
+
     def test_utm_zone_hemisphere_grouping_combines_northern_latitude_bands(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -1,1 +1,1 @@
-"""Utility scripts for GeeUp/SWOT maintenance tasks."""
+"""Utility scripts for SWOTFlow/SWOT maintenance tasks."""

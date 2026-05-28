@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import yaml
 
 from gdal_runtime import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
+from swot_download_tool import normalize_utm_tiles
 from workflow_manifest import timestamp_text, upsert_workflow_manifest, workflow_manifest_path
 
 
@@ -53,6 +54,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "skip_manifest_existing": True,
         "resampling_alg": "near",
         "workers": 1,
+        "utm_tiles": [],
         "manifest_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/extract_manifest.csv",
         "errors_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/extract_errors.csv",
     },
@@ -114,6 +116,7 @@ class ExtractConfig:
     skip_manifest_existing: bool = True
     resampling_alg: str = "near"
     workers: int = 1
+    utm_tiles: List[str] = field(default_factory=list)
     manifest_csv: Path = Path(DEFAULT_CONFIG["extract"]["manifest_csv"])
     errors_csv: Path = Path(DEFAULT_CONFIG["extract"]["errors_csv"])
     base_dir: Path = Path.cwd()
@@ -191,6 +194,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> ExtractConfig:
         skip_manifest_existing=bool(extract_data.get("skip_manifest_existing", True)),
         resampling_alg=str(extract_data.get("resampling_alg", "near")).strip() or "near",
         workers=normalize_workers(extract_data.get("workers", 1)),
+        utm_tiles=normalize_utm_tiles(extract_data.get("utm_tiles", [])),
         manifest_csv=resolve_path(
             extract_data.get("manifest_csv", f"{logs_folder}/extract_manifest.csv"),
             base_dir,
@@ -276,6 +280,7 @@ def build_output_path(nc_path: Path, output_folder: Path, target_crs_mode: str) 
 def build_extraction_plan(config: ExtractConfig) -> ExtractPlan:
     """Scan NetCDF inputs, parse SWOT names, and apply the year/limit filters."""
     selected_years = normalize_year_selection(config.year_selection)
+    selected_tiles = set(config.utm_tiles)
     all_nc_files = sorted(config.input_folder.glob("*.nc")) if config.input_folder.exists() else []
     selected: List[ExtractSource] = []
     unmatched: List[Path] = []
@@ -288,6 +293,9 @@ def build_extraction_plan(config: ExtractConfig) -> ExtractPlan:
             continue
         parsed_years.add(int(metadata["year"]))
         if selected_years is not None and metadata["year"] not in selected_years:
+            continue
+        tile = f"UTM{metadata['utm_zone']}{metadata['mgrs_band']}"
+        if selected_tiles and tile not in selected_tiles:
             continue
         selected.append(ExtractSource(path=path, metadata=metadata))
 

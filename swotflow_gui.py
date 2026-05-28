@@ -1,4 +1,4 @@
-"""Desktop GUI for GeeUp SWOT download, processing, and upload workflows."""
+"""Desktop GUI for SWOTFlow download, processing, and upload workflows."""
 
 from __future__ import annotations
 
@@ -20,7 +20,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
-HOME_BANNER_PATH = ASSETS_DIR / "geeup_home_banner.png"
+HOME_BANNER_PATH = ASSETS_DIR / "swotflow_home_banner.png"
+README_PATH = PROJECT_ROOT / "README.md"
+GETTING_STARTED_PATH = PROJECT_ROOT / "GETTING_STARTED.md"
+SWOT_PROCESSING_GUIDE_PATH = PROJECT_ROOT / "SWOT_PROCESSING_GUIDE.md"
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 CONFIG_EXAMPLE_PATH = PROJECT_ROOT / "config.example.yaml"
 UPLOADER_SCRIPT = PROJECT_ROOT / "ee_ui_uploader.py"
@@ -28,7 +31,7 @@ EXTRACT_SCRIPT = PROJECT_ROOT / "swot_extract_tool.py"
 MOSAIC_SCRIPT = PROJECT_ROOT / "ee_mosaic_tool.py"
 DUPLICATE_SCRIPT = PROJECT_ROOT / "swot_duplicate_remover.py"
 PROGRESS_PREFIX = "GEEUP_PROGRESS\t"
-APP_NAME = "GeeUp"
+APP_NAME = "SWOTFlow"
 APP_VERSION = "v0.3.0+"
 GITHUB_URL = "https://github.com/iameztoy/GeeUp"
 DEFAULT_PROCESSING_ROOT = "./SWOT_Processing"
@@ -93,7 +96,7 @@ def ensure_isolated_python_environment() -> None:
               .\\.venv\\Scripts\\Activate.ps1
               python -m pip install --upgrade pip
               python -m pip install -r requirements.txt
-              python geeup_gui.py
+              python swotflow_gui.py
             """
         ).strip()
     )
@@ -104,8 +107,8 @@ ensure_isolated_python_environment()
 import yaml
 
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env
-from geeup_project import (
-    GeeUpProject,
+from swotflow_project import (
+    SWOTFlowProject,
     TilePreset,
     config_for_project,
     create_project,
@@ -151,6 +154,12 @@ from swot_download_tool import (
     run_download,
     write_download_report,
 )
+from swotflow_automation import (
+    AutomationConfig,
+    AutomationRunState,
+    preflight_automation,
+    run_automation,
+)
 from swot_metadata import parse_swot_l2_hr_raster_metadata
 from utm_map_selector import UTMMapSelectorDialog, UTMPipelineStatusMap, load_display_geometry
 
@@ -167,7 +176,7 @@ class LauncherApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title(f"{APP_NAME} SWOT Workflow")
+        self.root.title(f"{APP_NAME} - SWOT HR Raster Workflow")
         self.root.geometry("1080x820")
         self.root.minsize(820, 650)
 
@@ -286,10 +295,55 @@ class LauncherApp:
         self.home_tile_summary_var = tk.StringVar(value="")
         self.home_path_summary_var = tk.StringVar(value="")
         self.home_workflow_summary_var = tk.StringVar(value="")
+        self.latest_project_insights: Any | None = None
+        self.latest_project_statistics_generated_at = ""
         self.project_created_at = ""
         self.project_download_history: list[dict[str, Any]] = []
         self.tile_preset_var = tk.StringVar(value="")
         self.tile_preset_choices: dict[str, TilePreset] = {}
+        automation_data = self.data.get("automation", {})
+        try:
+            automation_tiles = normalize_utm_tiles(automation_data.get("utm_tiles", []))
+        except ValueError:
+            automation_tiles = []
+        self.automation_selected_tiles = set(automation_tiles)
+        self.automation_visible_utm_tiles = list(self.all_utm_tiles)
+        self.automation_tile_filter_var = tk.StringVar(value="")
+        self.automation_selected_tiles_var = tk.StringVar(value=", ".join(automation_tiles))
+        self.automation_start_date_var = tk.StringVar(
+            value=str(automation_data.get("start_date") or download_data.get("start_date", ""))
+        )
+        self.automation_end_date_var = tk.StringVar(
+            value=str(automation_data.get("end_date") or download_data.get("end_date", ""))
+        )
+        self.automation_date_status_var = tk.StringVar(value="")
+        self.automation_include_upload_var = tk.BooleanVar(
+            value=bool(automation_data.get("include_upload", False))
+        )
+        self.automation_cleanup_enabled_var = tk.BooleanVar(
+            value=bool(automation_data.get("cleanup_enabled", True))
+        )
+        self.automation_min_free_space_var = tk.StringVar(
+            value=str(automation_data.get("min_free_space_gb", 50))
+        )
+        self.automation_continue_on_failure_var = tk.BooleanVar(
+            value=bool(automation_data.get("continue_on_tile_failure", True))
+        )
+        self.automation_status_var = tk.StringVar(
+            value="Open a project, select tiles, then run the automation preflight."
+        )
+        self.automation_progress_var = tk.DoubleVar(value=0.0)
+        self.automation_progress_text_var = tk.StringVar(value="Progress: not started")
+        self.automation_preflight_state: AutomationRunState | None = None
+        self.automation_running = False
+        self.automation_stop_event: threading.Event | None = None
+        for date_var in (
+            self.download_start_date_var,
+            self.download_end_date_var,
+            self.automation_start_date_var,
+            self.automation_end_date_var,
+        ):
+            date_var.trace_add("write", lambda *_args: self.update_automation_date_status())
         self.upload_stats_poll_after_id: str | None = None
         self.upload_report_update_callback: Optional[Callable[[], None]] = None
 
@@ -512,7 +566,7 @@ class LauncherApp:
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(3, weight=1)
+        outer.rowconfigure(2, weight=1)
 
         title = ttk.Label(
             outer,
@@ -531,12 +585,11 @@ class LauncherApp:
         )
         intro.grid(row=1, column=0, sticky="w", pady=(6, 14))
 
-        self.build_project_bar(outer)
-
         self.notebook = ttk.Notebook(outer)
-        self.notebook.grid(row=3, column=0, sticky="nsew")
+        self.notebook.grid(row=2, column=0, sticky="nsew")
 
         home_tab = ttk.Frame(self.notebook, padding=12)
+        automation_tab = ttk.Frame(self.notebook, padding=12)
         download_tab = ttk.Frame(self.notebook, padding=12)
         duplicate_tab = ttk.Frame(self.notebook, padding=12)
         extract_tab = ttk.Frame(self.notebook, padding=12)
@@ -546,6 +599,7 @@ class LauncherApp:
         cleanup_tab = ttk.Frame(self.notebook, padding=12)
         self.tabs_by_name = {
             "Home": home_tab,
+            "Automation": automation_tab,
             "Download": download_tab,
             "Duplicate Removal": duplicate_tab,
             "Extraction": extract_tab,
@@ -555,6 +609,7 @@ class LauncherApp:
             "Cleanup": cleanup_tab,
         }
         self.notebook.add(home_tab, text="Home")
+        self.notebook.add(automation_tab, text="Automation")
         self.notebook.add(download_tab, text="Download")
         self.notebook.add(duplicate_tab, text="Duplicate Removal")
         self.notebook.add(extract_tab, text="Extraction")
@@ -564,6 +619,7 @@ class LauncherApp:
         self.notebook.add(cleanup_tab, text="Cleanup")
 
         self.build_home_tab(home_tab)
+        self.build_automation_tab(automation_tab)
         self.build_download_tab(download_tab)
         self.build_duplicate_tab(duplicate_tab)
         self.build_extract_tab(extract_tab)
@@ -673,30 +729,54 @@ class LauncherApp:
 
             self.home_banner_canvas.bind("<Configure>", center_banner)
 
-        actions = ttk.Frame(parent)
+        actions = ttk.LabelFrame(parent, text="Project And Documentation", padding=10)
         actions.grid(row=1, column=0, sticky="ew", pady=(14, 12))
-        actions.columnconfigure(8, weight=1)
+        actions.columnconfigure(7, weight=1)
         ttk.Button(actions, text="New Project", command=self.new_project).grid(
             row=0, column=0, sticky="w"
         )
         ttk.Button(actions, text="Open Project", command=self.open_project).grid(
             row=0, column=1, sticky="w", padx=(8, 0)
         )
+        ttk.Button(actions, text="Save Project", command=self.save_project_action).grid(
+            row=0, column=2, sticky="w", padx=(8, 0)
+        )
+        ttk.Button(actions, text="Save Project As", command=self.save_project_as).grid(
+            row=0, column=3, sticky="w", padx=(8, 0)
+        )
+        ttk.Button(actions, text="Prepare Update", command=self.prepare_project_update).grid(
+            row=0, column=4, sticky="w", padx=(8, 0)
+        )
         ttk.Button(
             actions,
             text="Download Data",
             command=lambda: self.select_tab("Download"),
-        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Button(
             actions,
             text="View Statistics",
             command=lambda: self.select_tab("Statistics"),
-        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+        ).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Button(
+            actions,
+            text="README",
+            command=lambda: self.open_local_document(README_PATH),
+        ).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Button(
+            actions,
+            text="Getting Started",
+            command=lambda: self.open_local_document(GETTING_STARTED_PATH),
+        ).grid(row=1, column=3, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Button(
+            actions,
+            text="Processing Guide",
+            command=lambda: self.open_local_document(SWOT_PROCESSING_GUIDE_PATH),
+        ).grid(row=1, column=4, sticky="w", padx=(8, 0), pady=(8, 0))
         ttk.Button(
             actions,
             text="GitHub",
             command=self.open_github_repository,
-        ).grid(row=0, column=4, sticky="w", padx=(8, 0))
+        ).grid(row=1, column=5, sticky="w", padx=(8, 0), pady=(8, 0))
 
         details = ttk.Frame(parent)
         details.grid(row=2, column=0, sticky="nsew")
@@ -727,12 +807,19 @@ class LauncherApp:
             justify="left",
             wraplength=520,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ttk.Label(
+            project,
+            textvariable=self.project_status_var,
+            foreground="#184a8b",
+            justify="left",
+            wraplength=520,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         workflow = ttk.LabelFrame(details, text="Workflow Shortcuts", padding=12)
         workflow.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
         ttk.Label(
             workflow,
-            text="Download > Duplicate Removal > Extraction > Mosaic > Upload > Statistics > Cleanup",
+            text="Automation, or manual: Download > Duplicate Removal > Extraction > Mosaic > Upload > Statistics > Cleanup",
             wraplength=470,
             justify="left",
         ).grid(row=0, column=0, sticky="w")
@@ -772,8 +859,18 @@ class LauncherApp:
             self.notebook.select(tab)
 
     def open_github_repository(self) -> None:
-        """Open the GeeUp GitHub repository in the default browser."""
+        """Open the project GitHub repository in the default browser."""
         webbrowser.open(GITHUB_URL)
+
+    def open_local_document(self, path: Path) -> None:
+        """Open a bundled Markdown document in the default browser/viewer."""
+        if not path.exists():
+            messagebox.showwarning(
+                "Document not found",
+                f"Could not find:\n{path}",
+            )
+            return
+        webbrowser.open(path.resolve().as_uri())
 
     def refresh_home_summary(self) -> None:
         """Refresh the Home tab's concise project and tile summary."""
@@ -817,41 +914,175 @@ class LauncherApp:
             "and Cleanup only after confirming downstream stages are complete."
         )
 
-    def build_project_bar(self, parent: ttk.Frame) -> None:
-        """Create project controls above the processing tabs."""
-        project = ttk.LabelFrame(parent, text="Project", padding=10)
-        project.grid(row=2, column=0, sticky="ew", pady=(0, 14))
-        project.columnconfigure(6, weight=1)
+    def build_automation_tab(self, parent: ttk.Frame) -> None:
+        """Create unattended tile-by-tile workflow controls."""
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(4, weight=1)
 
-        ttk.Button(project, text="New Project", command=self.new_project).grid(
+        intro = ttk.Label(
+            parent,
+            text=(
+                "Run the SWOTFlow workflow tile by tile inside the open project. "
+                "Preflight is required before Start Automation is enabled."
+            ),
+            wraplength=980,
+            justify="left",
+        )
+        intro.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        settings = ttk.LabelFrame(parent, text="Automation Settings", padding=10)
+        settings.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        settings.columnconfigure(7, weight=1)
+        ttk.Label(settings, text="Start date").grid(row=0, column=0, sticky="w")
+        ttk.Entry(settings, textvariable=self.automation_start_date_var, width=14).grid(
+            row=0, column=1, sticky="w", padx=(6, 14)
+        )
+        ttk.Label(settings, text="End date").grid(row=0, column=2, sticky="w")
+        ttk.Entry(settings, textvariable=self.automation_end_date_var, width=14).grid(
+            row=0, column=3, sticky="w", padx=(6, 14)
+        )
+        ttk.Label(settings, text="Min free GB").grid(row=0, column=4, sticky="w")
+        ttk.Entry(settings, textvariable=self.automation_min_free_space_var, width=8).grid(
+            row=0, column=5, sticky="w", padx=(6, 14)
+        )
+        ttk.Button(
+            settings,
+            text="Copy Download Date Range",
+            command=self.copy_download_dates_to_automation,
+        ).grid(row=0, column=6, sticky="w", padx=(0, 8))
+        ttk.Checkbutton(
+            settings,
+            text="Include upload",
+            variable=self.automation_include_upload_var,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            settings,
+            text="Cleanup after verified stages",
+            variable=self.automation_cleanup_enabled_var,
+        ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            settings,
+            text="Continue with next tile after failure",
+            variable=self.automation_continue_on_failure_var,
+        ).grid(row=1, column=3, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(
+            settings,
+            textvariable=self.automation_date_status_var,
+            foreground="#184a8b",
+            wraplength=980,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=8, sticky="w", pady=(8, 0))
+
+        tiles = ttk.LabelFrame(parent, text="Automation UTM Tiles", padding=10)
+        tiles.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        tiles.columnconfigure(1, weight=1)
+        ttk.Label(tiles, text="Filter").grid(row=0, column=0, sticky="w")
+        filter_entry = ttk.Entry(tiles, textvariable=self.automation_tile_filter_var, width=18)
+        filter_entry.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        filter_entry.bind("<KeyRelease>", lambda _event: self.refresh_automation_tile_list())
+        ttk.Button(
+            tiles,
+            text="Copy From Download Tiles",
+            command=self.copy_download_tiles_to_automation,
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Button(
+            tiles,
+            text="Open UTM Map Selector",
+            command=self.open_automation_map_selector,
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+
+        self.automation_tile_listbox = tk.Listbox(
+            tiles,
+            selectmode=tk.MULTIPLE,
+            height=7,
+            exportselection=False,
+        )
+        self.automation_tile_listbox.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self.automation_tile_listbox.bind("<<ListboxSelect>>", self.on_automation_tile_select)
+        ttk.Label(tiles, text="Selected tiles").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(tiles, textvariable=self.automation_selected_tiles_var).grid(
+            row=2,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+        ttk.Button(
+            tiles,
+            text="Validate Typed Tiles",
+            command=self.apply_automation_tiles_from_text,
+        ).grid(row=2, column=3, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Button(
+            tiles,
+            text="Clear Automation Tiles",
+            command=self.clear_automation_tiles,
+        ).grid(row=3, column=3, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        actions = ttk.LabelFrame(parent, text="Execution", padding=10)
+        actions.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        actions.columnconfigure(5, weight=1)
+        ttk.Button(actions, text="Run Preflight", command=self.run_automation_preflight).grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Button(project, text="Open Project", command=self.open_project).grid(
-            row=0, column=1, sticky="w", padx=(8, 0)
+        self.automation_start_button = ttk.Button(
+            actions,
+            text="Start Automation",
+            command=self.start_automation,
+            state=tk.DISABLED,
         )
-        ttk.Button(project, text="Save Project", command=self.save_project_action).grid(
+        self.automation_start_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Button(actions, text="Resume Run", command=self.start_automation).grid(
             row=0, column=2, sticky="w", padx=(8, 0)
         )
-        ttk.Button(project, text="Save Project As", command=self.save_project_as).grid(
-            row=0, column=3, sticky="w", padx=(8, 0)
-        )
-        ttk.Button(project, text="Prepare Update", command=self.prepare_project_update).grid(
-            row=0, column=4, sticky="w", padx=(8, 0)
-        )
-        ttk.Label(project, textvariable=self.current_project_name_var).grid(
-            row=0, column=5, sticky="w", padx=(12, 0)
-        )
+        ttk.Button(
+            actions,
+            text="Stop After Current Stage",
+            command=self.stop_automation_after_current_stage,
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+        ttk.Progressbar(
+            actions,
+            variable=self.automation_progress_var,
+            maximum=100,
+        ).grid(row=1, column=0, columnspan=6, sticky="ew", pady=(10, 0))
         ttk.Label(
-            project,
-            textvariable=self.current_project_root_var,
-            foreground="#555555",
-        ).grid(row=1, column=0, columnspan=7, sticky="w", pady=(6, 0))
-        ttk.Label(
-            project,
-            textvariable=self.project_status_var,
+            actions,
+            textvariable=self.automation_progress_text_var,
             foreground="#184a8b",
+        ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        ttk.Label(
+            actions,
+            textvariable=self.automation_status_var,
+            wraplength=980,
             justify="left",
-        ).grid(row=2, column=0, columnspan=7, sticky="w", pady=(4, 0))
+        ).grid(row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
+
+        queue = ttk.LabelFrame(parent, text="Automation Queue And Results", padding=10)
+        queue.grid(row=4, column=0, sticky="nsew")
+        queue.columnconfigure(0, weight=1)
+        queue.rowconfigure(0, weight=1)
+        self.automation_tree = ttk.Treeview(
+            queue,
+            columns=("tile", "stage", "status", "counts", "message"),
+            show="headings",
+            height=10,
+        )
+        self.automation_tree.heading("tile", text="Tile")
+        self.automation_tree.heading("stage", text="Stage/Class")
+        self.automation_tree.heading("status", text="Status")
+        self.automation_tree.heading("counts", text="Counts")
+        self.automation_tree.heading("message", text="Message")
+        self.automation_tree.column("tile", width=90, anchor="w")
+        self.automation_tree.column("stage", width=140, anchor="w")
+        self.automation_tree.column("status", width=110, anchor="w")
+        self.automation_tree.column("counts", width=220, anchor="w")
+        self.automation_tree.column("message", width=420, anchor="w")
+        self.automation_tree.grid(row=0, column=0, sticky="nsew")
+        queue_scroll = ttk.Scrollbar(queue, orient="vertical", command=self.automation_tree.yview)
+        queue_scroll.grid(row=0, column=1, sticky="ns")
+        self.automation_tree.configure(yscrollcommand=queue_scroll.set)
+        self.refresh_automation_tile_list()
+        self.update_automation_date_status()
 
     def build_download_tab(self, parent: ttk.Frame) -> None:
         """Create SWOT Earthdata download controls."""
@@ -2446,16 +2677,16 @@ class LauncherApp:
             self.download_manifest_var.set(selected)
 
     def new_project(self) -> None:
-        """Create a new GeeUp project from the current GUI settings."""
+        """Create a new SWOTFlow project from the current GUI settings."""
         root = filedialog.askdirectory(
-            title="Choose a folder for the new GeeUp project",
+            title="Choose a folder for the new SWOTFlow project",
             initialdir=str(PROJECT_ROOT),
         )
         if not root:
             return
-        default_name = Path(root).name or "GeeUp Project"
+        default_name = Path(root).name or "SWOTFlow Project"
         name = simpledialog.askstring(
-            "New GeeUp project",
+            "New SWOTFlow project",
             "Project name:",
             initialvalue=default_name,
             parent=self.root,
@@ -2467,18 +2698,18 @@ class LauncherApp:
         except OSError as exc:
             messagebox.showerror(
                 "Could not create project",
-                f"Failed to create the GeeUp project folders:\n{exc}",
+                f"Failed to create the SWOTFlow project folders:\n{exc}",
             )
             return
         self.apply_project(project, write_config=True)
         messagebox.showinfo("Project created", f"Created project:\n{project.project_file}")
 
     def open_project(self) -> None:
-        """Open a GeeUp project.yaml file and populate the GUI."""
+        """Open a SWOTFlow project.yaml file and populate the GUI."""
         selected = filedialog.askopenfilename(
-            title="Open GeeUp project.yaml",
+            title="Open SWOTFlow project.yaml",
             initialdir=str(PROJECT_ROOT),
-            filetypes=[("GeeUp project", "project.yaml"), ("YAML files", "*.yaml"), ("All files", "*.*")],
+            filetypes=[("SWOTFlow project", "project.yaml"), ("YAML files", "*.yaml"), ("All files", "*.*")],
         )
         if not selected:
             return
@@ -2488,7 +2719,7 @@ class LauncherApp:
         except (OSError, ValueError, yaml.YAMLError) as exc:
             messagebox.showerror(
                 "Could not open project",
-                f"Failed to open the GeeUp project:\n{exc}",
+                f"Failed to open the SWOTFlow project:\n{exc}",
             )
             return
         self.apply_project(project, write_config=True)
@@ -2513,7 +2744,7 @@ class LauncherApp:
         except OSError as exc:
             messagebox.showerror(
                 "Could not save project",
-                f"Failed to save the GeeUp project:\n{exc}",
+                f"Failed to save the SWOTFlow project:\n{exc}",
             )
             return
         self.project_status_var.set(f"Saved project to {path}")
@@ -2522,7 +2753,7 @@ class LauncherApp:
     def save_project_as(self) -> None:
         """Save current settings as a new project root."""
         root = filedialog.askdirectory(
-            title="Choose a folder for the GeeUp project",
+            title="Choose a folder for the SWOTFlow project",
             initialdir=self.current_project_root_var.get() or str(PROJECT_ROOT),
         )
         if not root:
@@ -2533,9 +2764,9 @@ class LauncherApp:
             else Path(root).name
         )
         name = simpledialog.askstring(
-            "Save GeeUp project as",
+            "Save SWOTFlow project as",
             "Project name:",
-            initialvalue=default_name or "GeeUp Project",
+            initialvalue=default_name or "SWOTFlow Project",
             parent=self.root,
         )
         if name is None:
@@ -2548,7 +2779,7 @@ class LauncherApp:
         except (OSError, ValueError, yaml.YAMLError) as exc:
             messagebox.showerror(
                 "Could not save project",
-                f"Failed to save the GeeUp project:\n{exc}",
+                f"Failed to save the SWOTFlow project:\n{exc}",
             )
             return
         self.apply_project(project, write_config=True)
@@ -2559,7 +2790,7 @@ class LauncherApp:
         with CONFIG_PATH.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=False)
 
-    def apply_project(self, project: GeeUpProject, write_config: bool = False) -> None:
+    def apply_project(self, project: SWOTFlowProject, write_config: bool = False) -> None:
         """Apply a loaded project to the GUI and optionally refresh config.yaml."""
         project.config = config_for_project(project.config, project.root)
         self.current_project_name_var.set(project.name)
@@ -2602,7 +2833,7 @@ class LauncherApp:
         if self.current_project_root_var.get().strip():
             return True
         message = (
-            f"Create or open a GeeUp project before you {action}.\n\n"
+            f"Create or open a SWOTFlow project before you {action}.\n\n"
             "The GUI may still show paths from config.yaml, including paths from a previous session, "
             "but no project is currently active. Opening a project makes the output folders, "
             "download manifest, reports, and Earth Engine target explicit."
@@ -2645,6 +2876,7 @@ class LauncherApp:
         mosaic_data = self.data.get("mosaic", {})
         gdal_data = self.data.get("gdal", {})
         upload_data = self.data.get("upload", {})
+        automation_data = self.data.get("automation", {})
         execution_data = self.data.get("execution", {})
         chrome_data = self.data.get("chrome", {})
 
@@ -2717,6 +2949,30 @@ class LauncherApp:
         self.download_selected_tiles = set(selected_tiles)
         self.download_selected_tiles_var.set(", ".join(selected_tiles))
         self.refresh_download_tile_list()
+
+        try:
+            automation_tiles = normalize_utm_tiles(automation_data.get("utm_tiles", []))
+        except ValueError:
+            automation_tiles = []
+        self.automation_selected_tiles = set(automation_tiles)
+        self.automation_selected_tiles_var.set(", ".join(automation_tiles))
+        self.automation_start_date_var.set(
+            str(automation_data.get("start_date") or download_data.get("start_date", ""))
+        )
+        self.automation_end_date_var.set(
+            str(automation_data.get("end_date") or download_data.get("end_date", ""))
+        )
+        self.automation_include_upload_var.set(bool(automation_data.get("include_upload", False)))
+        self.automation_cleanup_enabled_var.set(bool(automation_data.get("cleanup_enabled", True)))
+        self.automation_min_free_space_var.set(str(automation_data.get("min_free_space_gb", 50)))
+        self.automation_continue_on_failure_var.set(
+            bool(automation_data.get("continue_on_tile_failure", True))
+        )
+        self.automation_preflight_state = None
+        if hasattr(self, "automation_start_button"):
+            self.automation_start_button.configure(state=tk.DISABLED)
+        self.refresh_automation_tile_list()
+        self.update_automation_date_status()
 
         self.duplicate_input_var.set(duplicate_data.get("input_folder", raw_downloads))
         self.duplicate_moved_folder_var.set(
@@ -3432,6 +3688,190 @@ class LauncherApp:
             f"Applied {len(tiles)} UTM tile(s) from the map selector."
         )
 
+    def current_automation_tiles(self) -> list[str]:
+        """Return validated UTM tiles selected for automation."""
+        tiles = normalize_utm_tiles(self.automation_selected_tiles_var.get())
+        self.automation_selected_tiles = set(tiles)
+        return tiles
+
+    def set_automation_tiles(self, tiles: Sequence[str]) -> None:
+        """Set automation tile selection from any selector source."""
+        normalized = normalize_utm_tiles(tiles)
+        self.automation_selected_tiles = set(normalized)
+        self.automation_selected_tiles_var.set(", ".join(normalized))
+        self.refresh_automation_tile_list()
+        self.automation_preflight_state = None
+        if hasattr(self, "automation_start_button"):
+            self.automation_start_button.configure(state=tk.DISABLED)
+
+    def refresh_automation_tile_list(self) -> None:
+        """Refresh the automation tile listbox."""
+        if not hasattr(self, "automation_tile_listbox"):
+            return
+        self.automation_tile_listbox.delete(0, tk.END)
+        needle = self.automation_tile_filter_var.get().strip().upper()
+        self.automation_visible_utm_tiles = [
+            tile for tile in self.all_utm_tiles if not needle or needle in tile
+        ]
+        for tile in self.automation_visible_utm_tiles:
+            self.automation_tile_listbox.insert(tk.END, tile)
+            if tile in self.automation_selected_tiles:
+                self.automation_tile_listbox.selection_set(tk.END)
+
+    def on_automation_tile_select(self, _event: tk.Event | None = None) -> None:
+        """Merge listbox selections into the automation tile field."""
+        selected_indices = set(self.automation_tile_listbox.curselection())
+        for index, tile in enumerate(self.automation_visible_utm_tiles):
+            if index in selected_indices:
+                self.automation_selected_tiles.add(tile)
+        self.automation_selected_tiles_var.set(", ".join(sorted(self.automation_selected_tiles)))
+        self.refresh_automation_tile_list()
+        if hasattr(self, "automation_start_button"):
+            self.automation_start_button.configure(state=tk.DISABLED)
+        self.automation_preflight_state = None
+
+    def apply_automation_tiles_from_text(self) -> None:
+        """Validate manually typed automation UTM tiles."""
+        try:
+            tiles = self.current_automation_tiles()
+        except ValueError as exc:
+            messagebox.showerror("Invalid automation UTM tiles", str(exc))
+            return
+        self.set_automation_tiles(tiles)
+        self.automation_status_var.set(f"Validated {len(tiles)} automation tile(s). Run preflight next.")
+
+    def clear_automation_tiles(self) -> None:
+        """Clear automation UTM tile selection."""
+        self.set_automation_tiles([])
+        self.automation_status_var.set("Automation tile selection cleared.")
+
+    def automation_dates_match_download(self) -> bool:
+        """Return whether Automation uses the same date window as Download."""
+        return (
+            self.automation_start_date_var.get().strip()
+            == self.download_start_date_var.get().strip()
+            and self.automation_end_date_var.get().strip()
+            == self.download_end_date_var.get().strip()
+        )
+
+    def automation_date_mismatch_message(self) -> str:
+        """Describe the current Automation/Download date mismatch."""
+        automation_start = self.automation_start_date_var.get().strip() or "(blank)"
+        automation_end = self.automation_end_date_var.get().strip() or "(blank)"
+        download_start = self.download_start_date_var.get().strip() or "(blank)"
+        download_end = self.download_end_date_var.get().strip() or "(blank)"
+        return (
+            "Warning: Automation dates differ from Download dates. "
+            f"Automation: {automation_start} to {automation_end}; "
+            f"Download: {download_start} to {download_end}."
+        )
+
+    def update_automation_date_status(self) -> None:
+        """Refresh the Automation date alignment status line."""
+        if not hasattr(self, "automation_date_status_var"):
+            return
+        if self.automation_dates_match_download():
+            self.automation_date_status_var.set("Automation date range matches the Download tab.")
+            return
+        self.automation_date_status_var.set(self.automation_date_mismatch_message())
+
+    def copy_download_dates_to_automation(self, notify: bool = True) -> None:
+        """Copy Download tab dates into Automation without changing selected tiles."""
+        self.automation_start_date_var.set(self.download_start_date_var.get().strip())
+        self.automation_end_date_var.set(self.download_end_date_var.get().strip())
+        self.update_automation_date_status()
+        self.automation_preflight_state = None
+        if hasattr(self, "automation_start_button"):
+            self.automation_start_button.configure(state=tk.DISABLED)
+        if notify:
+            self.automation_status_var.set(
+                "Copied Download date range into Automation. Run preflight next."
+            )
+
+    def copy_download_tiles_to_automation(self) -> None:
+        """Copy Download tab UTM tiles into Automation."""
+        try:
+            tiles = self.current_download_tiles()
+        except ValueError as exc:
+            messagebox.showerror("Invalid download UTM tiles", str(exc))
+            return
+        self.set_automation_tiles(tiles)
+        self.copy_download_dates_to_automation(notify=False)
+        self.automation_status_var.set(
+            f"Copied {len(tiles)} tile(s) and date range from Download. Run preflight next."
+        )
+
+    def automation_status_rows(self) -> list[tuple[str, int, int, int, int, int]]:
+        """Return cached/saved per-tile status rows for map overlays."""
+        if self.latest_project_insights is not None:
+            return list(self.latest_project_insights.upload_qa_tile_rows)
+        try:
+            loaded = load_project_insights_snapshot(self.build_config())
+        except Exception:
+            return []
+        if loaded is None:
+            return []
+        insights, generated_at = loaded
+        self.latest_project_insights = insights
+        self.latest_project_statistics_generated_at = generated_at
+        return list(insights.upload_qa_tile_rows)
+
+    def automation_coverage_tiles_from_status_rows(
+        self,
+        status_rows: list[tuple[str, int, int, int, int, int]],
+    ) -> list[str]:
+        """Return downloaded tiles from cached status rows without scanning manifests."""
+        coverage_tiles: set[str] = set()
+        for row in status_rows:
+            if len(row) < 2:
+                continue
+            tile = str(row[0]).strip().upper()
+            try:
+                downloaded = int(row[1])
+            except (TypeError, ValueError):
+                downloaded = 0
+            if tile and downloaded > 0:
+                coverage_tiles.add(tile)
+        return sorted(coverage_tiles)
+
+    def open_automation_map_selector(self) -> None:
+        """Open the visual UTM selector for automation tile selection."""
+        try:
+            selected_tiles = self.current_automation_tiles()
+        except ValueError as exc:
+            messagebox.showerror("Invalid automation UTM tiles", str(exc))
+            return
+        try:
+            geometry = load_display_geometry()
+        except (OSError, ValueError, KeyError) as exc:
+            messagebox.showerror(
+                "UTM map geometry unavailable",
+                (
+                    "Could not load the visual UTM selector geometry. "
+                    "Regenerate it with build_spatial_presets.py.\n\n"
+                    f"{exc}"
+                ),
+            )
+            return
+        self.refresh_tile_presets()
+        status_rows = self.automation_status_rows()
+        UTMMapSelectorDialog(
+            self.root,
+            geometry,
+            selected_tiles,
+            self.apply_automation_map_selection,
+            preset_choices=self.tile_preset_choices,
+            coverage_tiles=self.automation_coverage_tiles_from_status_rows(status_rows),
+            status_rows=status_rows,
+        )
+
+    def apply_automation_map_selection(self, tiles: list[str]) -> None:
+        """Apply visual selector output to the Automation tab."""
+        self.set_automation_tiles(tiles)
+        self.automation_status_var.set(
+            f"Applied {len(tiles)} UTM tile(s) from the map selector. Run preflight next."
+        )
+
     def save_selected_tiles_as_preset(self) -> None:
         """Save the current manual UTM selection as a project preset."""
         project_root = self.current_project_root_var.get().strip()
@@ -3918,6 +4358,7 @@ class LauncherApp:
                 "log_folder": self.duplicate_log_folder_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["logs"],
                 "recursive": self.duplicate_recursive_var.get(),
+                "utm_tiles": [],
             },
             "extract": {
                 "input_folder": self.extract_input_var.get().strip()
@@ -3937,6 +4378,7 @@ class LauncherApp:
                     1,
                     self.parse_int_or_default(self.extract_workers_var.get(), 1),
                 ),
+                "utm_tiles": [],
                 "manifest_csv": self.extract_manifest_var.get().strip()
                 or f"{DEFAULT_PROCESSING_PATHS['logs']}/extract_manifest.csv",
                 "errors_csv": self.extract_errors_var.get().strip()
@@ -3958,6 +4400,7 @@ class LauncherApp:
                     self.parse_int_or_default(self.mosaic_workers_var.get(), 1),
                 ),
                 "extensions": [".tif", ".tiff"],
+                "utm_tiles": [],
                 "report_csv": mosaic_report_csv,
                 "manifest_csv": self.mosaic_manifest_var.get().strip()
                 or str(Path(mosaic_report_csv).with_name("mosaic_manifest.csv")),
@@ -4048,6 +4491,18 @@ class LauncherApp:
                     / "ee_asset_inventory.csv"
                 ),
             },
+            "automation": {
+                "utm_tiles": sorted(self.automation_selected_tiles),
+                "start_date": self.automation_start_date_var.get().strip(),
+                "end_date": self.automation_end_date_var.get().strip(),
+                "include_upload": self.automation_include_upload_var.get(),
+                "cleanup_enabled": self.automation_cleanup_enabled_var.get(),
+                "min_free_space_gb": self.parse_float_or_default(
+                    self.automation_min_free_space_var.get(),
+                    50.0,
+                ),
+                "continue_on_tile_failure": self.automation_continue_on_failure_var.get(),
+            },
         }
 
     def save_config(
@@ -4062,6 +4517,18 @@ class LauncherApp:
         require_project: bool = True,
     ) -> bool:
         """Save config.yaml from the current form values."""
+        if self.automation_running and (
+            validate_download
+            or validate_duplicates
+            or validate_extract
+            or validate_mosaic
+            or validate_upload
+        ):
+            messagebox.showwarning(
+                "Automation running",
+                "Wait for automation to stop or finish before starting another workflow action.",
+            )
+            return False
         if require_project and not self.require_active_project("save or run this workflow step"):
             return False
         if validate_download and not self.validate_download():
@@ -4101,6 +4568,253 @@ class LauncherApp:
         if notify:
             messagebox.showinfo("Project settings saved", message)
         return True
+
+    def automation_config_from_ui(self) -> AutomationConfig:
+        """Build an AutomationConfig from current GUI state."""
+        if not self.current_project_root_var.get().strip():
+            raise ValueError("Open a project before running automation.")
+        tiles = self.current_automation_tiles()
+        if not tiles:
+            raise ValueError("Select one or more automation UTM tiles.")
+        start_date = self.automation_start_date_var.get().strip()
+        end_date = self.automation_end_date_var.get().strip()
+        date.fromisoformat(start_date)
+        date.fromisoformat(end_date)
+        if self.automation_include_upload_var.get() and not self.destination_var.get().strip():
+            raise ValueError("Automation upload requires a destination Earth Engine ImageCollection.")
+        return AutomationConfig(
+            project_root=Path(self.current_project_root_var.get().strip()),
+            base_config=self.build_config(dry_run_override=False),
+            utm_tiles=tiles,
+            start_date=start_date,
+            end_date=end_date,
+            include_upload=self.automation_include_upload_var.get(),
+            cleanup_enabled=self.automation_cleanup_enabled_var.get(),
+            min_free_space_gb=self.parse_float_or_default(
+                self.automation_min_free_space_var.get(),
+                50.0,
+            ),
+            continue_on_tile_failure=self.automation_continue_on_failure_var.get(),
+        )
+
+    def run_automation_preflight(self) -> None:
+        """Run required automation preflight in a background thread."""
+        if self.automation_running:
+            messagebox.showwarning(
+                "Automation running",
+                "Automation is already running. Stop or wait for it before preflight.",
+            )
+            return
+        try:
+            automation_config = self.automation_config_from_ui()
+        except Exception as exc:
+            messagebox.showerror("Automation preflight setup failed", str(exc))
+            return
+        if not self.save_config(
+            notify=False,
+            validate_download=False,
+            validate_upload=False,
+            validate_mosaic=False,
+            validate_duplicates=False,
+            validate_extract=False,
+        ):
+            return
+        self.automation_preflight_state = None
+        self.automation_start_button.configure(state=tk.DISABLED)
+        self.clear_treeview(self.automation_tree)
+        self.update_automation_date_status()
+        self.automation_progress_var.set(0.0)
+        self.automation_progress_text_var.set("Progress: running preflight")
+        self.automation_status_var.set(
+            "Automation preflight started. Searching CMR and reading project manifests..."
+        )
+        thread = threading.Thread(
+            target=self.run_automation_preflight_process,
+            args=(automation_config,),
+            daemon=True,
+        )
+        thread.start()
+
+    def run_automation_preflight_process(self, automation_config: AutomationConfig) -> None:
+        """Run automation preflight away from the Tkinter thread."""
+        try:
+            state = preflight_automation(automation_config)
+        except Exception as exc:
+            self.root.after(0, self.finish_automation_preflight_error, exc)
+            return
+        self.root.after(0, self.finish_automation_preflight, state)
+
+    def finish_automation_preflight_error(self, exc: Exception) -> None:
+        """Show failed automation preflight."""
+        self.automation_progress_var.set(0.0)
+        self.automation_progress_text_var.set("Progress: preflight failed")
+        self.automation_status_var.set(f"Automation preflight failed: {exc}")
+        messagebox.showerror("Automation preflight failed", str(exc))
+
+    def finish_automation_preflight(self, state: AutomationRunState) -> None:
+        """Render automation preflight results."""
+        if not self.automation_dates_match_download():
+            warning = self.automation_date_mismatch_message()
+            if warning not in state.warnings:
+                state.warnings.append(warning)
+        self.update_automation_date_status()
+        self.automation_preflight_state = state
+        self.populate_automation_tree(state)
+        self.automation_progress_var.set(100.0 if state.preflight_ok else 0.0)
+        warning_text = f" Warnings: {len(state.warnings)}." if state.warnings else ""
+        if state.preflight_ok:
+            self.automation_start_button.configure(state=tk.NORMAL)
+            self.automation_progress_text_var.set("Progress: preflight complete")
+            self.automation_status_var.set(
+                f"Preflight ready for {len(state.tile_plans)} tile(s).{warning_text} Run folder: {state.run_dir}"
+            )
+            messagebox.showinfo(
+                "Automation preflight finished",
+                (
+                    f"Preflight passed for {len(state.tile_plans)} tile(s).\n"
+                    f"Warnings: {len(state.warnings)}\n"
+                    f"Run folder:\n{state.run_dir}"
+                ),
+            )
+            return
+        self.automation_start_button.configure(state=tk.DISABLED)
+        self.automation_progress_text_var.set("Progress: preflight blocked")
+        self.automation_status_var.set(
+            f"Preflight blocked automation. Errors: {len(state.errors)}. Warnings: {len(state.warnings)}."
+        )
+        messagebox.showwarning(
+            "Automation preflight blocked",
+            "\n".join(state.errors[:8]) or "Preflight did not pass.",
+        )
+
+    def populate_automation_tree(self, state: AutomationRunState) -> None:
+        """Display automation preflight and run rows."""
+        if not hasattr(self, "automation_tree"):
+            return
+        self.clear_treeview(self.automation_tree)
+        for plan in state.tile_plans:
+            counts = (
+                f"matched {plan.matched_granules}, selected {plan.selected_granules}, "
+                f"pending {plan.pending_downloads}, uploaded {plan.uploaded}, missing upload {plan.missing_upload}"
+            )
+            self.automation_tree.insert(
+                "",
+                tk.END,
+                values=(plan.tile, plan.classification, "preflight", counts, plan.message),
+            )
+        for result in state.stage_results:
+            counts = ""
+            if result.deleted_files or result.deleted_bytes:
+                counts = f"deleted {result.deleted_files}, {result.deleted_bytes} bytes"
+            self.automation_tree.insert(
+                "",
+                tk.END,
+                values=(result.tile, result.stage, result.status, counts, result.message[:300]),
+            )
+
+    def start_automation(self) -> None:
+        """Start or resume the preflighted automation run."""
+        if self.automation_running:
+            messagebox.showwarning("Automation running", "Automation is already running.")
+            return
+        if self.automation_preflight_state is None or not self.automation_preflight_state.preflight_ok:
+            messagebox.showwarning(
+                "Preflight required",
+                "Run a successful automation preflight before starting automation.",
+            )
+            return
+        try:
+            automation_config = self.automation_config_from_ui()
+        except Exception as exc:
+            messagebox.showerror("Automation setup failed", str(exc))
+            return
+        automation_config.run_id = self.automation_preflight_state.run_id
+        automation_config.run_dir = self.automation_preflight_state.run_dir
+        self.automation_running = True
+        self.automation_stop_event = threading.Event()
+        self.automation_progress_var.set(0.0)
+        self.automation_progress_text_var.set("Progress: automation running")
+        self.automation_status_var.set("Automation started. Do not run manual workflow actions until it finishes.")
+        thread = threading.Thread(
+            target=self.run_automation_process,
+            args=(automation_config, self.automation_preflight_state, self.automation_stop_event),
+            daemon=True,
+        )
+        thread.start()
+
+    def run_automation_process(
+        self,
+        automation_config: AutomationConfig,
+        preflight_state: AutomationRunState,
+        stop_event: threading.Event,
+    ) -> None:
+        """Run automation away from the Tkinter thread."""
+        try:
+            state = run_automation(
+                automation_config,
+                preflight_state=preflight_state,
+                progress_callback=lambda tile, stage, status, message: self.root.after(
+                    0,
+                    self.update_automation_progress,
+                    tile,
+                    stage,
+                    status,
+                    message,
+                ),
+                stop_event=stop_event,
+            )
+        except Exception as exc:
+            self.root.after(0, self.finish_automation_error, exc)
+            return
+        self.root.after(0, self.finish_automation, state)
+
+    def update_automation_progress(self, tile: str, stage: str, status: str, message: str) -> None:
+        """Update automation status during a run."""
+        self.automation_progress_text_var.set(f"Progress: {tile} / {stage} / {status}")
+        self.automation_status_var.set(str(message).strip()[:500])
+
+    def stop_automation_after_current_stage(self) -> None:
+        """Request automation to stop between stages."""
+        if self.automation_stop_event is None:
+            self.automation_status_var.set("No active automation run to stop.")
+            return
+        self.automation_stop_event.set()
+        self.automation_status_var.set("Stop requested. Automation will stop after the current stage finishes.")
+        self.automation_progress_text_var.set("Progress: stop requested")
+
+    def finish_automation_error(self, exc: Exception) -> None:
+        """Show unexpected automation failure."""
+        self.automation_running = False
+        self.automation_stop_event = None
+        self.automation_progress_text_var.set("Progress: automation failed")
+        self.automation_status_var.set(f"Automation failed: {exc}")
+        self.refresh_project_statistics_if_active("automation")
+        messagebox.showerror("Automation failed", str(exc))
+
+    def finish_automation(self, state: AutomationRunState) -> None:
+        """Render final automation state."""
+        self.automation_running = False
+        self.automation_stop_event = None
+        self.automation_preflight_state = state
+        self.populate_automation_tree(state)
+        self.automation_progress_var.set(100.0)
+        self.automation_progress_text_var.set(
+            "Progress: automation stopped" if state.stopped else "Progress: automation finished"
+        )
+        failed = sum(1 for result in state.stage_results if result.status == "failed")
+        self.automation_status_var.set(
+            f"Automation {'stopped' if state.stopped else 'finished'}. Failed stages: {failed}. Run folder: {state.run_dir}"
+        )
+        self.refresh_project_statistics_if_active("automation")
+        messagebox.showinfo(
+            "Automation finished",
+            (
+                f"Stopped: {'yes' if state.stopped else 'no'}\n"
+                f"Failed stages: {failed}\n"
+                f"Run CSV:\n{state.csv_path}\n"
+                f"Run JSON:\n{state.json_path}"
+            ),
+        )
 
     def save_download_config(self) -> bool:
         """Save config after validating the download tab."""
@@ -4681,6 +5395,8 @@ class LauncherApp:
         self.draw_bar_chart(self.stats_tile_chart_canvas, [], "Top UTM tiles by recorded files")
         self.stats_status_map.clear_statuses()
         self.statistics_summary_var.set("")
+        self.latest_project_insights = None
+        self.latest_project_statistics_generated_at = ""
         self.cleanup_status_var.set("Open a project, then preview safe cleanup candidates.")
         if message:
             self.statistics_status_var.set(message)
@@ -4706,6 +5422,7 @@ class LauncherApp:
         include_cleanup: bool = True,
     ) -> None:
         """Render project statistics into the GUI tables and charts."""
+        self.latest_project_insights = insights
         self.clear_treeview(self.stats_metrics_tree)
         for metric, value in insights.metrics.items():
             self.stats_metrics_tree.insert("", tk.END, values=(metric, value))
@@ -4901,6 +5618,7 @@ class LauncherApp:
             )
             return
         insights, generated_at = loaded
+        self.latest_project_statistics_generated_at = generated_at
         suffix = f" from {generated_at}" if generated_at else ""
         self.display_project_statistics(
             insights,
@@ -4978,6 +5696,8 @@ class LauncherApp:
     ) -> None:
         """Render a completed background statistics refresh."""
         suffix = f" after {source}" if source else ""
+        if snapshot_text.startswith(" Saved to "):
+            self.latest_project_statistics_generated_at = ""
         self.display_project_statistics(
             insights,
             status_text=f"Project statistics refreshed{suffix}.{snapshot_text}",

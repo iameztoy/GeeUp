@@ -18,6 +18,13 @@ def swot_nc_name(*, crid: str = "PID0", counter: str = "01") -> str:
     )
 
 
+def swot_nc_name_for_tile(tile: str, *, crid: str = "PID0", counter: str = "01") -> str:
+    return (
+        f"SWOT_L2_HR_Raster_100m_{tile}_N_x_x_x_037_527_091F_"
+        f"20250829T040753_20250829T040815_{crid}_{counter}.nc"
+    )
+
+
 class DuplicateFilenameTests(unittest.TestCase):
     def test_parses_final_numeric_suffix_and_extension(self) -> None:
         candidate = split_filename(Path("SWOT_L2_HR_Raster_example_035_225_01.nc"))
@@ -132,6 +139,26 @@ class DuplicatePlanningTests(unittest.TestCase):
 
             self.assertEqual(plan.duplicate_group_count, 1)
             self.assertEqual(plan.actions[0].kept.name, swot_nc_name(crid="PGD0"))
+
+    def test_utm_tile_filter_limits_duplicate_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / swot_nc_name_for_tile("UTM36P", counter="01")).touch()
+            (root / swot_nc_name_for_tile("UTM36P", counter="02")).touch()
+            (root / swot_nc_name_for_tile("UTM35P", counter="01")).touch()
+            (root / swot_nc_name_for_tile("UTM35P", counter="02")).touch()
+
+            plan = build_duplicate_plan(
+                DuplicateConfig(
+                    input_folder=root,
+                    log_folder=root / "logs",
+                    utm_tiles=["UTM36P"],
+                )
+            )
+
+            self.assertEqual(plan.duplicate_group_count, 1)
+            self.assertEqual(len(plan.actions), 1)
+            self.assertIn("UTM36P", plan.actions[0].source.name)
 
     def test_swot_duplicate_handles_unknown_fidelity_crid(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -18,6 +18,7 @@ from swot_metadata import (
     parse_swot_l2_hr_raster_metadata,
     swot_product_rank,
 )
+from swot_download_tool import normalize_utm_tiles
 
 
 DEFAULT_PROCESSING_ROOT = "./SWOT_Processing"
@@ -35,6 +36,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "moved_folder_name": "moved",
         "log_folder": DEFAULT_PROCESSING_PATHS["logs"],
         "recursive": False,
+        "utm_tiles": [],
     },
 }
 
@@ -90,6 +92,7 @@ class DuplicateConfig:
     moved_folder_name: str = "moved"
     log_folder: Path = Path(DEFAULT_PROCESSING_PATHS["logs"])
     recursive: bool = False
+    utm_tiles: List[str] = field(default_factory=list)
     base_dir: Path = Path.cwd()
 
 
@@ -139,6 +142,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> DuplicateConfig:
         moved_folder_name=str(duplicate_data.get("moved_folder_name", "moved")).strip(),
         log_folder=resolve_path(log_folder, base_dir),
         recursive=bool(duplicate_data.get("recursive", False)),
+        utm_tiles=normalize_utm_tiles(duplicate_data.get("utm_tiles", [])),
         base_dir=base_dir,
     )
     validate_config(config)
@@ -191,6 +195,7 @@ def collect_files(config: DuplicateConfig) -> Tuple[List[CandidateFile], List[Pa
     globber = input_folder.rglob if config.recursive else input_folder.glob
     candidates: List[CandidateFile] = []
     unmatched: List[Path] = []
+    selected_tiles = set(config.utm_tiles)
     for path in sorted(globber("*")):
         if not path.is_file():
             continue
@@ -200,12 +205,19 @@ def collect_files(config: DuplicateConfig) -> Tuple[List[CandidateFile], List[Pa
             continue
         candidate = split_filename(resolved)
         if candidate is None:
-            unmatched.append(resolved)
+            if not config.utm_tiles:
+                unmatched.append(resolved)
             continue
         try:
             metadata = parse_swot_l2_hr_raster_metadata(resolved)
         except ValueError:
             metadata = None
+        if selected_tiles:
+            tile = ""
+            if metadata is not None:
+                tile = str(metadata.fields.get("coordinate_system", "") or "").upper()
+            if tile not in selected_tiles:
+                continue
         candidates.append(
             CandidateFile(
                 path=resolved,

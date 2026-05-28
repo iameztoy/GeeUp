@@ -1,7 +1,7 @@
 import tkinter as tk
 import unittest
 
-from geeup_project import TilePreset
+from swotflow_project import TilePreset
 from utm_map_selector import (
     CanvasTransform,
     UTMPipelineStatusMap,

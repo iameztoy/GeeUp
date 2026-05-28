@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import yaml
 
 from gdal_runtime import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
+from swot_download_tool import normalize_utm_tiles
 from swot_metadata import ParsedMetadata, parse_swot_l2_hr_raster_metadata, swot_product_rank
 from workflow_manifest import (
     source_signature,
@@ -61,6 +62,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "skip_manifest_existing": True,
         "mixed_crid_report_csv": "",
         "workers": 1,
+        "utm_tiles": [],
     },
 }
 
@@ -130,6 +132,7 @@ class MosaicConfig:
     skip_manifest_existing: bool = True
     mixed_crid_report_csv: Optional[Path] = None
     workers: int = 1
+    utm_tiles: List[str] = field(default_factory=list)
     base_dir: Path = Path.cwd()
 
 
@@ -224,6 +227,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> MosaicConfig:
             base_dir,
         ),
         workers=normalize_workers(mosaic_data.get("workers", 1)),
+        utm_tiles=normalize_utm_tiles(mosaic_data.get("utm_tiles", [])),
         base_dir=base_dir,
     )
     validate_config(config)
@@ -341,6 +345,7 @@ def build_mosaic_plan(config: MosaicConfig) -> MosaicPlan:
     """Scan inputs, parse SWOT names, and create grouped mosaic outputs."""
     grouped: Dict[MosaicGroupKey, List[MosaicSource]] = {}
     report_rows: List[Dict[str, str]] = []
+    selected_tiles = set(config.utm_tiles)
 
     for file_path in collect_input_files(config):
         try:
@@ -362,6 +367,9 @@ def build_mosaic_plan(config: MosaicConfig) -> MosaicPlan:
                     input_files=[file_path],
                 )
             )
+            continue
+        source_tile = str(metadata.fields.get("coordinate_system", "") or "").upper()
+        if selected_tiles and source_tile not in selected_tiles:
             continue
         grouped.setdefault(group_key(metadata, config), []).append(
             MosaicSource(path=file_path, metadata=metadata)
