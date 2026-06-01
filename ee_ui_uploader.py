@@ -69,6 +69,7 @@ def ensure_isolated_python_environment() -> None:
 ensure_isolated_python_environment()
 
 import yaml
+from urllib3.exceptions import ReadTimeoutError
 from selenium import webdriver
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -966,6 +967,7 @@ class EarthEngineUIUploader:
         self.tracked_items: Dict[str, UploadItem] = {}
         self.ee_inventory_synced = False
         self.ee_existing_asset_ids: set[str] = set()
+        self._current_dialog_asset_trailer = ""
 
         self.config.artifacts.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.config.artifacts.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -1568,9 +1570,37 @@ class EarthEngineUIUploader:
 
     def open_earth_engine(self) -> None:
         """Open the Earth Engine Code Editor."""
-        assert self.driver is not None
         self.logger.info("Opening Earth Engine: %s", self.config.earth_engine_url)
-        self.driver.get(self.config.earth_engine_url)
+        self.navigate_to_earth_engine("opening Earth Engine")
+
+    def navigate_to_earth_engine(self, action_description: str) -> None:
+        """Navigate to Earth Engine, tolerating page-load timeouts when the UI is usable."""
+        assert self.driver is not None
+        try:
+            self.driver.get(self.config.earth_engine_url)
+            return
+        except (TimeoutException, ReadTimeoutError, TimeoutError) as exc:
+            self.logger.warning(
+                "Timed out while %s. Checking whether the Earth Engine page is already usable: %s",
+                action_description,
+                exc,
+            )
+            try:
+                self.driver.execute_script("window.stop();")
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.wait_for_any_selector(
+                    ["assets_tab", "new_button"],
+                    timeout=30,
+                    must_be_clickable=False,
+                )
+            except Exception as ui_exc:
+                raise_if_invalid_browser_session(ui_exc)
+                raise exc from ui_exc
+            self.logger.info(
+                "Earth Engine UI is visible after the navigation timeout; continuing."
+            )
 
     def ensure_logged_in(self) -> None:
         """Wait for the user to log in manually when required."""
@@ -1600,7 +1630,7 @@ class EarthEngineUIUploader:
         )
         input()
         try:
-            self.driver.get(self.config.earth_engine_url)
+            self.navigate_to_earth_engine("returning to Earth Engine after manual login")
         except InvalidSessionIdException as exc:
             raise RuntimeError(
                 "The Chrome window was closed or disconnected during the manual login step. "
@@ -1711,7 +1741,24 @@ class EarthEngineUIUploader:
                 )
                 self.capture_debug_artifacts(f"retry_{sanitize_for_filename(item.asset_name)}_{attempt}")
                 if attempt < self.config.upload.retry_attempts:
-                    self.recover_ui_state()
+                    try:
+                        self.recover_ui_state()
+                    except (
+                        RetryableUIError,
+                        TimeoutException,
+                        StaleElementReferenceException,
+                        ElementClickInterceptedException,
+                        UnexpectedAlertPresentException,
+                        WebDriverException,
+                    ) as recover_exc:
+                        raise_if_invalid_browser_session(recover_exc)
+                        last_exception = recover_exc
+                        self.logger.error(
+                            "Earth Engine UI recovery failed while processing %s: %s",
+                            item.asset_id,
+                            recover_exc,
+                        )
+                        break
                     time.sleep(self.config.upload.retry_wait_seconds)
                     continue
                 break
@@ -1990,6 +2037,7 @@ class EarthEngineUIUploader:
         file_input.send_keys(str(item.local_file))
 
         asset_root, asset_trailer = self.split_current_ui_destination(item)
+        self._current_dialog_asset_trailer = asset_trailer
         self.set_current_ui_asset_root(asset_root)
         self.set_current_ui_asset_name(asset_trailer)
 
@@ -2075,8 +2123,11 @@ class EarthEngineUIUploader:
             reason = result.get("reason") if isinstance(result, dict) else "Unknown UI error."
             raise RetryableUIError(f"Could not set the upload destination root. {reason}")
 
-    def set_current_ui_asset_name(self, asset_trailer: str) -> None:
+    def set_current_ui_asset_name(self, asset_trailer: str, *, force_keyboard: bool = False) -> None:
         """Fill the asset trailer input in the current upload dialog."""
+        if force_keyboard and self.type_current_ui_asset_name(asset_trailer):
+            return
+
         result = self.execute_script(
             f"""
             {active_upload_dialog_helper_js()}
@@ -2090,6 +2141,7 @@ class EarthEngineUIUploader:
               : null;
             if (!input) return {{ok: false, reason: 'Asset Name input not found.'}};
 
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
             if ('value' in host) {{
               host.value = arguments[0];
             }}
@@ -2097,9 +2149,24 @@ class EarthEngineUIUploader:
               paperInput.value = arguments[0];
             }}
             input.focus();
-            input.value = arguments[0];
-            input.dispatchEvent(new Event('input', {{bubbles: true, composed: true}}));
+            if (nativeSetter) {{
+              nativeSetter.call(input, arguments[0]);
+            }} else {{
+              input.value = arguments[0];
+            }}
+            input.dispatchEvent(new InputEvent('input', {{
+              bubbles: true,
+              composed: true,
+              inputType: 'insertText',
+              data: arguments[0],
+            }}));
             input.dispatchEvent(new Event('change', {{bubbles: true, composed: true}}));
+            input.dispatchEvent(new KeyboardEvent('keyup', {{bubbles: true, composed: true}}));
+            host.dispatchEvent(new CustomEvent('value-changed', {{
+              bubbles: true,
+              composed: true,
+              detail: {{value: arguments[0]}},
+            }}));
             input.blur();
             return {{ok: input.value === arguments[0], value: input.value}};
             """,
@@ -2109,8 +2176,55 @@ class EarthEngineUIUploader:
             reason = result.get("reason") if isinstance(result, dict) else "Unknown UI error."
             raise RetryableUIError(f"Could not fill the Asset Name field. {reason}")
 
-    def _click_current_ui_upload_button(self) -> None:
-        """Click the upload button inside the current upload dialog."""
+    def type_current_ui_asset_name(self, asset_trailer: str) -> bool:
+        """Type the asset trailer through Selenium when JS value binding is not enough."""
+        try:
+            input_element = self.wait_for_script_value(
+                script=f"""
+                {active_upload_dialog_helper_js()}
+                const dialog = findActiveUploadDialog();
+                const host = dialog && dialog.shadowRoot
+                  ? dialog.shadowRoot.querySelector('{ee_selectors.SHADOW_SELECTORS["upload_dialog_asset_name_host"]}')
+                  : null;
+                const paperInput = host && host.shadowRoot ? host.shadowRoot.querySelector('#paper-input') : null;
+                return paperInput && paperInput.shadowRoot
+                  ? paperInput.shadowRoot.querySelector('{ee_selectors.SHADOW_SELECTORS["upload_dialog_asset_name_input"]}')
+                  : null;
+                """,
+                timeout=8,
+                description="Earth Engine Asset Name input",
+            )
+            self.clear_and_type(input_element, asset_trailer)
+            input_element.send_keys(Keys.TAB)
+            time.sleep(0.2)
+            value = self.execute_script(
+                f"""
+                {active_upload_dialog_helper_js()}
+                const dialog = findActiveUploadDialog();
+                const host = dialog && dialog.shadowRoot
+                  ? dialog.shadowRoot.querySelector('{ee_selectors.SHADOW_SELECTORS["upload_dialog_asset_name_host"]}')
+                  : null;
+                const paperInput = host && host.shadowRoot ? host.shadowRoot.querySelector('#paper-input') : null;
+                const input = paperInput && paperInput.shadowRoot
+                  ? paperInput.shadowRoot.querySelector('{ee_selectors.SHADOW_SELECTORS["upload_dialog_asset_name_input"]}')
+                  : null;
+                return input ? input.value : '';
+                """
+            )
+            return value == asset_trailer
+        except (
+            RetryableUIError,
+            TimeoutException,
+            StaleElementReferenceException,
+            ElementClickInterceptedException,
+            WebDriverException,
+        ) as exc:
+            raise_if_invalid_browser_session(exc)
+            self.logger.debug("Keyboard Asset Name fallback failed: %s", exc)
+            return False
+
+    def current_ui_upload_button_status(self) -> Dict[str, Any]:
+        """Return whether the current upload button exists and is disabled."""
         status = self.execute_script(
             f"""
             {active_upload_dialog_helper_js()}
@@ -2128,13 +2242,28 @@ class EarthEngineUIUploader:
             return {{found: true, disabled}};
             """
         )
+        return status if isinstance(status, dict) else {"found": False, "disabled": False}
+
+    def _click_current_ui_upload_button(self) -> None:
+        """Click the upload button inside the current upload dialog."""
+        status = self.current_ui_upload_button_status()
         if not isinstance(status, dict) or not status.get("found"):
             raise RetryableUIError("Could not find the upload button in the Earth Engine upload dialog.")
         if status.get("disabled"):
             error_message = self.read_dialog_error_message()
-            raise RetryableUIError(
-                error_message or "The Earth Engine upload button is still disabled. Check the selected file and asset destination."
-            )
+            if self._current_dialog_asset_trailer and "asset id" in error_message.lower():
+                self.logger.warning(
+                    "Earth Engine says the asset ID is missing; retrying the Asset Name field with keyboard input."
+                )
+                self.set_current_ui_asset_name(self._current_dialog_asset_trailer, force_keyboard=True)
+                time.sleep(0.5)
+                status = self.current_ui_upload_button_status()
+                if status.get("disabled"):
+                    error_message = self.read_dialog_error_message()
+            if status.get("disabled"):
+                raise RetryableUIError(
+                    error_message or "The Earth Engine upload button is still disabled. Check the selected file and asset destination."
+                )
 
         self.execute_script(
             f"""
@@ -3010,9 +3139,8 @@ class EarthEngineUIUploader:
 
     def recover_ui_state(self) -> None:
         """Reload the page and return to a known-good state."""
-        assert self.driver is not None
         self.logger.info("Refreshing the Earth Engine page to recover UI state.")
-        self.driver.get(self.config.earth_engine_url)
+        self.navigate_to_earth_engine("refreshing Earth Engine to recover UI state")
         self.ensure_logged_in()
         self.ensure_assets_tab()
 

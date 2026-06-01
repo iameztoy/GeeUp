@@ -56,6 +56,7 @@ PRODUCT_VERSION_FILTER_LABEL_BY_VALUE = {
 EXCLUDED_OLDER_VERSION_STATUS = "EXCLUDED_OLDER_VERSION"
 MGRS_LATITUDE_BANDS = "CDEFGHJKLMNPQRSTUVWX"
 UTM_TILE_RE = re.compile(r"^UTM(?P<zone>0[1-9]|[1-5]\d|60)(?P<band>[C-HJ-NP-X])$")
+CMR_PAGE_SIZE = 2000
 _AUTHENTICATED = False
 
 warnings.filterwarnings(
@@ -455,6 +456,93 @@ def run_search(
     return list(earthaccess.search_data(**search_kwargs(query, granule_name, count)))
 
 
+def build_earthaccess_granule_query(
+    earthaccess: Any,
+    query: DownloadQuery,
+    granule_name: str | Sequence[str],
+) -> Any:
+    """Build an earthaccess DataGranules query equivalent to search_data kwargs."""
+    granule_query = earthaccess.granule_query()
+    granule_query = granule_query.short_name(query.collection_short_name)
+    granule_query = granule_query.provider("POCLOUD")
+    granule_query = granule_query.cloud_hosted(True)
+    downloadable = getattr(granule_query, "downloadable", None)
+    if callable(downloadable):
+        granule_query = downloadable(True)
+    granule_query = granule_query.temporal(query.temporal[0], query.temporal[1])
+    granule_query = granule_query.granule_name(granule_name)
+    return granule_query
+
+
+def wrap_cmr_page_items(earthaccess: Any, items: Sequence[Any]) -> List[Any]:
+    """Convert raw CMR page items to DataGranule objects when needed."""
+    data_granule = getattr(earthaccess, "DataGranule", None)
+    if data_granule is None:
+        results_module = getattr(earthaccess, "results", None)
+        data_granule = getattr(results_module, "DataGranule", None)
+    if data_granule is None:
+        return list(items)
+    return [data_granule(item, cloud_hosted=True) for item in items]
+
+
+def run_search_paged(
+    earthaccess: Any,
+    query: DownloadQuery,
+    granule_name: str | Sequence[str],
+    count: int,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> List[Any]:
+    """Call CMR page-by-page so large searches can report progress."""
+    if not hasattr(earthaccess, "granule_query"):
+        raise RuntimeError("earthaccess.granule_query is not available.")
+
+    granule_query = build_earthaccess_granule_query(earthaccess, query, granule_name)
+    total_hits = int(granule_query.hits())
+    limit = total_hits if count == -1 else min(total_hits, count)
+    if progress_callback is not None:
+        progress_callback(0, limit, f"CMR found {total_hits} matching granule(s)")
+    if limit <= 0:
+        return []
+
+    url = granule_query._build_url()
+    headers = dict(getattr(granule_query, "headers", {}) or {})
+    session = granule_query.session
+    results: List[Any] = []
+
+    while len(results) < limit:
+        page_size = min(CMR_PAGE_SIZE, limit - len(results))
+        response = session.get(url, headers=headers, params={"page_size": page_size})
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            response_text = str(exc)
+            if getattr(exc, "response", None) is not None:
+                response_text = str(getattr(exc.response, "text", response_text))
+            raise RuntimeError(response_text) from exc
+
+        document = response.json()
+        latest = list(document.get("items", []) or [])
+        if not latest:
+            break
+        results.extend(wrap_cmr_page_items(earthaccess, latest))
+        if progress_callback is not None:
+            progress_callback(
+                min(len(results), limit),
+                limit,
+                f"CMR metadata retrieved for {min(len(results), limit)}/{limit} granule(s)",
+            )
+
+        search_after = response.headers.get("cmr-search-after")
+        if search_after:
+            headers["cmr-search-after"] = search_after
+        elif len(latest) >= page_size and len(results) < limit:
+            break
+        if len(latest) < page_size:
+            break
+
+    return results[:limit]
+
+
 def granule_identity(granule: Any) -> str:
     """Return a stable identity for deduplicating CMR granules."""
     meta = mapping_value(granule, "meta") or {}
@@ -496,20 +584,52 @@ def search_matching_granules(
         progress_callback(0, 0, "Searching CMR")
 
     try:
-        granules = run_search(earthaccess, query, query.granule_patterns, count)
+        granules = run_search_paged(
+            earthaccess,
+            query,
+            query.granule_patterns,
+            count,
+            progress_callback=progress_callback,
+        )
     except Exception:
-        granules = []
-        for index, pattern in enumerate(query.granule_patterns, start=1):
-            if config.max_granules is not None and len(granules) >= config.max_granules:
-                break
+        try:
             if progress_callback is not None:
-                progress_callback(index - 1, len(query.granule_patterns), f"Searching {pattern}")
-            remaining = (
-                config.max_granules - len(granules)
-                if config.max_granules is not None
-                else -1
-            )
-            granules.extend(run_search(earthaccess, query, pattern, remaining))
+                progress_callback(0, 0, "CMR paged search unavailable; using earthaccess search_data")
+            granules = run_search(earthaccess, query, query.granule_patterns, count)
+        except Exception:
+            granules = []
+            for index, pattern in enumerate(query.granule_patterns, start=1):
+                if config.max_granules is not None and len(granules) >= config.max_granules:
+                    break
+                if progress_callback is not None:
+                    progress_callback(
+                        index - 1,
+                        len(query.granule_patterns),
+                        f"Searching {pattern}",
+                    )
+                remaining = (
+                    config.max_granules - len(granules)
+                    if config.max_granules is not None
+                    else -1
+                )
+                try:
+                    granules.extend(
+                        run_search_paged(
+                            earthaccess,
+                            query,
+                            pattern,
+                            remaining,
+                            progress_callback=progress_callback,
+                        )
+                    )
+                except Exception:
+                    granules.extend(run_search(earthaccess, query, pattern, remaining))
+                if progress_callback is not None:
+                    progress_callback(
+                        index,
+                        len(query.granule_patterns),
+                        f"Finished CMR search for {pattern}",
+                    )
 
     unique = dedupe_granules(granules)
     if config.max_granules is not None:
@@ -772,11 +892,27 @@ def build_download_preview(
         earthaccess_module=earthaccess_module,
         progress_callback=progress_callback,
     )
-    granules = sorted(
-        (normalize_granule(granule) for granule in raw_granules),
-        key=lambda granule: granule.file_name.lower(),
-    )
+    granules = []
+    total_raw = len(raw_granules)
+    for index, raw_granule in enumerate(raw_granules, start=1):
+        granules.append(normalize_granule(raw_granule))
+        if progress_callback is not None and (
+            index == total_raw or index % 500 == 0
+        ):
+            progress_callback(
+                index,
+                total_raw,
+                f"Normalized CMR metadata for {index}/{total_raw} granule(s)",
+            )
+    granules = sorted(granules, key=lambda granule: granule.file_name.lower())
     apply_product_version_filter(granules, config.product_version_filter)
+    if progress_callback is not None:
+        selected_count = sum(1 for granule in granules if granule.selected_for_download)
+        progress_callback(
+            total_raw,
+            total_raw,
+            f"Product-version filter selected {selected_count}/{total_raw} granule(s)",
+        )
     return DownloadPreview(query=query, granules=granules)
 
 

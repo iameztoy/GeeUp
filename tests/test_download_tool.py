@@ -102,6 +102,98 @@ class FakeEarthaccess:
         return paths
 
 
+class FakeCMRResponse:
+    def __init__(self, items: list[FakeGranule], next_offset: int | None = None) -> None:
+        self._items = items
+        self.headers = {}
+        if next_offset is not None:
+            self.headers["cmr-search-after"] = str(next_offset)
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, list[FakeGranule]]:
+        return {"items": self._items}
+
+
+class FakeCMRSession:
+    def __init__(self, query: "FakeGranuleQuery") -> None:
+        self.query = query
+        self.page_calls: list[tuple[int, int]] = []
+
+    def get(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        params: dict[str, int] | None = None,
+    ):
+        headers = headers or {}
+        params = params or {}
+        offset = int(headers.get("cmr-search-after", "0"))
+        page_size = int(params.get("page_size", 2000))
+        matches = self.query.matches()
+        page = matches[offset : offset + page_size]
+        next_offset = offset + len(page)
+        self.page_calls.append((offset, page_size))
+        return FakeCMRResponse(
+            page,
+            next_offset if next_offset < len(matches) else None,
+        )
+
+
+class FakeGranuleQuery:
+    def __init__(self, results: list[FakeGranule]) -> None:
+        self.results = results
+        self.headers: dict[str, str] = {}
+        self.session = FakeCMRSession(self)
+        self.patterns: list[str] = []
+
+    def short_name(self, value: str):
+        return self
+
+    def provider(self, value: str):
+        return self
+
+    def cloud_hosted(self, value: bool = True):
+        return self
+
+    def downloadable(self, value: bool = True):
+        return self
+
+    def temporal(self, start: str, end: str):
+        return self
+
+    def granule_name(self, value):
+        self.patterns = [value] if isinstance(value, str) else list(value)
+        return self
+
+    def hits(self) -> int:
+        return len(self.matches())
+
+    def _build_url(self) -> str:
+        return "https://cmr.example.test/search"
+
+    def matches(self) -> list[FakeGranule]:
+        matches = []
+        for granule in self.results:
+            for pattern in self.patterns:
+                if granule.name.startswith(pattern.removesuffix("*")):
+                    matches.append(granule)
+                    break
+        return matches
+
+
+class FakePagedEarthaccess(FakeEarthaccess):
+    def __init__(self, results: list[FakeGranule]) -> None:
+        super().__init__(results)
+        self.queries: list[FakeGranuleQuery] = []
+
+    def granule_query(self):
+        query = FakeGranuleQuery(self.results)
+        self.queries.append(query)
+        return query
+
+
 class DownloadToolTests(unittest.TestCase):
     def test_utm_generation_and_wildcard_patterns(self) -> None:
         tiles = generate_utm_tiles()
@@ -172,6 +264,54 @@ class DownloadToolTests(unittest.TestCase):
             self.assertEqual(preview.total_known_size_mb, 12.5)
             self.assertEqual(preview.missing_size_count, 1)
             self.assertEqual(sorted(g.utm_tile for g in preview.granules), ["UTM29R", "UTM30R"])
+
+    def test_preview_reports_cmr_page_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            results = [
+                FakeGranule(
+                    (
+                        "SWOT_L2_HR_Raster_100m_UTM30R_N_x_x_x_"
+                        f"{(index // 584) + 1:03d}_{(index % 584) + 1:03d}_"
+                        f"{index % 1000:03d}F_20260117T052508_"
+                        "20260117T052529_PID0_01.nc"
+                    ),
+                    concept_id=f"G{index}",
+                    size_mb=1.0,
+                )
+                for index in range(2005)
+            ]
+            earthaccess = FakePagedEarthaccess(results)
+            config = DownloadConfig(
+                collection_short_name="SWOT_L2_HR_Raster_100m_D",
+                output_folder=root / "raw",
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                utm_tiles=["UTM30R"],
+                report_csv=root / "report.csv",
+                manifest_csv=root / "manifest.csv",
+            )
+            progress: list[tuple[int, int, str]] = []
+
+            preview = build_download_preview(
+                config,
+                earthaccess_module=earthaccess,
+                progress_callback=lambda current, total, message: progress.append(
+                    (current, total, message)
+                ),
+            )
+
+            self.assertEqual(len(preview.granules), 2005)
+            self.assertGreaterEqual(len(earthaccess.queries[0].session.page_calls), 2)
+            self.assertIn((0, 2005, "CMR found 2005 matching granule(s)"), progress)
+            self.assertIn(
+                (2000, 2005, "CMR metadata retrieved for 2000/2005 granule(s)"),
+                progress,
+            )
+            self.assertIn(
+                (2005, 2005, "CMR metadata retrieved for 2005/2005 granule(s)"),
+                progress,
+            )
 
     def test_preview_filters_to_best_product_version_but_reports_excluded_rows(self) -> None:
         old_name = granule_name(utm="UTM30R", crid="PID0", counter="01")

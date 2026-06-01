@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from selenium.common.exceptions import InvalidSessionIdException, WebDriverException
+from selenium.common.exceptions import InvalidSessionIdException, TimeoutException, WebDriverException
 
 from ee_ui_uploader import (
     EE_VERIFIED_EXISTS_STATUS,
@@ -14,6 +14,8 @@ from ee_ui_uploader import (
     TERMINAL_STATUSES,
     UNKNOWN_AFTER_CLICK_STATUS,
     EarthEngineUIUploader,
+    RetryableUIError,
+    UploadItem,
     active_upload_dialog_helper_js,
     is_invalid_browser_session,
     normalize_dialog_error_messages,
@@ -117,6 +119,78 @@ class UploaderDialogRegressionTests(unittest.TestCase):
         self.assertTrue(is_invalid_browser_session(InvalidSessionIdException()))
         self.assertTrue(is_invalid_browser_session(WebDriverException("invalid session id")))
         self.assertFalse(is_invalid_browser_session(WebDriverException("stale element reference")))
+
+    def test_current_ui_destination_keeps_collection_in_asset_trailer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.uploader_config(root)
+            item = UploadItem(
+                local_file=root / "inputs" / "a.tif",
+                asset_name="a",
+                asset_id="projects/example/assets/collection/a",
+            )
+
+            asset_root, asset_trailer = self.uploader(config).split_current_ui_destination(item)
+
+            self.assertEqual(asset_root, "projects/example/assets/")
+            self.assertEqual(asset_trailer, "collection/a")
+
+    def test_recovery_failure_marks_current_upload_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "inputs" / "a.tif"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"1")
+            config = self.uploader_config(root)
+            config.upload.retry_attempts = 2
+            uploader = self.uploader(config)
+            item = UploadItem(
+                local_file=path,
+                asset_name="a",
+                asset_id="projects/example/assets/collection/a",
+            )
+
+            with (
+                mock.patch.object(uploader, "ensure_assets_tab"),
+                mock.patch.object(uploader, "open_image_upload_dialog"),
+                mock.patch.object(uploader, "populate_upload_dialog"),
+                mock.patch.object(uploader, "submit_upload_dialog", side_effect=RetryableUIError("Please provide an asset ID.")),
+                mock.patch.object(uploader, "recover_ui_state", side_effect=TimeoutException("renderer timeout")),
+                mock.patch.object(uploader, "capture_debug_artifacts"),
+            ):
+                uploader.submit_with_retries(item)
+
+            rows = self.read_report_rows(config.artifacts.report_csv)
+            self.assertEqual(rows[0]["final_status"], "ERROR")
+            self.assertIn("renderer timeout", rows[0]["error_message"])
+
+    def test_open_earth_engine_continues_when_timeout_page_is_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            uploader = self.uploader(self.uploader_config(root))
+            uploader.driver = mock.Mock()
+            uploader.driver.get.side_effect = TimeoutException("slow page load")
+
+            with mock.patch.object(uploader, "wait_for_any_selector", return_value=mock.Mock()) as wait:
+                uploader.open_earth_engine()
+
+            wait.assert_called_once()
+            uploader.driver.execute_script.assert_called_once_with("window.stop();")
+
+    def test_open_earth_engine_reraises_timeout_when_ui_is_not_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            uploader = self.uploader(self.uploader_config(root))
+            uploader.driver = mock.Mock()
+            uploader.driver.get.side_effect = TimeoutException("slow page load")
+
+            with mock.patch.object(
+                uploader,
+                "wait_for_any_selector",
+                side_effect=TimeoutException("no Earth Engine UI"),
+            ):
+                with self.assertRaises(TimeoutException):
+                    uploader.open_earth_engine()
 
     def test_all_file_upload_scope_preserves_current_planning(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
