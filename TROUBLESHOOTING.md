@@ -141,6 +141,60 @@ What to do:
 3. If needed, update `new_button` and `image_upload_button` in `ee_selectors.py` for the generic fallbacks too.
 4. Re-run in dry-run mode first.
 
+## Earth Engine Is Visible But The Console Reports a Page-Load Timeout
+
+Symptoms:
+
+- the console fails while opening `https://code.earthengine.google.com/`
+- the traceback mentions `ReadTimeoutError`, `TimeoutException`, or `driver.get`
+- the saved screenshot shows the Earth Engine Code Editor is actually visible
+
+What it usually means:
+
+- Chrome loaded enough of Earth Engine for a human to see it, but Selenium did not receive a clean page-load completion signal before the timeout
+- Chrome or the Earth Engine page was temporarily slow or overloaded
+
+What SWOTFlow does:
+
+- recent versions check whether the Earth Engine UI is usable after a page-load timeout
+- if the Assets/New controls are visible, the uploader continues
+- if the UI is not usable or Chrome disconnects, the run stops and writes debug artifacts
+
+What to do:
+
+1. If the run stopped, close the controlled Chrome window.
+2. Reopen SWOTFlow and the same project.
+3. Run `Sync EE Assets` if any uploads may have been submitted before the failure.
+4. Rerun the real upload with `Resume previous run` enabled.
+5. If it repeats often, increase `execution.page_load_timeout_seconds` and reduce upload batch pressure.
+
+## Upload Button Disabled Or "Please Provide an Asset ID"
+
+Symptoms:
+
+- the Earth Engine upload dialog opens
+- the file appears selected
+- the final `UPLOAD` button stays disabled
+- the dialog says `Please provide an asset ID`
+
+What it usually means:
+
+- Earth Engine did not bind the Asset Name field even though Selenium filled it
+- the upload dialog re-rendered while the field was being populated
+- less commonly, the destination collection/root is invalid or unavailable
+
+What SWOTFlow does:
+
+- if the dialog reports a missing asset ID, SWOTFlow retries the Asset Name field using keyboard input
+- if the browser recovery step fails, the current row is written as `ERROR` instead of remaining `PLANNED_UPLOAD`
+
+What to do:
+
+1. Run `Sync EE Assets` after checking whether any task was submitted.
+2. Rerun with `Resume previous run` enabled.
+3. If the same file fails repeatedly, upload only that tile or a small batch and inspect the saved screenshot in `<project_root>\00_logs\upload_artifacts`.
+4. Confirm the destination ImageCollection path exists and that the account can write to it.
+
 ## User Not Logged In
 
 Symptoms:

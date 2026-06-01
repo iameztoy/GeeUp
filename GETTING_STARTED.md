@@ -90,7 +90,7 @@ Create or open a project before running workflow actions. SWOTFlow projects keep
 
 SWOTFlow opens on the **Home** tab. Use it for the project summary, selected-tile overview, workflow shortcuts, and GitHub link; use the processing tabs for the actual work.
 
-The **Automation** tab is for unattended tile-by-tile runs inside an open project. Select tiles, choose the date range, run `Run Preflight`, then start automation only after the preflight passes. Upload is optional because browser-based Earth Engine upload still needs an untouched Chrome/session.
+The **Automation** tab is for unattended tile-by-tile runs inside an open project. Select tiles, choose the date range, run `Run Preflight`, then start automation only after the preflight passes. Use `Copy Download Date Range` when you want automation to use the same temporal window as the manual Download tab; SWOTFlow warns when the two date ranges differ. Upload is optional because browser-based Earth Engine upload still needs an untouched Chrome/session.
 
 ## Create Or Open A Project
 
@@ -158,6 +158,8 @@ Typical steps:
 
 The raw files go to `01_raw_downloads` by default. The preview report and cumulative download manifest go to `00_logs`.
 
+For large searches, the status text may say `Searching CMR`. CMR is NASA's Common Metadata Repository, the metadata service used by PO.DAAC/Earthdata. Large tile/date searches can spend time listing metadata before the first download starts; SWOTFlow reports paged CMR progress such as total matching granules and metadata retrieved so the window does not look idle.
+
 ### 2. Duplicate Removal
 
 Run Duplicate Removal when repeated raw product versions are present or when you want a conservative cleanup pass before extraction.
@@ -208,6 +210,8 @@ Dry run is recommended when you changed the origin folder, destination collectio
 If a real upload was submitted but the console was closed before SWOTFlow finished monitoring Earth Engine tasks, `upload_report.csv` may still show `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It lists the destination collection and marks matching local mosaics as `EE_VERIFIED_EXISTS`, which also updates Statistics and Cleanup eligibility.
 
 Before planning uploads, SWOTFlow can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the local upload report is incomplete. The Upload tile list also excludes local files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS` in `upload_report.csv`; the status text shows which source tiles are already completed or verified.
+
+If the Earth Engine page appears loaded but the upload console reports a page-load timeout, rerun with `Resume previous run` enabled. Recent SWOTFlow versions check whether the Earth Engine UI is already usable after a timeout and continue when possible. If Earth Engine rejects the dialog with `Please provide an asset ID`, SWOTFlow retries the Asset Name field with keyboard input and records unrecoverable browser failures as `ERROR` rows so they can be retried.
 
 ### 6. Statistics
 

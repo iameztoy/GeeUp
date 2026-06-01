@@ -43,6 +43,7 @@ download:
   utm_tiles: []
 
   # Optional safety cap for testing. Leave null to retrieve all matches.
+  # This limits the preview/search result itself, so use it only for tests.
   max_granules: null
 
   # Product-version handling after the remote search:
@@ -299,6 +300,8 @@ execution:
   # Maximum wait for task monitoring before the script gives up and exits.
   wait_timeout_minutes: 720
 
+  # Selenium page-load timeout for opening/reloading Earth Engine. If the page is
+  # visible after this timeout, SWOTFlow checks for usable controls and continues.
   page_load_timeout_seconds: 90
 
   # True = show debug-level logging in the console as well as the log file.
@@ -313,6 +316,8 @@ artifacts:
 automation:
   # Unattended tile-by-tile workflow settings used by the Automation tab.
   # Manual workflow tabs remain available and share the same project manifests.
+  # In the GUI, use "Copy Download Date Range" when automation should match the
+  # manual Download tab's temporal window.
   utm_tiles: []
   start_date: ""
   end_date: ""

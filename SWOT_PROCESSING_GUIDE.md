@@ -54,6 +54,8 @@ python build_spatial_presets.py --utm-grid C:\path\to\World_UTM_Grid.gpkg --cont
 
 The Download tab searches PO.DAAC through `earthaccess` and writes matched SWOT L2 HR Raster 100 m NetCDF files to `01_raw_downloads` by default.
 
+Searches are CMR searches. CMR is NASA's Common Metadata Repository, which PO.DAAC/Earthdata uses to expose granule metadata before data download. For large requests, SWOTFlow uses paged CMR retrieval when the installed `earthaccess` version supports it. The progress output reports the total matching granules, page-by-page metadata retrieval, metadata normalization, and product-version filtering before `earthaccess.download()` begins. This makes long searches for tens of thousands of granules more transparent, but it does not eliminate the metadata-listing time.
+
 Phase 1 download filtering uses:
 
 - collection short name, default `SWOT_L2_HR_Raster_100m_D`
@@ -88,7 +90,7 @@ Use the `Statistics` tab after any major run to audit the active project. It rea
 
 Statistics refresh automatically after completed Download, Duplicate Removal, Extraction, Mosaic, and Cleanup actions. Upload runs in a separate console window, so SWOTFlow watches the configured `upload_report.csv` and refreshes statistics when that report changes. You can still click `Refresh Statistics` at any time. Each refresh saves the latest statistics under `00_logs/statistics` as `project_statistics_snapshot.json` plus CSV tables for metrics, stage statuses, UTM tiles, dates, processing levels, processing levels by tile, mosaic output grids, mosaic source tiles, upload statuses, uploaded tiles/dates/levels/grids, upload QA by tile, ready-not-uploaded mosaics, and upload errors. When a project is reopened, the GUI loads the latest saved snapshot immediately; refresh again to recompute from current files and manifests.
 
-The Automation tab uses the same project manifests and reports as the manual tabs. Its preflight classifies selected UTM tiles as already complete, partial/resumable, needing update, or new for the requested date range. Automation writes run logs under `00_logs/automation_runs/<run_id>` and deletes intermediate files only when downstream manifests or Earth Engine verification prove the next stage exists.
+The Automation tab uses the same project manifests and reports as the manual tabs. Its date range is explicit and can be copied from the Download tab with `Copy Download Date Range`; the GUI warns when Automation dates differ from Download dates so manual and unattended runs do not accidentally process different temporal windows. Preflight classifies selected UTM tiles as already complete, partial/resumable, needing update, or new for the requested date range. Automation writes run logs under `00_logs/automation_runs/<run_id>` and deletes intermediate files only when downstream manifests or Earth Engine verification prove the next stage exists.
 
 The separate `Cleanup` tab provides conservative cleanup controls. `Preview Cleanup` lists only files with downstream manifest proof: raw NetCDFs that have completed extraction rows, extracted GeoTIFFs that belong to completed non-stale mosaic rows, and mosaic GeoTIFFs that are recorded as uploaded or already present in Earth Engine. Delete selected rows when you want fine control, or delete all previewed candidates when the project stage is complete and storage is the priority.
 
@@ -161,6 +163,8 @@ Before upload planning, SWOTFlow can list the destination Earth Engine collectio
 Dry runs are optional but useful after changing upload settings. They do not upload anything; they write the full per-file plan to `upload_report.csv` and print only a short console preview to avoid flooding the terminal for large projects. Real runs write `PLANNED_UPLOAD` rows before the confirmation prompt, then update those rows as files are submitted and completed. The Upload tab progress bar is derived from these report statuses.
 
 If a run is interrupted or the console is closed while rows are still `SUBMITTED`, use the Upload tab's `Sync EE Assets` action after Earth Engine has finished ingesting the assets. This runs an inventory-only sync against the destination collection and updates matching local report rows to `EE_VERIFIED_EXISTS`. Statistics merges `ee_asset_inventory.csv` with `upload_report.csv`, so EE-verified assets count as uploaded even if an older local report row was stale or filtered by a later selected-tile run.
+
+The browser uploader has defensive recovery for two common Earth Engine UI issues. First, when Chrome or Selenium reports a page-load timeout but the Earth Engine Code Editor is already visible, SWOTFlow checks for usable UI controls and continues instead of failing immediately. Second, if Earth Engine disables the final `UPLOAD` button with a validation message such as `Please provide an asset ID`, SWOTFlow retries the Asset Name field through keyboard input. If recovery itself fails or Chrome disconnects, the current asset is written as `ERROR` in `upload_report.csv` rather than being left as `PLANNED_UPLOAD`, so `Resume previous run` can retry it after `Sync EE Assets`.
 
 ## Mosaic Output Naming
 
