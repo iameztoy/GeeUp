@@ -351,6 +351,42 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             self.assertEqual(plan, [])
             self.assertEqual(rows[0]["final_status"], "RUNNING")
 
+    def test_submitted_report_status_is_retried_when_ee_sync_does_not_find_asset(self) -> None:
+        class FakeData:
+            def listAssets(self, params):
+                return {"assets": []}
+
+        class FakeEe:
+            data = FakeData()
+
+            def Initialize(self, project=None):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "inputs"
+            logs = root / "logs"
+            folder.mkdir(parents=True, exist_ok=True)
+            logs.mkdir(parents=True, exist_ok=True)
+            (folder / "a.tif").write_bytes(b"1")
+            report = logs / "upload_report.csv"
+            with report.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["local_file", "asset_id", "final_status"])
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "local_file": str(folder / "a.tif"),
+                        "asset_id": "projects/example/assets/collection/a",
+                        "final_status": "SUBMITTED",
+                    }
+                )
+            config = self.uploader_config(root, scope="all", ee_sync=True)
+
+            with mock.patch("ee_ui_uploader.import_ee", return_value=FakeEe()):
+                plan = self.uploader(config).build_upload_plan()
+
+            self.assertEqual([item.asset_id for item in plan], ["projects/example/assets/collection/a"])
+
     def test_completed_report_status_is_retried_when_ee_sync_does_not_find_asset(self) -> None:
         class FakeData:
             def listAssets(self, params):

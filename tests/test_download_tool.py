@@ -303,13 +303,13 @@ class DownloadToolTests(unittest.TestCase):
 
             self.assertEqual(len(preview.granules), 2005)
             self.assertGreaterEqual(len(earthaccess.queries[0].session.page_calls), 2)
-            self.assertIn((0, 2005, "CMR found 2005 matching granule(s)"), progress)
+            self.assertIn((0, 2005, "Step 1/4: CMR found 2005 matching granule(s)"), progress)
             self.assertIn(
-                (2000, 2005, "CMR metadata retrieved for 2000/2005 granule(s)"),
+                (2000, 2005, "Step 1/4: CMR metadata retrieved for 2000/2005 granule(s)"),
                 progress,
             )
             self.assertIn(
-                (2005, 2005, "CMR metadata retrieved for 2005/2005 granule(s)"),
+                (2005, 2005, "Step 1/4: CMR metadata retrieved for 2005/2005 granule(s)"),
                 progress,
             )
 
@@ -555,7 +555,7 @@ class DownloadToolTests(unittest.TestCase):
 
         def progress(current: int, total: int, message: str) -> None:
             progress_events.append((current, total, message))
-            if message == "Starting download":
+            if "starting transfer" in message:
                 stop_event.set()
 
         with tempfile.TemporaryDirectory() as temp:

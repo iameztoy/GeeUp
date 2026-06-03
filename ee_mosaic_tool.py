@@ -7,11 +7,12 @@ from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import csv
 import json
+import math
 import re
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
@@ -71,6 +72,8 @@ REPORT_COLUMNS = [
     "status",
     "output_file",
     "input_count",
+    "original_input_count",
+    "excluded_input_count",
     "cycle_id",
     "pass_id",
     "start_date",
@@ -91,6 +94,8 @@ REPORT_COLUMNS = [
     "stale",
     "updated_at",
     "message",
+    "excluded_input_files",
+    "excluded_reasons",
     "input_files",
 ]
 ERROR_DISK_SPACE_STATUS = "ERROR_DISK_SPACE"
@@ -151,6 +156,14 @@ class MosaicGroup:
     key: MosaicGroupKey
     sources: List[MosaicSource]
     output_file: Path
+
+
+@dataclass
+class SourceExclusion:
+    """One mosaic input that was excluded from a partial mosaic."""
+
+    source: MosaicSource
+    reason: str
 
 
 @dataclass
@@ -420,6 +433,7 @@ def mosaic_manifest_completed(row: Dict[str, str] | None) -> bool:
         return False
     return row.get("status", "") in {
         "MOSAIC_CREATED",
+        "MOSAIC_CREATED_WITH_EXCLUSIONS",
         "COPIED_SINGLETON",
         "SKIPPED_EXISTS",
         "SKIPPED_MANIFEST",
@@ -591,27 +605,68 @@ def preflight_mosaic_group(
 def execute_mosaic_group(group: MosaicGroup, config: MosaicConfig, signature: str) -> Dict[str, str]:
     """Write one mosaic output and return its report row."""
     try:
-        if len(group.sources) == 1:
-            copy_singleton(group, config)
+        selected_sources, exclusions = select_compatible_sources(group.sources)
+        if not selected_sources:
             return add_mosaic_tracking_fields(
                 report_row_for_group(
                     group,
-                    "COPIED_SINGLETON",
-                    "Single-file group written to mosaic output folder.",
+                    "SKIPPED_INCOMPATIBLE",
+                    exclusion_message(exclusions, len(group.sources)),
+                    exclusions=exclusions,
+                    original_input_count=len(group.sources),
                 ),
                 group,
                 signature,
             )
-        validate_raster_group(group.sources)
-        merge_group(group, config)
+
+        effective_group = group
+        effective_signature = signature
+        if exclusions:
+            effective_group = MosaicGroup(
+                key=group.key,
+                sources=selected_sources,
+                output_file=group.output_file.with_name(
+                    f"{build_output_stem(selected_sources, group.key)}.tif"
+                ),
+            )
+            effective_signature = group_source_signature(effective_group)
+
+        if len(effective_group.sources) == 1:
+            copy_singleton(effective_group, config)
+            status = "MOSAIC_CREATED_WITH_EXCLUSIONS" if exclusions else "COPIED_SINGLETON"
+            message = (
+                partial_mosaic_message(exclusions, len(group.sources))
+                if exclusions
+                else "Single-file group written to mosaic output folder."
+            )
+            return add_mosaic_tracking_fields(
+                report_row_for_group(
+                    effective_group,
+                    status,
+                    message,
+                    exclusions=exclusions,
+                    original_input_count=len(group.sources),
+                ),
+                effective_group,
+                effective_signature,
+            )
+        merge_group(effective_group, config)
+        status = "MOSAIC_CREATED_WITH_EXCLUSIONS" if exclusions else "MOSAIC_CREATED"
+        message = (
+            partial_mosaic_message(exclusions, len(group.sources))
+            if exclusions
+            else "Merged with current wse priority and wse_qual fallback over class 3."
+        )
         return add_mosaic_tracking_fields(
             report_row_for_group(
-                group,
-                "MOSAIC_CREATED",
-                "Merged with current wse priority and wse_qual fallback over class 3.",
+                effective_group,
+                status,
+                message,
+                exclusions=exclusions,
+                original_input_count=len(group.sources),
             ),
-            group,
-            signature,
+            effective_group,
+            effective_signature,
         )
     except IncompatibleRasterGroupError as exc:
         return add_mosaic_tracking_fields(
@@ -745,6 +800,169 @@ class IncompatibleRasterGroupError(Exception):
     """Raised when files in one metadata group cannot be safely merged."""
 
 
+def raster_signature(source: MosaicSource) -> Tuple[Dict[str, Any], str]:
+    """Return a compatibility signature for one raster source."""
+    gdal = require_gdal()
+    dataset = gdal.Open(str(source.path))
+    if dataset is None:
+        raise IncompatibleRasterGroupError(f"{source.path.name} could not be opened by GDAL.")
+
+    try:
+        transform = dataset.GetGeoTransform(can_return_null=True)
+        projection = dataset.GetProjectionRef()
+        if transform is None:
+            raise IncompatibleRasterGroupError(f"{source.path.name} has no geotransform.")
+        if not projection:
+            raise IncompatibleRasterGroupError(f"{source.path.name} has no projection.")
+        try:
+            transform_values = tuple(float(value) for value in transform)
+        except (TypeError, ValueError) as exc:
+            raise IncompatibleRasterGroupError(
+                f"{source.path.name} has invalid geotransform values: {transform}."
+            ) from exc
+        if len(transform_values) != 6 or not all(math.isfinite(value) for value in transform_values):
+            raise IncompatibleRasterGroupError(
+                f"{source.path.name} has invalid geotransform values: {transform}."
+            )
+        if (
+            transform_values[2] != 0
+            or transform_values[4] != 0
+            or transform_values[1] <= 0
+            or transform_values[5] >= 0
+        ):
+            raise IncompatibleRasterGroupError(
+                f"{source.path.name} is not a north-up raster with standard orientation."
+            )
+
+        pixel_width = abs(transform_values[1])
+        pixel_height = abs(transform_values[5])
+        if pixel_width < 1e-12 or pixel_height < 1e-12:
+            raise IncompatibleRasterGroupError(
+                f"{source.path.name} has invalid pixel size in geotransform: {transform}."
+            )
+        if pixel_width > 1_000_000 or pixel_height > 1_000_000:
+            raise IncompatibleRasterGroupError(
+                f"{source.path.name} has unrealistic pixel size in geotransform: {transform}."
+            )
+        if abs(transform_values[0]) > 1e15 or abs(transform_values[3]) > 1e15:
+            raise IncompatibleRasterGroupError(
+                f"{source.path.name} has unrealistic origin in geotransform: {transform}."
+            )
+
+        signature = {
+            "count": dataset.RasterCount,
+            "dtypes": tuple(
+                dataset.GetRasterBand(index).DataType
+                for index in range(1, dataset.RasterCount + 1)
+            ),
+            "projection": projection,
+            "res": (round(pixel_width, 12), round(pixel_height, 12)),
+            "nodatavals": tuple(
+                dataset.GetRasterBand(index).GetNoDataValue()
+                for index in range(1, dataset.RasterCount + 1)
+            ),
+        }
+    finally:
+        dataset = None
+    return signature, signature_key(signature)
+
+
+def signature_key(signature: Mapping[str, Any]) -> str:
+    """Return a stable key for grouping compatible raster signatures."""
+    return json.dumps(
+        {
+            "count": signature["count"],
+            "dtypes": list(signature["dtypes"]),
+            "projection": signature["projection"],
+            "res": list(signature["res"]),
+            "nodatavals": list(signature["nodatavals"]),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
+def signature_mismatches(signature: Mapping[str, Any], baseline: Mapping[str, Any]) -> List[str]:
+    """Return signature fields that differ from the selected compatible group."""
+    return [key for key, value in signature.items() if value != baseline[key]]
+
+
+def select_compatible_sources(
+    sources: Sequence[MosaicSource],
+) -> Tuple[List[MosaicSource], List[SourceExclusion]]:
+    """Keep the largest compatible source cluster and report excluded inputs."""
+    groups: Dict[str, List[Tuple[MosaicSource, Dict[str, Any]]]] = {}
+    order: List[str] = []
+    exclusions: List[SourceExclusion] = []
+    for source in sources:
+        try:
+            signature, key = raster_signature(source)
+        except IncompatibleRasterGroupError as exc:
+            exclusions.append(SourceExclusion(source=source, reason=str(exc)))
+            continue
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((source, signature))
+
+    if not groups:
+        return [], exclusions
+
+    largest_group_size = max(len(group) for group in groups.values())
+    largest_keys = [key for key in order if len(groups[key]) == largest_group_size]
+    if len(largest_keys) > 1:
+        for key in largest_keys:
+            for source, _signature in groups[key]:
+                exclusions.append(
+                    SourceExclusion(
+                        source=source,
+                        reason=(
+                            f"{source.path.name} belongs to a tied incompatible source group; "
+                            "no dominant compatible group could be selected."
+                        ),
+                    )
+                )
+        return [], exclusions
+
+    selected_key = largest_keys[0]
+    selected_group = groups[selected_key]
+    selected_signature = selected_group[0][1]
+    selected_sources = [source for source, _signature in selected_group]
+    for key in order:
+        if key == selected_key:
+            continue
+        for source, signature in groups[key]:
+            mismatches = ", ".join(signature_mismatches(signature, selected_signature))
+            exclusions.append(
+                SourceExclusion(
+                    source=source,
+                    reason=f"{source.path.name} differs from selected compatible sources in: {mismatches}.",
+                )
+            )
+    return selected_sources, exclusions
+
+
+def exclusion_message(exclusions: Sequence[SourceExclusion], original_count: int) -> str:
+    """Return a compact message for a fully incompatible group."""
+    reasons = [f"{item.source.path.name}: {item.reason}" for item in exclusions[:5]]
+    extra = "" if len(exclusions) <= 5 else f" +{len(exclusions) - 5} more."
+    return (
+        f"No compatible mosaic inputs remained from {original_count} source file(s). "
+        f"Excluded sources: {' | '.join(reasons)}{extra}"
+    )
+
+
+def partial_mosaic_message(exclusions: Sequence[SourceExclusion], original_count: int) -> str:
+    """Return a compact message for a mosaic created after excluding bad sources."""
+    kept = original_count - len(exclusions)
+    names = ", ".join(item.source.path.name for item in exclusions[:5])
+    extra = "" if len(exclusions) <= 5 else f", +{len(exclusions) - 5} more"
+    return (
+        f"Created from {kept} of {original_count} compatible source file(s); "
+        f"excluded {len(exclusions)} invalid/incompatible source(s): {names}{extra}."
+    )
+
+
 def require_gdal() -> Any:
     """Import GDAL lazily so dry-run planning can run outside the GDAL runtime."""
     try:
@@ -760,38 +978,9 @@ def require_gdal() -> Any:
 
 def validate_raster_group(sources: Sequence[MosaicSource]) -> None:
     """Ensure a group is compatible before GDAL VRT mosaicking is called."""
-    gdal = require_gdal()
     baseline: Optional[Dict[str, Any]] = None
     for source in sources:
-        dataset = gdal.Open(str(source.path))
-        if dataset is None:
-            raise IncompatibleRasterGroupError(f"{source.path.name} could not be opened by GDAL.")
-
-        transform = dataset.GetGeoTransform(can_return_null=True)
-        projection = dataset.GetProjectionRef()
-        if transform is None:
-            raise IncompatibleRasterGroupError(f"{source.path.name} has no geotransform.")
-        if not projection:
-            raise IncompatibleRasterGroupError(f"{source.path.name} has no projection.")
-        if transform[2] != 0 or transform[4] != 0 or transform[1] <= 0 or transform[5] >= 0:
-            raise IncompatibleRasterGroupError(
-                f"{source.path.name} is not a north-up raster with standard orientation."
-            )
-
-        signature = {
-            "count": dataset.RasterCount,
-            "dtypes": tuple(
-                dataset.GetRasterBand(index).DataType
-                for index in range(1, dataset.RasterCount + 1)
-            ),
-            "projection": projection,
-            "res": (round(abs(transform[1]), 12), round(abs(transform[5]), 12)),
-            "nodatavals": tuple(
-                dataset.GetRasterBand(index).GetNoDataValue()
-                for index in range(1, dataset.RasterCount + 1)
-            ),
-        }
-        dataset = None
+        signature, _key = raster_signature(source)
 
         if baseline is None:
             baseline = signature
@@ -828,7 +1017,11 @@ def world_file_path(path: Path) -> Path:
 def cleanup_temporary_output(output_file: Path) -> None:
     """Remove temporary mosaic files left after a failed write."""
     temp_file = temporary_mosaic_path(output_file)
-    for path in (temp_file, world_file_path(temp_file)):
+    for path in (
+        temp_file,
+        world_file_path(temp_file),
+        temp_file.with_suffix(f"{temp_file.suffix}.aux.xml"),
+    ):
         try:
             if path.exists():
                 path.unlink()
@@ -840,6 +1033,7 @@ def promote_temporary_output(temp_file: Path, output_file: Path, config: MosaicC
     """Atomically promote a completed temporary GeoTIFF to the final output name."""
     temp_world = world_file_path(temp_file)
     final_world = world_file_path(output_file)
+    temp_aux = temp_file.with_suffix(f"{temp_file.suffix}.aux.xml")
     output_file.parent.mkdir(parents=True, exist_ok=True)
     temp_file.replace(output_file)
     if temp_world.exists():
@@ -850,6 +1044,11 @@ def promote_temporary_output(temp_file: Path, output_file: Path, config: MosaicC
                 final_world.unlink()
         except OSError:
             pass
+    try:
+        if temp_aux.exists():
+            temp_aux.unlink()
+    except OSError:
+        pass
 
 
 def is_disk_space_error(exc: BaseException) -> bool:
@@ -1121,6 +1320,9 @@ def report_row_for_group(
     group: MosaicGroup,
     status: str,
     message: str,
+    *,
+    exclusions: Sequence[SourceExclusion] = (),
+    original_input_count: Optional[int] = None,
 ) -> Dict[str, str]:
     """Build one report row for a grouped output."""
     fields = [source.metadata.fields for source in group.sources]
@@ -1131,6 +1333,10 @@ def report_row_for_group(
         input_files=[source.path for source in group.sources],
         output_file=group.output_file,
         input_count=len(group.sources),
+        original_input_count=original_input_count,
+        excluded_input_files=[item.source.path for item in exclusions],
+        excluded_reasons=[item.reason for item in exclusions],
+        excluded_input_count=len(exclusions),
         cycle_id=group.key.cycle_id,
         pass_id=group.key.pass_id,
         start_date=group.key.start_date,
@@ -1185,6 +1391,10 @@ def report_row(
     input_files: Sequence[Path],
     output_file: Path | None = None,
     input_count: int | None = None,
+    original_input_count: int | None = None,
+    excluded_input_count: int = 0,
+    excluded_input_files: Sequence[Path] = (),
+    excluded_reasons: Sequence[str] = (),
     cycle_id: str = "",
     pass_id: str = "",
     start_date: str = "",
@@ -1209,6 +1419,10 @@ def report_row(
         "status": status,
         "output_file": "" if output_file is None else str(output_file),
         "input_count": str(input_count if input_count is not None else len(input_files)),
+        "original_input_count": str(
+            original_input_count if original_input_count is not None else input_count if input_count is not None else len(input_files)
+        ),
+        "excluded_input_count": str(excluded_input_count),
         "cycle_id": cycle_id,
         "pass_id": pass_id,
         "start_date": start_date,
@@ -1228,6 +1442,8 @@ def report_row(
         "known_from_manifest": known_from_manifest,
         "stale": stale,
         "message": message,
+        "excluded_input_files": json.dumps([str(path) for path in excluded_input_files]),
+        "excluded_reasons": json.dumps([str(reason) for reason in excluded_reasons]),
         "input_files": json.dumps([str(path) for path in input_files]),
     }
 

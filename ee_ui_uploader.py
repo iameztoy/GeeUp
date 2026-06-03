@@ -1150,8 +1150,10 @@ class EarthEngineUIUploader:
             return False
         if not self.ee_inventory_synced:
             return True
-        if status in ACTIVE_STATUSES:
+        if status in {"READY", "RUNNING"}:
             return True
+        if status == "SUBMITTED":
+            return False
         if status == EE_VERIFIED_EXISTS_STATUS:
             return True
         return False

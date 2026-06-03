@@ -16,15 +16,20 @@ from swot_metadata import parse_swot_l2_hr_raster_metadata, swot_product_rank
 
 COMPLETED_EXTRACT_STATUSES = {
     "written",
+    "rewritten_invalid_existing",
     "skipped_existing",
     "skipped_manifest",
     "local_complete",
 }
 COMPLETED_MOSAIC_STATUSES = {
     "MOSAIC_CREATED",
+    "MOSAIC_CREATED_WITH_EXCLUSIONS",
     "COPIED_SINGLETON",
     "SKIPPED_EXISTS",
     "SKIPPED_MANIFEST",
+}
+QA_EXCLUDED_MOSAIC_STATUSES = {
+    "SKIPPED_INCOMPATIBLE",
 }
 UPLOAD_CLEANUP_STATUSES = {
     "COMPLETED",
@@ -33,6 +38,7 @@ UPLOAD_CLEANUP_STATUSES = {
 }
 EE_VERIFIED_STATUS = "EE_VERIFIED_EXISTS"
 UTM_TILE_TOKEN_RE = re.compile(r"^UTM(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])$")
+LINEAGE_SNAPSHOT_LIMIT = 1000
 
 
 @dataclass
@@ -66,6 +72,8 @@ class ProjectInsights:
     upload_error_counts: List[tuple[str, str, int]]
     upload_qa_tile_rows: List[tuple[str, int, int, int, int, int]]
     ready_not_uploaded_rows: List[tuple[str, str, str, str]]
+    mosaic_exclusion_rows: List[tuple[str, str, str, str, str]]
+    mosaic_lineage_rows: List[Dict[str, str]]
     cleanup_candidates: List[CleanupCandidate]
 
 
@@ -303,6 +311,313 @@ def mosaic_source_tiles(row: Mapping[str, str]) -> List[str]:
     return sorted(tiles)
 
 
+def mosaic_excluded_sources(row: Mapping[str, str]) -> List[tuple[str, str]]:
+    """Return excluded mosaic source paths and reasons from one report row."""
+    files = parse_path_list(row.get("excluded_input_files", ""))
+    reasons = parse_json_list(row.get("excluded_reasons", ""))
+    return [
+        (file_name, reasons[index] if index < len(reasons) else "")
+        for index, file_name in enumerate(files)
+        if file_name
+    ]
+
+
+def lookup_mapping_value(
+    lookup: Mapping[str, Mapping[str, str]],
+    path_text: str | Path,
+) -> Mapping[str, str]:
+    """Look up one row by resolved path, basename, or raw text."""
+    for key in path_lookup_keys(path_text):
+        row = lookup.get(key)
+        if row:
+            return row
+    return {}
+
+
+def add_path_row_lookup(
+    lookup: Dict[str, Mapping[str, str]],
+    row: Mapping[str, str],
+    *path_values: str | Path,
+) -> None:
+    """Index one CSV row by one or more path-like values."""
+    for value in path_values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        for key in path_lookup_keys(text):
+            lookup.setdefault(key, row)
+
+
+def row_date_text(row: Mapping[str, str], *keys: str) -> str:
+    """Return the first parseable date from a row and key list."""
+    for key in keys:
+        date_text = date_from_text(row.get(key, ""))
+        if date_text:
+            return date_text
+    return ""
+
+
+def row_utm_tile(row: Mapping[str, str], *file_keys: str) -> str:
+    """Return a UTM tile from explicit columns or filename parsing."""
+    explicit = normalize_utm_tile_token(row.get("utm_tile", ""))
+    if explicit:
+        return explicit
+    zone = str(row.get("utm_zone", "") or "").strip()
+    band = str(row.get("mgrs_band", "") or "").strip()
+    if zone and band:
+        token = normalize_utm_tile_token(f"UTM{zone}{band}")
+        if token:
+            return token
+    for key in file_keys:
+        tile = file_utm_tile(row.get(key, ""))
+        if tile:
+            return tile
+    return ""
+
+
+def lineage_output_exists(path_text: str) -> str:
+    """Return yes/no for a lineage output path without raising on bad paths."""
+    if not path_text:
+        return ""
+    try:
+        return "yes" if Path(path_text).exists() else "no"
+    except OSError:
+        return "no"
+
+
+def joined_unique(values: Iterable[str]) -> str:
+    """Return a stable pipe-separated unique string."""
+    seen: set[str] = set()
+    output: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return " | ".join(output)
+
+
+def build_mosaic_lineage_rows(
+    download_rows: Sequence[Mapping[str, str]],
+    extract_rows: Sequence[Mapping[str, str]],
+    extract_error_rows: Sequence[Mapping[str, str]],
+    mosaic_rows: Sequence[Mapping[str, str]],
+) -> List[Dict[str, str]]:
+    """Build a per-source audit table across download, extraction, and mosaic stages."""
+    download_lookup: Dict[str, Mapping[str, str]] = {}
+    for row in download_rows:
+        add_path_row_lookup(
+            download_lookup,
+            row,
+            row.get("local_path", ""),
+            row.get("file_name", ""),
+        )
+
+    used_by_source: Dict[str, List[Mapping[str, str]]] = {}
+    excluded_by_source: Dict[str, List[tuple[Mapping[str, str], str]]] = {}
+    skipped_by_source: Dict[str, List[Mapping[str, str]]] = {}
+
+    for row in mosaic_rows:
+        status = str(row.get("status", "") or "")
+        is_completed = status in COMPLETED_MOSAIC_STATUSES and row.get("stale", "false") != "true"
+        target = used_by_source if is_completed else skipped_by_source
+        for source in parse_path_list(row.get("input_files", "")):
+            for key in path_lookup_keys(source):
+                target.setdefault(key, []).append(row)
+        if is_completed:
+            for source, reason in mosaic_excluded_sources(row):
+                for key in path_lookup_keys(source):
+                    excluded_by_source.setdefault(key, []).append((row, reason))
+
+    rows: List[Dict[str, str]] = []
+    seen_raw_keys: set[str] = set()
+    seen_extracted_keys: set[str] = set()
+
+    def add_seen_raw(path_text: str) -> None:
+        for key in path_lookup_keys(path_text):
+            seen_raw_keys.add(key)
+
+    def base_lineage_row(
+        *,
+        raw_file: str,
+        extracted_file: str = "",
+        download_row: Mapping[str, str] | None = None,
+        extract_row: Mapping[str, str] | None = None,
+    ) -> Dict[str, str]:
+        download_row = download_row or {}
+        extract_row = extract_row or {}
+        return {
+            "lineage_status": "",
+            "utm_tile": (
+                row_utm_tile(download_row, "file_name", "local_path")
+                or row_utm_tile(extract_row, "input_nc", "output_tif")
+            ),
+            "date": (
+                row_date_text(download_row, "start_time", "file_name", "local_path")
+                or row_date_text(extract_row, "date", "start", "input_nc", "output_tif")
+            ),
+            "processing_level": (
+                row_processing_level(download_row, file_keys=("file_name", "local_path"))
+                if download_row
+                else row_processing_level(extract_row, file_keys=("input_nc", "output_tif"))
+            ),
+            "raw_file": raw_file,
+            "download_status": str(download_row.get("last_status", "") or ""),
+            "downloaded": str(download_row.get("downloaded", "") or ""),
+            "raw_exists": str(download_row.get("raw_exists", "") or ""),
+            "extracted_file": extracted_file,
+            "extract_status": str(extract_row.get("status", "") or ""),
+            "extracted_exists": str(extract_row.get("output_exists", "") or lineage_output_exists(extracted_file)),
+            "mosaic_outputs": "",
+            "mosaic_statuses": "",
+            "mosaic_output_exists": "",
+            "mosaic_excluded": "no",
+            "mosaic_exclusion_reason": "",
+            "message": "",
+        }
+
+    for extract_row in extract_rows:
+        raw_file = str(extract_row.get("input_nc", "") or "")
+        extracted_file = str(extract_row.get("output_tif", "") or "")
+        download_row = lookup_mapping_value(download_lookup, raw_file)
+        if raw_file:
+            add_seen_raw(raw_file)
+        for key in path_lookup_keys(extracted_file):
+            seen_extracted_keys.add(key)
+        source_keys = path_lookup_keys(extracted_file)
+        used_rows = [row for key in source_keys for row in used_by_source.get(key, [])]
+        excluded_items = [item for key in source_keys for item in excluded_by_source.get(key, [])]
+        skipped_rows = [row for key in source_keys for row in skipped_by_source.get(key, [])]
+        row = base_lineage_row(
+            raw_file=raw_file,
+            extracted_file=extracted_file,
+            download_row=download_row,
+            extract_row=extract_row,
+        )
+        if used_rows:
+            row["lineage_status"] = "used_in_mosaic"
+            row["mosaic_outputs"] = joined_unique(item.get("output_file", "") for item in used_rows)
+            row["mosaic_statuses"] = joined_unique(item.get("status", "") for item in used_rows)
+            row["mosaic_output_exists"] = joined_unique(
+                item.get("output_exists", "") or lineage_output_exists(item.get("output_file", ""))
+                for item in used_rows
+            )
+            row["message"] = joined_unique(item.get("message", "") for item in used_rows)
+        elif excluded_items:
+            row["lineage_status"] = "excluded_from_partial_mosaic"
+            row["mosaic_excluded"] = "yes"
+            row["mosaic_outputs"] = joined_unique(item[0].get("output_file", "") for item in excluded_items)
+            row["mosaic_statuses"] = joined_unique(item[0].get("status", "") for item in excluded_items)
+            row["mosaic_output_exists"] = joined_unique(
+                item[0].get("output_exists", "") or lineage_output_exists(item[0].get("output_file", ""))
+                for item in excluded_items
+            )
+            row["mosaic_exclusion_reason"] = joined_unique(reason for _source, reason in excluded_items)
+            row["message"] = joined_unique(item[0].get("message", "") for item in excluded_items)
+        elif skipped_rows:
+            row["lineage_status"] = "mosaic_group_skipped"
+            row["mosaic_outputs"] = joined_unique(item.get("output_file", "") for item in skipped_rows)
+            row["mosaic_statuses"] = joined_unique(item.get("status", "") for item in skipped_rows)
+            row["mosaic_output_exists"] = joined_unique(
+                item.get("output_exists", "") or lineage_output_exists(item.get("output_file", ""))
+                for item in skipped_rows
+            )
+            row["message"] = joined_unique(item.get("message", "") for item in skipped_rows)
+        elif str(extract_row.get("status", "") or "").lower() in COMPLETED_EXTRACT_STATUSES:
+            row["lineage_status"] = "extracted_not_mosaicked"
+        else:
+            row["lineage_status"] = "extraction_not_complete"
+        rows.append(row)
+
+    for error_row in extract_error_rows:
+        raw_file = str(error_row.get("input_nc", "") or "")
+        if not raw_file:
+            continue
+        download_row = lookup_mapping_value(download_lookup, raw_file)
+        add_seen_raw(raw_file)
+        row = base_lineage_row(
+            raw_file=raw_file,
+            download_row=download_row,
+            extract_row=error_row,
+        )
+        row["lineage_status"] = "extraction_failed"
+        row["extract_status"] = "error"
+        row["message"] = str(error_row.get("error", "") or "")
+        rows.append(row)
+
+    for mosaic_row in mosaic_rows:
+        status = str(mosaic_row.get("status", "") or "")
+        is_completed = status in COMPLETED_MOSAIC_STATUSES and mosaic_row.get("stale", "false") != "true"
+        output_file = str(mosaic_row.get("output_file", "") or "")
+        output_exists = str(mosaic_row.get("output_exists", "") or lineage_output_exists(output_file))
+        output_grid = mosaic_output_grid(mosaic_row)
+        date_text = row_date_text(mosaic_row, "start_date", "range_beginning", "output_file")
+        for source in parse_path_list(mosaic_row.get("input_files", "")):
+            if any(key in seen_extracted_keys for key in path_lookup_keys(source)):
+                continue
+            row = base_lineage_row(raw_file="", extracted_file=source)
+            row["utm_tile"] = file_utm_tile(source) or normalize_utm_tile_token(output_grid)
+            row["date"] = date_from_text(source) or date_text
+            row["processing_level"] = parsed_processing_level(source) or row_processing_level(mosaic_row, file_keys=("output_file",))
+            row["extract_status"] = "not_in_extract_manifest"
+            row["extracted_exists"] = lineage_output_exists(source)
+            row["mosaic_outputs"] = output_file
+            row["mosaic_statuses"] = status
+            row["mosaic_output_exists"] = output_exists
+            row["message"] = str(mosaic_row.get("message", "") or "")
+            row["lineage_status"] = "used_in_mosaic" if is_completed else "mosaic_group_skipped"
+            rows.append(row)
+            for key in path_lookup_keys(source):
+                seen_extracted_keys.add(key)
+        if is_completed:
+            for source, reason in mosaic_excluded_sources(mosaic_row):
+                if any(key in seen_extracted_keys for key in path_lookup_keys(source)):
+                    continue
+                row = base_lineage_row(raw_file="", extracted_file=source)
+                row["utm_tile"] = file_utm_tile(source) or normalize_utm_tile_token(output_grid)
+                row["date"] = date_from_text(source) or date_text
+                row["processing_level"] = parsed_processing_level(source) or row_processing_level(mosaic_row, file_keys=("output_file",))
+                row["extract_status"] = "not_in_extract_manifest"
+                row["extracted_exists"] = lineage_output_exists(source)
+                row["mosaic_outputs"] = output_file
+                row["mosaic_statuses"] = status
+                row["mosaic_output_exists"] = output_exists
+                row["mosaic_excluded"] = "yes"
+                row["mosaic_exclusion_reason"] = reason
+                row["message"] = str(mosaic_row.get("message", "") or "")
+                row["lineage_status"] = "excluded_from_partial_mosaic"
+                rows.append(row)
+                for key in path_lookup_keys(source):
+                    seen_extracted_keys.add(key)
+
+    for download_row in download_rows:
+        raw_file = str(download_row.get("local_path", "") or download_row.get("file_name", "") or "")
+        if not raw_file or any(key in seen_raw_keys for key in path_lookup_keys(raw_file)):
+            continue
+        row = base_lineage_row(raw_file=raw_file, download_row=download_row)
+        selected = str(download_row.get("selected_for_download", "yes") or "yes").lower()
+        status = str(download_row.get("last_status", "") or "").upper()
+        if selected == "no" or status == "EXCLUDED_OLDER_VERSION":
+            row["lineage_status"] = "remote_excluded_older_version"
+        elif str(download_row.get("downloaded", "") or "").lower() == "yes":
+            row["lineage_status"] = "downloaded_not_extracted"
+        else:
+            row["lineage_status"] = "download_not_accounted"
+        row["message"] = str(download_row.get("duplicate_reason", "") or "")
+        rows.append(row)
+
+    rows.sort(
+        key=lambda row: (
+            row.get("utm_tile", ""),
+            row.get("date", ""),
+            row.get("raw_file", ""),
+            row.get("extracted_file", ""),
+        )
+    )
+    return rows
+
+
 def upload_row_source_tiles(
     row: Mapping[str, str],
     mosaic_lookup: Mapping[str, List[str]],
@@ -361,10 +676,8 @@ def path_lookup_keys(path_text: str | Path) -> List[str]:
     """Return stable path lookup keys for local report rows."""
     path = Path(str(path_text))
     keys = {str(path).strip().lower(), path.name.lower()}
-    try:
-        keys.add(str(path.resolve()).lower())
-    except OSError:
-        pass
+    if not path.is_absolute():
+        keys.add(str((Path.cwd() / path)).lower())
     return [key for key in keys if key]
 
 
@@ -553,6 +866,19 @@ def geotiff_sidecar_paths(path: Path) -> List[Path]:
     ]
 
 
+def orphan_temporary_mosaic_sidecars(mosaic_folder: Path) -> Iterable[Path]:
+    """Yield temporary GDAL sidecars whose matching .part GeoTIFF is gone."""
+    if not mosaic_folder.exists() or not mosaic_folder.is_dir():
+        return []
+    candidates: List[Path] = []
+    for pattern in ("*.part.tif.aux.xml", "*.part.tiff.aux.xml"):
+        for path in mosaic_folder.glob(pattern):
+            temp_tif = Path(str(path)[: -len(".aux.xml")])
+            if path.is_file() and not temp_tif.exists():
+                candidates.append(path)
+    return candidates
+
+
 def add_cleanup_candidate(
     candidates: Dict[Path, CleanupCandidate],
     *,
@@ -613,10 +939,38 @@ def completed_mosaic_rows(rows: Iterable[Mapping[str, str]]) -> Iterable[Mapping
             yield row
 
 
+def qa_excluded_mosaic_rows_without_raw_repair(
+    rows: Iterable[Mapping[str, str]],
+    raw_folder: Path,
+) -> Iterable[Mapping[str, str]]:
+    """Yield incompatible mosaic rows whose source raw files are no longer local."""
+    for row in rows:
+        if row.get("status", "") not in QA_EXCLUDED_MOSAIC_STATUSES:
+            continue
+        sources = parse_json_list(row.get("input_files", ""))
+        if not sources:
+            continue
+        raw_paths = [raw_path_for_extracted_source(Path(source), raw_folder) for source in sources]
+        if any(path.exists() for path in raw_paths):
+            continue
+        yield row
+
+
+def raw_path_for_extracted_source(source: Path, raw_folder: Path) -> Path:
+    """Return the likely raw NetCDF path for one extracted GeoTIFF."""
+    stem = source.stem
+    for suffix in ("_africa_laea", "_wgs84"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    return raw_folder / f"{stem}.nc"
+
+
 def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]:
     """Return local intermediate files that downstream manifests prove safe to remove."""
     extract_manifest = config_path(config, "extract", "manifest_csv")
     mosaic_manifest = config_path(config, "mosaic", "manifest_csv")
+    raw_folder = processing_path(config, "raw_downloads")
     artifacts = config.get("artifacts", {})
     upload_report = Path(str(artifacts.get("report_csv", ""))) if isinstance(artifacts, Mapping) else Path("")
     ee_inventory = Path(str(artifacts.get("ee_asset_inventory_csv", ""))) if isinstance(artifacts, Mapping) else Path("")
@@ -644,6 +998,36 @@ def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]
                 sidecar_reason="Extracted GeoTIFF sidecar belongs to a completed mosaic source.",
                 protected_by=str(mosaic_manifest),
             )
+        for source, _reason in mosaic_excluded_sources(row):
+            path = Path(source)
+            add_geotiff_candidate_with_sidecars(
+                candidates,
+                stage="qa",
+                path=path,
+                reason="Extracted GeoTIFF was excluded from a completed partial mosaic; mosaic_manifest.csv preserves the QA record.",
+                sidecar_reason="Extracted GeoTIFF sidecar belongs to a source excluded from a completed partial mosaic.",
+                protected_by=str(mosaic_manifest),
+            )
+
+    for row in qa_excluded_mosaic_rows_without_raw_repair(read_csv_rows(mosaic_manifest), raw_folder):
+        reason = (
+            "Extracted GeoTIFF belongs to an incompatible mosaic group with no local raw "
+            "NetCDF left for repair; mosaic_manifest.csv preserves the QA record."
+        )
+        sidecar_reason = (
+            "Extracted GeoTIFF sidecar belongs to an incompatible mosaic group with no "
+            "local raw NetCDF left for repair."
+        )
+        for source in parse_json_list(row.get("input_files", "")):
+            path = Path(source)
+            add_geotiff_candidate_with_sidecars(
+                candidates,
+                stage="qa",
+                path=path,
+                reason=reason,
+                sidecar_reason=sidecar_reason,
+                protected_by=str(mosaic_manifest),
+            )
 
     upload_rows = merge_upload_rows_with_ee_inventory(
         read_csv_rows(upload_report),
@@ -662,6 +1046,16 @@ def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]
             protected_by=str(upload_report),
         )
 
+    mosaic_folder = processing_path(config, "mosaics")
+    for path in orphan_temporary_mosaic_sidecars(mosaic_folder):
+        add_cleanup_candidate(
+            candidates,
+            stage="temporary",
+            path=path,
+            reason="Orphaned temporary mosaic sidecar; matching .part GeoTIFF no longer exists.",
+            protected_by=str(mosaic_folder),
+        )
+
     return sorted(candidates.values(), key=lambda item: (item.stage, str(item.path).lower()))
 
 
@@ -674,6 +1068,7 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
 
     download_rows = read_csv_rows(config_path(config, "download", "manifest_csv"))
     extract_rows = read_csv_rows(config_path(config, "extract", "manifest_csv"))
+    extract_error_rows = read_csv_rows(config_path(config, "extract", "errors_csv"))
     mosaic_rows = read_csv_rows(config_path(config, "mosaic", "manifest_csv"))
     artifacts = config.get("artifacts", {})
     upload_report_rows = read_csv_rows(artifacts.get("report_csv", "")) if isinstance(artifacts, Mapping) else []
@@ -731,6 +1126,12 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         )
 
     cleanup_candidates = plan_cleanup_candidates(config)
+    mosaic_lineage_rows = build_mosaic_lineage_rows(
+        download_rows,
+        extract_rows,
+        extract_error_rows,
+        mosaic_rows,
+    )
     downloaded_rows = [row for row in download_rows if row.get("downloaded", "").lower() == "yes"]
     raw_existing_download_rows = [row for row in download_rows if row.get("raw_exists", "").lower() == "yes"]
     excluded_download_rows = [
@@ -864,6 +1265,7 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
 
     mosaic_output_grid_counter: Counter[str] = Counter()
     mosaic_source_tile_counter: Counter[str] = Counter()
+    mosaic_exclusion_rows: List[tuple[str, str, str, str, str]] = []
     ready_not_uploaded: List[tuple[str, str, str, str]] = []
     for row in complete_mosaic_rows:
         output_grid = mosaic_output_grid(row)
@@ -887,6 +1289,16 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
                         output_grid,
                     )
                 )
+        for excluded_file, reason in mosaic_excluded_sources(row):
+            mosaic_exclusion_rows.append(
+                (
+                    str(row.get("output_file", "") or ""),
+                    excluded_file,
+                    reason,
+                    date_from_text(row.get("start_date", "") or row.get("range_beginning", "")),
+                    output_grid,
+                )
+            )
     common_crs_mosaic_count = sum(
         count
         for grid, count in mosaic_output_grid_counter.items()
@@ -940,6 +1352,15 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Unique mosaic output grids observed"] = str(len(mosaic_output_grid_counter))
     metrics["Completed common-CRS/non-UTM mosaics"] = str(common_crs_mosaic_count)
     metrics["Unique mosaic source UTM tiles observed"] = str(len(mosaic_source_tile_counter))
+    metrics["Mosaic source files excluded"] = str(len(mosaic_exclusion_rows))
+    metrics["Mosaic lineage rows"] = str(len(mosaic_lineage_rows))
+    lineage_status_counter = Counter(row.get("lineage_status", "unknown") for row in mosaic_lineage_rows)
+    metrics["Lineage used in mosaic"] = str(lineage_status_counter.get("used_in_mosaic", 0))
+    metrics["Lineage extracted not mosaicked"] = str(lineage_status_counter.get("extracted_not_mosaicked", 0))
+    metrics["Lineage extraction failed"] = str(lineage_status_counter.get("extraction_failed", 0))
+    metrics["Lineage mosaic group skipped"] = str(lineage_status_counter.get("mosaic_group_skipped", 0))
+    metrics["Lineage excluded from partial mosaic"] = str(lineage_status_counter.get("excluded_from_partial_mosaic", 0))
+    metrics["Lineage downloaded not extracted"] = str(lineage_status_counter.get("downloaded_not_extracted", 0))
     metrics["Upload report rows"] = str(len(upload_report_rows))
     metrics["EE inventory image assets"] = str(len(ee_inventory_images))
     metrics["Effective upload rows after EE inventory merge"] = str(len(upload_rows))
@@ -1037,6 +1458,8 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         ],
         upload_qa_tile_rows=upload_qa_rows,
         ready_not_uploaded_rows=ready_not_uploaded,
+        mosaic_exclusion_rows=mosaic_exclusion_rows,
+        mosaic_lineage_rows=mosaic_lineage_rows,
         cleanup_candidates=cleanup_candidates,
     )
 
@@ -1161,6 +1584,18 @@ def project_insights_snapshot(insights: ProjectInsights) -> Dict[str, Any]:
             }
             for output_file, source_tiles, date_text, grid in insights.ready_not_uploaded_rows
         ],
+        "mosaic_exclusion_rows": [
+            {
+                "output_file": output_file,
+                "excluded_file": excluded_file,
+                "reason": reason,
+                "date": date_text,
+                "grid": grid,
+            }
+            for output_file, excluded_file, reason, date_text, grid in insights.mosaic_exclusion_rows
+        ],
+        "mosaic_lineage_rows": insights.mosaic_lineage_rows[:LINEAGE_SNAPSHOT_LIMIT],
+        "mosaic_lineage_row_count": len(insights.mosaic_lineage_rows),
     }
 
 
@@ -1260,6 +1695,34 @@ def write_project_insights_snapshot(config: Mapping[str, Any], insights: Project
         folder / "project_statistics_ready_not_uploaded.csv",
         ["output_file", "source_tiles", "date", "grid"],
         snapshot["ready_not_uploaded_rows"],
+    )
+    write_csv_rows(
+        folder / "project_statistics_mosaic_exclusions.csv",
+        ["output_file", "excluded_file", "reason", "date", "grid"],
+        snapshot["mosaic_exclusion_rows"],
+    )
+    write_csv_rows(
+        folder / "project_statistics_mosaic_lineage.csv",
+        [
+            "lineage_status",
+            "utm_tile",
+            "date",
+            "processing_level",
+            "raw_file",
+            "download_status",
+            "downloaded",
+            "raw_exists",
+            "extracted_file",
+            "extract_status",
+            "extracted_exists",
+            "mosaic_outputs",
+            "mosaic_statuses",
+            "mosaic_output_exists",
+            "mosaic_excluded",
+            "mosaic_exclusion_reason",
+            "message",
+        ],
+        insights.mosaic_lineage_rows,
     )
     return snapshot_path
 
@@ -1377,6 +1840,21 @@ def load_project_insights_snapshot(
                 str(row.get("grid", "")),
             )
             for row in snapshot.get("ready_not_uploaded_rows", [])
+        ],
+        mosaic_exclusion_rows=[
+            (
+                str(row.get("output_file", "")),
+                str(row.get("excluded_file", "")),
+                str(row.get("reason", "")),
+                str(row.get("date", "")),
+                str(row.get("grid", "")),
+            )
+            for row in snapshot.get("mosaic_exclusion_rows", [])
+        ],
+        mosaic_lineage_rows=[
+            {str(key): str(value) for key, value in row.items()}
+            for row in snapshot.get("mosaic_lineage_rows", [])
+            if isinstance(row, Mapping)
         ],
         cleanup_candidates=[],
     )

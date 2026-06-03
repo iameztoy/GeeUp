@@ -500,7 +500,7 @@ def run_search_paged(
     total_hits = int(granule_query.hits())
     limit = total_hits if count == -1 else min(total_hits, count)
     if progress_callback is not None:
-        progress_callback(0, limit, f"CMR found {total_hits} matching granule(s)")
+        progress_callback(0, limit, f"Step 1/4: CMR found {total_hits} matching granule(s)")
     if limit <= 0:
         return []
 
@@ -529,7 +529,7 @@ def run_search_paged(
             progress_callback(
                 min(len(results), limit),
                 limit,
-                f"CMR metadata retrieved for {min(len(results), limit)}/{limit} granule(s)",
+                f"Step 1/4: CMR metadata retrieved for {min(len(results), limit)}/{limit} granule(s)",
             )
 
         search_after = response.headers.get("cmr-search-after")
@@ -581,7 +581,7 @@ def search_matching_granules(
     query = build_download_query(config)
     count = config.max_granules if config.max_granules is not None else -1
     if progress_callback is not None:
-        progress_callback(0, 0, "Searching CMR")
+        progress_callback(0, 0, "Step 1/4: searching CMR for matching SWOT granules")
 
     try:
         granules = run_search_paged(
@@ -594,7 +594,7 @@ def search_matching_granules(
     except Exception:
         try:
             if progress_callback is not None:
-                progress_callback(0, 0, "CMR paged search unavailable; using earthaccess search_data")
+                progress_callback(0, 0, "Step 1/4: CMR paged search unavailable; using earthaccess search_data")
             granules = run_search(earthaccess, query, query.granule_patterns, count)
         except Exception:
             granules = []
@@ -605,7 +605,7 @@ def search_matching_granules(
                     progress_callback(
                         index - 1,
                         len(query.granule_patterns),
-                        f"Searching {pattern}",
+                        f"Step 1/4: searching {pattern}",
                     )
                 remaining = (
                     config.max_granules - len(granules)
@@ -628,14 +628,14 @@ def search_matching_granules(
                     progress_callback(
                         index,
                         len(query.granule_patterns),
-                        f"Finished CMR search for {pattern}",
+                        f"Step 1/4: finished CMR search for {pattern}",
                     )
 
     unique = dedupe_granules(granules)
     if config.max_granules is not None:
         unique = unique[: config.max_granules]
     if progress_callback is not None:
-        progress_callback(len(unique), len(unique), f"Matched {len(unique)} granules")
+        progress_callback(len(unique), len(unique), f"Step 1/4: matched {len(unique)} granule(s)")
     return unique
 
 
@@ -902,7 +902,7 @@ def build_download_preview(
             progress_callback(
                 index,
                 total_raw,
-                f"Normalized CMR metadata for {index}/{total_raw} granule(s)",
+                f"Step 1/4: normalized CMR metadata for {index}/{total_raw} granule(s)",
             )
     granules = sorted(granules, key=lambda granule: granule.file_name.lower())
     apply_product_version_filter(granules, config.product_version_filter)
@@ -911,7 +911,7 @@ def build_download_preview(
         progress_callback(
             total_raw,
             total_raw,
-            f"Product-version filter selected {selected_count}/{total_raw} granule(s)",
+            f"Step 1/4: product-version filter selected {selected_count}/{total_raw} granule(s)",
         )
     return DownloadPreview(query=query, granules=granules)
 
@@ -1265,6 +1265,8 @@ def run_download(
         progress_callback=progress_callback,
     )
     config.output_folder.mkdir(parents=True, exist_ok=True)
+    if progress_callback is not None:
+        progress_callback(0, 0, "Step 2/4: checking local files and project download manifest")
 
     statuses: Dict[str, Tuple[str, str]] = {}
     to_download: List[DownloadGranule] = []
@@ -1290,13 +1292,31 @@ def run_download(
             to_download.append(granule)
 
     if to_download:
+        if progress_callback is not None:
+            progress_callback(
+                0,
+                0,
+                f"Step 3/4: authenticating Earthdata before downloading {len(to_download)} new file(s)",
+            )
         ensure_authenticated(earthaccess)
 
     downloaded_files: List[Path] = []
     failures: List[Tuple[DownloadGranule, str]] = []
     total = len(to_download)
     if progress_callback is not None:
-        progress_callback(0, total, "Starting download" if total else "No new files to download")
+        progress_callback(
+            0,
+            total,
+            (
+                f"Step 4/4: starting transfer of {total} new file(s); "
+                f"{len(skipped)} local and {len(skipped_manifest)} manifest-known file(s) skipped"
+            )
+            if total
+            else (
+                "No new files to download; all selected files are already local, "
+                "manifest-known, or excluded by the version filter"
+            ),
+        )
 
     stopped = False
     completed_attempts = 0
@@ -1312,9 +1332,9 @@ def run_download(
             move_incomplete_download(config, granule)
         if progress_callback is not None:
             if len(batch) == 1:
-                message = f"Downloading {batch[0].file_name}"
+                message = f"Step 4/4: downloading {batch[0].file_name}"
             else:
-                message = f"Downloading batch of {len(batch)} files"
+                message = f"Step 4/4: downloading batch of {len(batch)} files"
             progress_callback(completed_attempts, total, message)
         try:
             paths = earthaccess.download(
@@ -1332,9 +1352,9 @@ def run_download(
                 else:
                     statuses[granule.identity] = ("MISSING", "")
             message = (
-                f"Downloaded {batch[0].file_name}"
+                f"Step 4/4: downloaded {batch[0].file_name}"
                 if len(batch) == 1
-                else f"Finished batch of {len(batch)} files"
+                else f"Step 4/4: finished batch of {len(batch)} files"
             )
         except Exception as exc:
             for granule in batch:
@@ -1345,9 +1365,9 @@ def run_download(
                     failures.append((granule, str(exc)))
                     statuses[granule.identity] = ("FAILED", str(exc))
             message = (
-                f"FAILED: {batch[0].file_name}"
+                f"Step 4/4: FAILED {batch[0].file_name}"
                 if len(batch) == 1
-                else f"FAILED batch of {len(batch)} files"
+                else f"Step 4/4: FAILED batch of {len(batch)} files"
             )
         completed_attempts += len(batch)
         if progress_callback is not None:

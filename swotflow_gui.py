@@ -529,6 +529,7 @@ class LauncherApp:
         self.download_auth_status_var = tk.StringVar(
             value="Earthdata authentication: not checked"
         )
+        self.download_authenticated = False
         self.mosaic_status_var = tk.StringVar(
             value="Choose a SWOT GeoTIFF folder, then plan mosaics."
         )
@@ -540,6 +541,8 @@ class LauncherApp:
         )
         self.download_progress_var = tk.DoubleVar(value=0.0)
         self.download_progress_text_var = tk.StringVar(value="Progress: not started")
+        self.download_progress_bar: ttk.Progressbar | None = None
+        self.download_progress_indeterminate = False
         self.download_stop_event: threading.Event | None = None
         self.upload_progress_var = tk.DoubleVar(value=0.0)
         self.upload_progress_text_var = tk.StringVar(value="Progress: not started")
@@ -551,6 +554,9 @@ class LauncherApp:
             value="Open a project, then refresh statistics to summarize manifests and local files."
         )
         self.statistics_summary_var = tk.StringVar(value="")
+        self.statistics_lineage_var = tk.StringVar(
+            value="Refresh statistics to build the mosaic lineage table."
+        )
         self.cleanup_status_var = tk.StringVar(
             value="Open a project, then preview safe cleanup candidates."
         )
@@ -1360,12 +1366,13 @@ class LauncherApp:
         progress = ttk.Frame(parent)
         progress.grid(row=6, column=0, sticky="ew", pady=(12, 0))
         progress.columnconfigure(0, weight=1)
-        ttk.Progressbar(
+        self.download_progress_bar = ttk.Progressbar(
             progress,
             variable=self.download_progress_var,
             maximum=100,
             mode="determinate",
-        ).grid(row=0, column=0, sticky="ew")
+        )
+        self.download_progress_bar.grid(row=0, column=0, sticky="ew")
         ttk.Label(
             progress,
             textvariable=self.download_progress_text_var,
@@ -1944,6 +1951,7 @@ class LauncherApp:
         tiles = ttk.Frame(inner, padding=8)
         levels = ttk.Frame(inner, padding=8)
         mosaics = ttk.Frame(inner, padding=8)
+        lineage = ttk.Frame(inner, padding=8)
         uploaded = ttk.Frame(inner, padding=8)
         status_map = ttk.Frame(inner, padding=8)
         inner.add(overview, text="Overview")
@@ -1951,6 +1959,7 @@ class LauncherApp:
         inner.add(tiles, text="Tiles And Dates")
         inner.add(levels, text="Processing Levels")
         inner.add(mosaics, text="Mosaics")
+        inner.add(lineage, text="Lineage")
         inner.add(uploaded, text="Uploaded")
 
         overview.columnconfigure(0, weight=1)
@@ -2111,6 +2120,7 @@ class LauncherApp:
         mosaics.columnconfigure(0, weight=1)
         mosaics.columnconfigure(1, weight=1)
         mosaics.rowconfigure(0, weight=1)
+        mosaics.rowconfigure(1, weight=1)
         mosaic_grid_frame = ttk.LabelFrame(
             mosaics,
             text="Completed Mosaics By Output Tile/Grid",
@@ -2150,6 +2160,92 @@ class LauncherApp:
         self.stats_mosaic_source_tile_tree.column("tile", width=150, anchor="w")
         self.stats_mosaic_source_tile_tree.column("count", width=80, anchor="e")
         self.stats_mosaic_source_tile_tree.grid(row=0, column=0, sticky="nsew")
+
+        mosaic_exclusions_frame = ttk.LabelFrame(
+            mosaics,
+            text="Mosaic Source Files Excluded",
+            padding=8,
+        )
+        mosaic_exclusions_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        mosaic_exclusions_frame.columnconfigure(0, weight=1)
+        mosaic_exclusions_frame.rowconfigure(0, weight=1)
+        self.stats_mosaic_exclusions_tree = ttk.Treeview(
+            mosaic_exclusions_frame,
+            columns=("date", "grid", "excluded_file", "reason", "output_file"),
+            show="headings",
+            height=8,
+        )
+        self.stats_mosaic_exclusions_tree.heading("date", text="Date")
+        self.stats_mosaic_exclusions_tree.heading("grid", text="Grid")
+        self.stats_mosaic_exclusions_tree.heading("excluded_file", text="Excluded file")
+        self.stats_mosaic_exclusions_tree.heading("reason", text="Reason")
+        self.stats_mosaic_exclusions_tree.heading("output_file", text="Mosaic output")
+        self.stats_mosaic_exclusions_tree.column("date", width=95, anchor="w")
+        self.stats_mosaic_exclusions_tree.column("grid", width=90, anchor="w")
+        self.stats_mosaic_exclusions_tree.column("excluded_file", width=360, anchor="w")
+        self.stats_mosaic_exclusions_tree.column("reason", width=360, anchor="w")
+        self.stats_mosaic_exclusions_tree.column("output_file", width=360, anchor="w")
+        self.stats_mosaic_exclusions_tree.grid(row=0, column=0, sticky="nsew")
+
+        lineage.columnconfigure(0, weight=1)
+        lineage.rowconfigure(1, weight=1)
+        ttk.Label(
+            lineage,
+            textvariable=self.statistics_lineage_var,
+            foreground="#555555",
+            justify="left",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.stats_mosaic_lineage_tree = ttk.Treeview(
+            lineage,
+            columns=(
+                "lineage_status",
+                "utm_tile",
+                "date",
+                "processing_level",
+                "raw_file",
+                "extract_status",
+                "extracted_file",
+                "mosaic_statuses",
+                "mosaic_outputs",
+                "message",
+            ),
+            show="headings",
+            height=18,
+        )
+        lineage_headings = {
+            "lineage_status": "Lineage status",
+            "utm_tile": "Tile",
+            "date": "Date",
+            "processing_level": "Level",
+            "raw_file": "Raw NetCDF",
+            "extract_status": "Extract",
+            "extracted_file": "Extracted GeoTIFF",
+            "mosaic_statuses": "Mosaic status",
+            "mosaic_outputs": "Mosaic output",
+            "message": "Message",
+        }
+        for column, heading in lineage_headings.items():
+            self.stats_mosaic_lineage_tree.heading(column, text=heading)
+            width = {
+                "lineage_status": 170,
+                "utm_tile": 90,
+                "date": 95,
+                "processing_level": 95,
+                "extract_status": 95,
+            }.get(column, 300)
+            self.stats_mosaic_lineage_tree.column(
+                column,
+                width=width,
+                anchor="w",
+            )
+        self.stats_mosaic_lineage_tree.grid(row=1, column=0, sticky="nsew")
+        lineage_scroll = ttk.Scrollbar(
+            lineage,
+            orient="vertical",
+            command=self.stats_mosaic_lineage_tree.yview,
+        )
+        lineage_scroll.grid(row=1, column=1, sticky="ns")
+        self.stats_mosaic_lineage_tree.configure(yscrollcommand=lineage_scroll.set)
 
         uploaded.columnconfigure(0, weight=1)
         uploaded.rowconfigure(0, weight=1)
@@ -4892,11 +4988,15 @@ class LauncherApp:
 
     def finish_download_authentication(self) -> None:
         """Show successful Earthdata authentication."""
+        self.download_authenticated = True
         self.download_auth_status_var.set("Earthdata authentication: succeeded")
         self.download_status_var.set("Earthdata authentication succeeded for this session.")
 
     def finish_download_authentication_error(self, exc: Exception) -> None:
         """Show failed Earthdata authentication."""
+        self.download_authenticated = False
+        self.download_stop_event = None
+        self.set_download_progress_indeterminate(False)
         self.download_auth_status_var.set(f"Earthdata authentication: failed ({exc})")
         self.download_status_var.set("Earthdata authentication failed. Check credentials or _netrc.")
         messagebox.showerror(
@@ -4916,9 +5016,12 @@ class LauncherApp:
         ):
             return
         config = self.download_config_from_ui()
-        self.download_status_var.set("Started SWOT download preview. Searching CMR...")
+        self.download_status_var.set(
+            "Started SWOT download preview. Searching CMR. Large tile/date selections can take several minutes before file counts appear."
+        )
         self.download_progress_var.set(0.0)
-        self.download_progress_text_var.set("Progress: searching CMR")
+        self.set_download_progress_indeterminate(True)
+        self.download_progress_text_var.set("Progress: searching CMR...")
         thread = threading.Thread(
             target=self.run_download_preview_process,
             args=(config,),
@@ -4948,6 +5051,7 @@ class LauncherApp:
     def finish_download_preview_process(self, preview: Any, report_csv: Path) -> None:
         """Update the UI after a download preview finishes."""
         self.load_download_report_preview(limit=300)
+        self.set_download_progress_indeterminate(False)
         self.download_progress_var.set(100.0)
         self.download_progress_text_var.set("Progress: preview complete")
         selected_count = len(preview.selected_granules)
@@ -4987,9 +5091,27 @@ class LauncherApp:
         ):
             return
         config = self.download_config_from_ui()
-        self.download_status_var.set("Started SWOT download. Searching CMR...")
+        if not self.download_authenticated:
+            proceed = messagebox.askyesno(
+                "Earthdata login required",
+                (
+                    "This session has not authenticated with NASA Earthdata yet.\n\n"
+                    "SWOTFlow will authenticate before searching and downloading. "
+                    "If Earthdata asks for credentials, enter them in the console window.\n\n"
+                    "Continue?"
+                ),
+            )
+            if not proceed:
+                self.download_status_var.set(
+                    "Download cancelled before start because Earthdata authentication has not been completed."
+                )
+                return
+        self.download_status_var.set(
+            "Started SWOT download. Checking Earthdata authentication before CMR search."
+        )
         self.download_progress_var.set(0.0)
-        self.download_progress_text_var.set("Progress: starting")
+        self.set_download_progress_indeterminate(True)
+        self.download_progress_text_var.set("Progress: preparing Earthdata authentication...")
         self.download_stop_event = threading.Event()
         thread = threading.Thread(
             target=self.run_download_process,
@@ -5012,6 +5134,14 @@ class LauncherApp:
     def run_download_process(self, config: DownloadConfig, stop_event: threading.Event) -> None:
         """Run search and downloads off the Tkinter UI thread."""
         try:
+            if not self.download_authenticated:
+                self.root.after(0, self.start_download_authentication_for_run)
+                try:
+                    authenticate_earthdata(strategy="all", persist=False)
+                except Exception as exc:
+                    self.root.after(0, self.finish_download_authentication_error, exc)
+                    return
+                self.root.after(0, self.finish_download_authentication_for_run)
             result = run_download(
                 config,
                 progress_callback=lambda current, total, message: self.root.after(
@@ -5028,9 +5158,37 @@ class LauncherApp:
             return
         self.root.after(0, self.finish_download_process, result)
 
+    def start_download_authentication_for_run(self) -> None:
+        """Show that Download Matches is waiting for Earthdata authentication."""
+        self.download_auth_status_var.set(
+            "Earthdata authentication: required before download. Watch the console if credentials are requested."
+        )
+        self.download_status_var.set(
+            "Waiting for Earthdata authentication before CMR search and file transfer."
+        )
+        self.update_download_progress(
+            0,
+            0,
+            "Step 0/4: waiting for Earthdata authentication; check the console if prompted",
+        )
+
+    def finish_download_authentication_for_run(self) -> None:
+        """Mark Earthdata authentication complete and show that search will start."""
+        self.download_authenticated = True
+        self.download_auth_status_var.set("Earthdata authentication: succeeded")
+        self.download_status_var.set(
+            "Earthdata authentication succeeded. Step 1/4: searching CMR before transfer."
+        )
+        self.update_download_progress(
+            0,
+            0,
+            "Step 1/4: searching CMR before download",
+        )
+
     def finish_download_process_error(self, exc: Exception) -> None:
         """Show a failed download preview or run."""
         self.download_stop_event = None
+        self.set_download_progress_indeterminate(False)
         self.download_status_var.set(f"Download module failed: {exc}")
         messagebox.showerror(
             "Download module failed",
@@ -5041,6 +5199,7 @@ class LauncherApp:
         """Update the UI after a download run exits."""
         self.download_stop_event = None
         self.load_download_report_preview(limit=300)
+        self.set_download_progress_indeterminate(False)
         self.download_progress_var.set(100.0)
         matched_count = len(result.preview.granules)
         selected_count = len(result.preview.selected_granules)
@@ -5319,9 +5478,28 @@ class LauncherApp:
 
     def update_download_progress(self, current: int, total: int, message: str) -> None:
         """Update Download progress widgets from worker progress events."""
-        percent = 0.0 if total <= 0 else min(100.0, max(0.0, current / total * 100.0))
+        if total <= 0:
+            self.set_download_progress_indeterminate(True)
+            self.download_progress_var.set(0.0)
+            self.download_progress_text_var.set(f"Progress: {message}")
+            return
+        self.set_download_progress_indeterminate(False)
+        percent = min(100.0, max(0.0, current / total * 100.0))
         self.download_progress_var.set(percent)
         self.download_progress_text_var.set(f"Progress: {current}/{total} - {message}")
+
+    def set_download_progress_indeterminate(self, active: bool) -> None:
+        """Switch the Download progress bar between known-total and working states."""
+        if self.download_progress_bar is None:
+            return
+        if active and not self.download_progress_indeterminate:
+            self.download_progress_bar.configure(mode="indeterminate")
+            self.download_progress_bar.start(12)
+            self.download_progress_indeterminate = True
+        elif not active and self.download_progress_indeterminate:
+            self.download_progress_bar.stop()
+            self.download_progress_bar.configure(mode="determinate")
+            self.download_progress_indeterminate = False
 
     def load_download_report_preview(self, limit: int = 300) -> int:
         """Load recent download report rows into the preview tree."""
@@ -5376,6 +5554,8 @@ class LauncherApp:
             self.stats_processing_level_tile_tree,
             self.stats_mosaic_output_grid_tree,
             self.stats_mosaic_source_tile_tree,
+            self.stats_mosaic_exclusions_tree,
+            self.stats_mosaic_lineage_tree,
             self.stats_upload_status_tree,
             self.stats_uploaded_tile_tree,
             self.stats_uploaded_date_tree,
@@ -5395,6 +5575,7 @@ class LauncherApp:
         self.draw_bar_chart(self.stats_tile_chart_canvas, [], "Top UTM tiles by recorded files")
         self.stats_status_map.clear_statuses()
         self.statistics_summary_var.set("")
+        self.statistics_lineage_var.set("Refresh statistics to build the mosaic lineage table.")
         self.latest_project_insights = None
         self.latest_project_statistics_generated_at = ""
         self.cleanup_status_var.set("Open a project, then preview safe cleanup candidates.")
@@ -5490,6 +5671,48 @@ class LauncherApp:
         self.clear_treeview(self.stats_mosaic_source_tile_tree)
         for tile, count in insights.mosaic_source_tile_counts:
             self.stats_mosaic_source_tile_tree.insert("", tk.END, values=(tile, str(count)))
+
+        self.clear_treeview(self.stats_mosaic_exclusions_tree)
+        for output_file, excluded_file, reason, date_text, grid in getattr(insights, "mosaic_exclusion_rows", []):
+            self.stats_mosaic_exclusions_tree.insert(
+                "",
+                tk.END,
+                values=(date_text, grid, excluded_file, reason, output_file),
+            )
+
+        self.clear_treeview(self.stats_mosaic_lineage_tree)
+        lineage_rows = list(getattr(insights, "mosaic_lineage_rows", []))
+        lineage_display_limit = 1000
+        for row in lineage_rows[:lineage_display_limit]:
+            self.stats_mosaic_lineage_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("lineage_status", ""),
+                    row.get("utm_tile", ""),
+                    row.get("date", ""),
+                    row.get("processing_level", ""),
+                    row.get("raw_file", ""),
+                    row.get("extract_status", ""),
+                    row.get("extracted_file", ""),
+                    row.get("mosaic_statuses", ""),
+                    row.get("mosaic_outputs", ""),
+                    row.get("message", ""),
+                ),
+            )
+        lineage_total = self.metric_int(
+            insights.metrics.get("Mosaic lineage rows", str(len(lineage_rows)))
+            if hasattr(insights, "metrics")
+            else str(len(lineage_rows))
+        )
+        if lineage_total > lineage_display_limit:
+            self.statistics_lineage_var.set(
+                f"Showing first {lineage_display_limit} of {lineage_total} lineage rows. Full table: 00_logs/statistics/project_statistics_mosaic_lineage.csv"
+            )
+        else:
+            self.statistics_lineage_var.set(
+                f"Showing {len(lineage_rows)} lineage row(s). Full table: 00_logs/statistics/project_statistics_mosaic_lineage.csv"
+            )
 
         self.clear_treeview(self.stats_upload_status_tree)
         for status, count in insights.upload_status_counts:

@@ -31,13 +31,14 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
 def swot_name(
     *,
     tile: str = "UTM34M",
+    scene: str = "000F",
     crid: str = "PGD0",
     counter: str = "01",
     suffix: str = ".nc",
 ) -> str:
     return (
         f"SWOT_L2_HR_Raster_100m_{tile}_N_x_x_x_"
-        f"034_266_000F_20260102T000000_20260102T010000_{crid}_{counter}{suffix}"
+        f"034_266_{scene}_20260102T000000_20260102T010000_{crid}_{counter}{suffix}"
     )
 
 
@@ -194,6 +195,8 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertEqual(insights.metrics["Upload failures/errors recorded"], "1")
             self.assertEqual(insights.metrics["Upload-ready mosaics not uploaded/verified"], "0")
             self.assertEqual(insights.metrics["Unique processing levels observed"], "2")
+            self.assertEqual(insights.metrics["Mosaic lineage rows"], "2")
+            self.assertEqual(insights.metrics["Lineage used in mosaic"], "1")
             self.assertIn(("PGD0_02", 1, 1, 1, 1, 1, 2), insights.processing_level_counts)
             self.assertIn(("PGD0_01", 1, 0, 0, 0, 0, 0), insights.processing_level_counts)
             self.assertIn(("UTM34M", "PGD0_02", 1, 1, 1, 1), insights.processing_level_tile_counts)
@@ -206,6 +209,8 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertIn(("UTM34M", 3), insights.tile_counts)
             self.assertIn(("UTM34M", 1), insights.mosaic_output_grid_counts)
             self.assertIn(("UTM34M", 1), insights.mosaic_source_tile_counts)
+            self.assertIn("used_in_mosaic", {row["lineage_status"] for row in insights.mosaic_lineage_rows})
+            self.assertIn("remote_excluded_older_version", {row["lineage_status"] for row in insights.mosaic_lineage_rows})
             self.assertEqual(
                 [candidate.stage for candidate in candidates],
                 ["extracted", "extracted", "extracted", "mosaic", "mosaic", "mosaic", "raw"],
@@ -293,6 +298,20 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertFalse(mosaic.with_suffix(".tfw").exists())
             self.assertFalse(mosaic.with_suffix(".tif.aux.xml").exists())
+
+    def test_orphan_temporary_mosaic_sidecar_is_cleanup_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            sidecar = root / "03_mosaics" / "mosaic.part.tif.aux.xml"
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            sidecar.write_bytes(b"aux")
+
+            candidates = plan_cleanup_candidates(config)
+
+            self.assertEqual([candidate.path for candidate in candidates], [sidecar])
+            self.assertEqual(candidates[0].stage, "temporary")
+            self.assertIn("Orphaned temporary mosaic sidecar", candidates[0].reason)
 
     def test_common_crs_mosaic_reports_source_tile_participation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -392,6 +411,113 @@ class ProjectInsightsTests(unittest.TestCase):
 
             self.assertEqual(candidates, [])
 
+    def test_incompatible_mosaic_sources_without_raw_are_qa_cleanup_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            extracted = root / "02_extracted_geotiffs" / swot_name(suffix=".tif")
+            extracted.parent.mkdir(parents=True, exist_ok=True)
+            extracted.write_bytes(b"12345")
+            extracted.with_suffix(".tif.aux.xml").write_bytes(b"aux")
+            write_csv(
+                root / "00_logs" / "mosaic_manifest.csv",
+                [
+                    {
+                        "status": "SKIPPED_INCOMPATIBLE",
+                        "input_files": json.dumps([str(extracted)]),
+                        "message": "source differs from first file in: res.",
+                    }
+                ],
+            )
+
+            candidates = plan_cleanup_candidates(config)
+
+            self.assertEqual([candidate.stage for candidate in candidates], ["qa", "qa"])
+            self.assertCountEqual(
+                [candidate.path for candidate in candidates],
+                [extracted, extracted.with_suffix(".tif.aux.xml")],
+            )
+            self.assertIn("no local raw NetCDF left for repair", candidates[0].reason)
+
+    def test_incompatible_mosaic_sources_with_raw_are_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            raw = root / "01_raw_downloads" / swot_name()
+            extracted = root / "02_extracted_geotiffs" / swot_name(suffix=".tif")
+            for path in (raw, extracted):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"12345")
+            write_csv(
+                root / "00_logs" / "mosaic_manifest.csv",
+                [
+                    {
+                        "status": "SKIPPED_INCOMPATIBLE",
+                        "input_files": json.dumps([str(extracted)]),
+                        "message": "source differs from first file in: res.",
+                    }
+                ],
+            )
+
+            candidates = plan_cleanup_candidates(config)
+
+            self.assertEqual(candidates, [])
+
+    def test_partial_mosaic_exclusions_are_reported_and_cleanable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            used = root / "02_extracted_geotiffs" / swot_name(scene="000F", suffix=".tif")
+            excluded = root / "02_extracted_geotiffs" / swot_name(scene="001F", suffix=".tif")
+            mosaic = root / "03_mosaics" / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_"
+                "20260102T000000_20260102T010000_PGD0_01.tif"
+            )
+            for path in (used, excluded, mosaic):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"12345")
+            excluded.with_suffix(".tif.aux.xml").write_bytes(b"aux")
+            write_csv(
+                root / "00_logs" / "mosaic_manifest.csv",
+                [
+                    {
+                        "status": "MOSAIC_CREATED_WITH_EXCLUSIONS",
+                        "output_file": str(mosaic),
+                        "input_count": "1",
+                        "original_input_count": "2",
+                        "excluded_input_count": "1",
+                        "start_date": "2026-01-02",
+                        "coordinate_system": "UTM34M",
+                        "input_files": json.dumps([str(used)]),
+                        "excluded_input_files": json.dumps([str(excluded)]),
+                        "excluded_reasons": json.dumps(["bad geotransform"]),
+                        "output_exists": "yes",
+                        "stale": "false",
+                    }
+                ],
+            )
+
+            insights = collect_project_insights(config)
+            candidates = plan_cleanup_candidates(config)
+
+            self.assertEqual(insights.metrics["Mosaic source files excluded"], "1")
+            self.assertEqual(
+                insights.mosaic_exclusion_rows,
+                [(str(mosaic), str(excluded), "bad geotransform", "2026-01-02", "UTM34M")],
+            )
+            self.assertEqual(
+                [row["lineage_status"] for row in insights.mosaic_lineage_rows],
+                ["used_in_mosaic", "excluded_from_partial_mosaic"],
+            )
+            self.assertCountEqual(
+                [(candidate.stage, candidate.path) for candidate in candidates],
+                [
+                    ("extracted", used),
+                    ("qa", excluded),
+                    ("qa", excluded.with_suffix(".tif.aux.xml")),
+                ],
+            )
+
     def test_format_bytes(self) -> None:
         self.assertEqual(format_bytes(0), "0 B")
         self.assertEqual(format_bytes(1024), "1.0 KB")
@@ -435,6 +561,7 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertEqual(loaded_insights.processing_level_counts, insights.processing_level_counts)
             self.assertEqual(loaded_insights.upload_status_counts, insights.upload_status_counts)
             self.assertEqual(loaded_insights.upload_qa_tile_rows, insights.upload_qa_tile_rows)
+            self.assertEqual(loaded_insights.mosaic_lineage_rows, insights.mosaic_lineage_rows)
 
 
 if __name__ == "__main__":

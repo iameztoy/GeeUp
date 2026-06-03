@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from swot_download_tool import DownloadConfig
 from swotflow_gui import LauncherApp
 from swotflow_project import create_project, load_project_tile_profiles
 from utm_map_selector import DisplayTile, UTMDisplayGeometry
@@ -296,6 +297,31 @@ class GuiLayoutTests(unittest.TestCase):
                 warning.assert_called_once()
             finally:
                 root.destroy()
+
+    def test_download_matches_warns_when_earthdata_not_authenticated(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = DownloadConfig(
+                output_folder=Path("raw"),
+                start_date="2026-01-01",
+                end_date="2026-01-02",
+                utm_tiles=["UTM30R"],
+                report_csv=Path("report.csv"),
+            )
+            app.download_authenticated = False
+            with mock.patch.object(app, "save_config", return_value=True):
+                with mock.patch.object(app, "download_config_from_ui", return_value=config):
+                    with mock.patch("swotflow_gui.messagebox.askyesno", return_value=False) as ask:
+                        with mock.patch("swotflow_gui.threading.Thread") as thread:
+                            app.start_download()
+
+            ask.assert_called_once()
+            thread.assert_not_called()
+            self.assertIn("authentication", app.download_status_var.get().lower())
+        finally:
+            root.destroy()
 
     def test_open_utm_map_selector_passes_manifest_coverage(self) -> None:
         root = tk.Tk()

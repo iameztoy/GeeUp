@@ -332,7 +332,7 @@ class MosaicPlanningTests(unittest.TestCase):
                 manifest_csv=root / "mosaic_manifest.csv",
             )
 
-            with mock.patch.object(ee_mosaic_tool, "validate_raster_group"):
+            with mock.patch.object(ee_mosaic_tool, "select_compatible_sources", side_effect=lambda sources: (list(sources), [])):
                 with mock.patch.object(
                     ee_mosaic_tool,
                     "merge_group",
@@ -357,19 +357,23 @@ class MosaicPlanningTests(unittest.TestCase):
             temp_output = temporary_mosaic_path(final)
             temp_output.write_bytes(b"complete")
             world_file_path(temp_output).write_text("world", encoding="utf-8")
+            temp_output.with_suffix(f"{temp_output.suffix}.aux.xml").write_text("aux", encoding="utf-8")
 
             promote_temporary_output(temp_output, final, config)
 
             self.assertEqual(final.read_bytes(), b"complete")
             self.assertFalse(temp_output.exists())
             self.assertTrue(world_file_path(final).exists())
+            self.assertFalse(temp_output.with_suffix(f"{temp_output.suffix}.aux.xml").exists())
 
             temp_output.write_bytes(b"partial")
             world_file_path(temp_output).write_text("partial world", encoding="utf-8")
+            temp_output.with_suffix(f"{temp_output.suffix}.aux.xml").write_text("partial aux", encoding="utf-8")
             cleanup_temporary_output(final)
 
             self.assertFalse(temp_output.exists())
             self.assertFalse(world_file_path(temp_output).exists())
+            self.assertFalse(temp_output.with_suffix(f"{temp_output.suffix}.aux.xml").exists())
 
     def test_disk_space_error_detection_matches_gdal_write_errors(self) -> None:
         self.assertTrue(is_disk_space_error(RuntimeError("No space left on device")))
@@ -922,6 +926,31 @@ print(json.dumps(dataset.GetMetadata("IMAGE_STRUCTURE")))
             self.assertEqual(copied, [[5, 5], [5, 5]])
             self.assertTrue(output_path.with_suffix(".tfw").exists())
             self.assertNotIn("COMPRESSION", self.read_image_structure(output_path))
+
+    def test_incompatible_source_is_excluded_when_dominant_group_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_geotiff(root / swot_name(scene="000A"), 1, x_origin=0, epsg=32636)
+            self.write_geotiff(
+                root / swot_name(scene="001A", start="20250707T011000", end="20250707T011100"),
+                2,
+                x_origin=2,
+                epsg=32636,
+            )
+            bad_name = swot_name(scene="002A", start="20250707T012000", end="20250707T012100")
+            self.write_geotiff(root / bad_name, 9, x_origin=4, epsg=32637)
+
+            exit_code, rows, output = self.run_mosaic_cli(root)
+
+            self.assertEqual(exit_code, 0, output)
+            self.assertEqual(rows[0]["status"], "MOSAIC_CREATED_WITH_EXCLUSIONS")
+            self.assertEqual(rows[0]["input_count"], "2")
+            self.assertEqual(rows[0]["original_input_count"], "3")
+            self.assertEqual(rows[0]["excluded_input_count"], "1")
+            self.assertIn(bad_name, rows[0]["excluded_input_files"])
+            self.assertIn("differs from selected compatible sources", rows[0]["excluded_reasons"])
+            merged = self.read_first_band(Path(rows[0]["output_file"]))
+            self.assertEqual(merged, [[1, 1, 2, 2], [1, 1, 2, 2]])
 
     def test_incompatible_crs_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

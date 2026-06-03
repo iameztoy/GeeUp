@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import csv
+import gc
+import math
 import re
+import time
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,6 +104,7 @@ MANIFEST_COLUMNS = [
     *METADATA_COLUMNS,
 ]
 ERROR_COLUMNS = ["input_nc", "error", *METADATA_COLUMNS]
+REWRITTEN_INVALID_EXISTING_STATUS = "rewritten_invalid_existing"
 
 
 @dataclass
@@ -407,13 +411,29 @@ def validate_georef(dataset: Any, label: str = "dataset") -> Tuple[Tuple[float, 
     if not projection:
         raise RuntimeError(f"{label}: no projection found.")
 
+    try:
+        geotransform_values = tuple(float(value) for value in geotransform)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label}: invalid geotransform values: {geotransform}") from exc
+    if len(geotransform_values) != 6 or not all(math.isfinite(value) for value in geotransform_values):
+        raise RuntimeError(f"{label}: invalid geotransform values: {geotransform}")
+
     bad_geotransform = (
-        geotransform == (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-        or geotransform == (0.0, 1.0, 0.0, 0.0, 0.0, -1.0)
+        geotransform_values == (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        or geotransform_values == (0.0, 1.0, 0.0, 0.0, 0.0, -1.0)
     )
     if bad_geotransform:
         raise RuntimeError(f"{label}: default geotransform detected: {geotransform}")
-    return geotransform, projection
+
+    pixel_width = abs(geotransform_values[1])
+    pixel_height = abs(geotransform_values[5])
+    if pixel_width < 1e-12 or pixel_height < 1e-12:
+        raise RuntimeError(f"{label}: invalid pixel size in geotransform: {geotransform}")
+    if pixel_width > 1_000_000 or pixel_height > 1_000_000:
+        raise RuntimeError(f"{label}: unrealistic pixel size in geotransform: {geotransform}")
+    if abs(geotransform_values[0]) > 1e15 or abs(geotransform_values[3]) > 1e15:
+        raise RuntimeError(f"{label}: unrealistic origin in geotransform: {geotransform}")
+    return geotransform_values, projection
 
 
 def build_two_band_vrt(nc_path: Path, gdal: Any) -> Tuple[Any, str]:
@@ -472,12 +492,16 @@ def validate_output_geotiff(output_path: Path, gdal: Any) -> Dict[str, Any]:
     dataset = gdal.Open(str(output_path))
     if dataset is None:
         raise RuntimeError(f"Could not reopen output: {output_path.name}")
-    validate_georef(dataset, output_path.name)
-    return {
-        "xsize": dataset.RasterXSize,
-        "ysize": dataset.RasterYSize,
-        "band_count": dataset.RasterCount,
-    }
+    try:
+        validate_georef(dataset, output_path.name)
+        return {
+            "xsize": dataset.RasterXSize,
+            "ysize": dataset.RasterYSize,
+            "band_count": dataset.RasterCount,
+        }
+    finally:
+        dataset = None
+        gc.collect()
 
 
 def extract_record_id(source: ExtractSource, config: ExtractConfig) -> str:
@@ -491,10 +515,42 @@ def manifest_row_completed(row: Dict[str, str] | None) -> bool:
         return False
     return row.get("status", "").lower() in {
         "written",
+        REWRITTEN_INVALID_EXISTING_STATUS,
         "skipped_existing",
         "skipped_manifest",
         "local_complete",
     }
+
+
+def geotiff_sidecar_paths(path: Path) -> List[Path]:
+    """Return GDAL sidecars that may accompany one extracted GeoTIFF."""
+    if path.suffix.lower() not in {".tif", ".tiff"}:
+        return []
+    return [
+        path.with_suffix(".tfw"),
+        path.with_suffix(f"{path.suffix}.aux.xml"),
+    ]
+
+
+def remove_geotiff_and_sidecars(path: Path) -> None:
+    """Remove one invalid GeoTIFF output and its sidecars before retrying extraction."""
+    for candidate in [path, *geotiff_sidecar_paths(path)]:
+        if not candidate.exists():
+            continue
+        last_error: OSError | None = None
+        for _attempt in range(8):
+            gc.collect()
+            try:
+                candidate.unlink()
+                last_error = None
+                break
+            except OSError as exc:
+                last_error = exc
+                time.sleep(0.25)
+        if last_error is not None:
+            raise RuntimeError(
+                f"Could not remove invalid extraction output: {candidate} ({last_error})"
+            ) from last_error
 
 
 def extract_manifest_key_from_row(row: Dict[str, str]) -> str:
@@ -611,25 +667,35 @@ def process_one_file(
     """Extract one NetCDF file into one 2-band GeoTIFF."""
     output_path = build_output_path(source.path, config.output_folder, config.target_crs_mode)
     record_id = extract_record_id(source, config)
+    manifest_row = (existing_manifest or {}).get(record_id)
+    rewritten_invalid_existing = False
     if config.skip_existing and output_path.exists():
         if gdal is None:
             gdal = require_gdal()
-        info = validate_output_geotiff(output_path, gdal)
-        return {
-            "record_id": record_id,
-            "status": "skipped_existing",
-            "input_nc": str(source.path),
-            "output_tif": str(output_path),
-            "target_crs_mode": config.target_crs_mode,
-            "xsize": info["xsize"],
-            "ysize": info["ysize"],
-            "band_count": info["band_count"],
-            "raw_exists": "yes",
-            "output_exists": "yes",
-            "known_from_manifest": "no",
-            **source.metadata,
-        }
-    manifest_row = (existing_manifest or {}).get(record_id)
+        if not manifest_row_completed(manifest_row):
+            remove_geotiff_and_sidecars(output_path)
+            rewritten_invalid_existing = True
+        else:
+            try:
+                info = validate_output_geotiff(output_path, gdal)
+            except Exception:
+                remove_geotiff_and_sidecars(output_path)
+                rewritten_invalid_existing = True
+            else:
+                return {
+                    "record_id": record_id,
+                    "status": "skipped_existing",
+                    "input_nc": str(source.path),
+                    "output_tif": str(output_path),
+                    "target_crs_mode": config.target_crs_mode,
+                    "xsize": info["xsize"],
+                    "ysize": info["ysize"],
+                    "band_count": info["band_count"],
+                    "raw_exists": "yes",
+                    "output_exists": "yes",
+                    "known_from_manifest": "no",
+                    **source.metadata,
+                }
     if config.skip_manifest_existing and manifest_row_completed(manifest_row):
         return {
             "record_id": record_id,
@@ -658,7 +724,7 @@ def process_one_file(
     info = validate_output_geotiff(output_path, gdal)
     return {
         "record_id": record_id,
-        "status": "written",
+        "status": REWRITTEN_INVALID_EXISTING_STATUS if rewritten_invalid_existing else "written",
         "input_nc": str(source.path),
         "output_tif": str(output_path),
         "target_crs_mode": config.target_crs_mode,

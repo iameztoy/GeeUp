@@ -1,12 +1,14 @@
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env, check_gdal_runtime
 from swot_extract_tool import (
     ExtractConfig,
     ExtractSource,
+    REWRITTEN_INVALID_EXISTING_STATUS,
     TARGET_CRS_AFRICA_LAEA,
     TARGET_CRS_ORIGINAL,
     TARGET_CRS_WGS84,
@@ -17,6 +19,7 @@ from swot_extract_tool import (
     parse_filename,
     process_one_file,
     run_extract,
+    validate_georef,
 )
 
 
@@ -220,6 +223,71 @@ class ExtractPlanningTests(unittest.TestCase):
             self.assertEqual(row["status"], "skipped_manifest")
             self.assertEqual(row["known_from_manifest"], "yes")
             self.assertEqual(row["output_exists"], "no")
+
+    def test_validate_georef_rejects_unrealistic_transform(self) -> None:
+        class FakeDataset:
+            def GetGeoTransform(self, can_return_null: bool = True):  # noqa: ANN001
+                return (-float("inf"), 4.8e252, 0.0, 1.3e179, 0.0, -2.4e-154)
+
+            def GetProjectionRef(self) -> str:
+                return "PROJCS[\"fake\"]"
+
+        with self.assertRaisesRegex(RuntimeError, "invalid geotransform|unrealistic"):
+            validate_georef(FakeDataset(), "bad.tif")
+
+    def test_invalid_existing_output_is_removed_and_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            input_path = root / nc_name()
+            input_path.touch()
+            metadata = parse_filename(input_path)
+            assert metadata is not None
+            output_folder = root / "out"
+            output_folder.mkdir()
+            output_path = build_output_path(input_path, output_folder, TARGET_CRS_ORIGINAL)
+            output_path.write_bytes(b"bad")
+            output_path.with_suffix(".tfw").write_text("bad", encoding="utf-8")
+            output_path.with_suffix(".tif.aux.xml").write_text("bad", encoding="utf-8")
+
+            config = ExtractConfig(
+                input_folder=root,
+                output_folder=output_folder,
+                manifest_csv=root / "manifest.csv",
+                errors_csv=root / "errors.csv",
+            )
+            source = ExtractSource(path=input_path, metadata=metadata)
+
+            import swot_extract_tool
+
+            calls = {"validate": 0, "removed_before_write": False}
+
+            def fake_validate(path: Path, gdal) -> dict[str, int]:  # noqa: ANN001
+                calls["validate"] += 1
+                if path.read_bytes() != b"fixed":
+                    raise RuntimeError("Cannot open TIFF image")
+                return {"xsize": 10, "ysize": 20, "band_count": 2}
+
+            def fake_build_vrt(path: Path, gdal) -> tuple[str, str]:  # noqa: ANN001
+                return "vrt", "/vsimem/test.vrt"
+
+            def fake_export(vrt, path: Path, config: ExtractConfig, gdal) -> None:  # noqa: ANN001
+                calls["removed_before_write"] = not output_path.exists()
+                path.write_bytes(b"fixed")
+
+            class FakeGdal:
+                def Unlink(self, path: str) -> None:
+                    return None
+
+            with mock.patch.object(swot_extract_tool, "validate_output_geotiff", fake_validate), (
+                mock.patch.object(swot_extract_tool, "build_two_band_vrt", fake_build_vrt)
+            ), mock.patch.object(swot_extract_tool, "export_geotiff_from_vrt", fake_export):
+                row = process_one_file(source, config, FakeGdal(), existing_manifest={})
+
+            self.assertEqual(row["status"], REWRITTEN_INVALID_EXISTING_STATUS)
+            self.assertEqual(output_path.read_bytes(), b"fixed")
+            self.assertFalse(output_path.with_suffix(".tfw").exists())
+            self.assertFalse(output_path.with_suffix(".tif.aux.xml").exists())
+            self.assertTrue(calls["removed_before_write"])
 
 
 @unittest.skipUnless(GDAL_AVAILABLE, f"GDAL runtime unavailable: {GDAL_CHECK.stderr}")
