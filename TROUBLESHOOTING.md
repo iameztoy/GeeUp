@@ -1,5 +1,13 @@
 # Troubleshooting
 
+## Upload Run Exhausts Memory Or The Desktop Turns Black
+
+Current projects use `<project_root>\swotflow.sqlite3` for per-asset status updates. This replaces the former behavior that repeatedly loaded and rewrote large cumulative CSV manifests and could exhaust Windows committed memory during long uploads.
+
+Projects created by older releases are migrated automatically when opened. Confirm that `swotflow.sqlite3` exists in the project root before starting another large upload. Existing CSV manifests remain in `00_logs` as readable migration snapshots or end-of-run exports.
+
+If Chrome or ChromeDriver loses its session, the uploader now treats that as fatal and stops the run. Reopen SWOTFlow, run `Sync EE Assets`, and retry only assets that Earth Engine does not verify.
+
 This file covers the most common problems when automating Earth Engine uploads through the browser UI.
 
 ## How To Stop a Running Upload

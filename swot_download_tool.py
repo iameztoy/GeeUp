@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlparse
 
 import yaml
 
+from project_database import read_project_rows, upsert_project_rows
 from swot_metadata import parse_swot_l2_hr_raster_metadata, swot_product_rank
 from workflow_manifest import upsert_workflow_manifest, workflow_manifest_path
 
@@ -1010,17 +1011,11 @@ def manifest_key(granule: DownloadGranule) -> str:
 
 def read_download_manifest(path: Path) -> Dict[str, Dict[str, str]]:
     """Load a cumulative download manifest keyed by granule id."""
-    if not path.exists() or not path.is_file():
-        return {}
     rows: Dict[str, Dict[str, str]] = {}
-    try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            for row in csv.DictReader(handle):
-                key = row.get("granule_id") or row.get("file_name")
-                if key:
-                    rows[key] = {column: str(value or "") for column, value in row.items()}
-    except OSError:
-        return {}
+    for row in read_project_rows(path, "download_manifest"):
+        key = row.get("granule_id") or row.get("file_name")
+        if key:
+            rows[key] = {column: str(value or "") for column, value in row.items()}
     return rows
 
 
@@ -1091,12 +1086,13 @@ def write_download_manifest(
             "last_seen": timestamp,
             "last_downloaded": last_downloaded,
         }
-    with manifest_csv.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=MANIFEST_COLUMNS)
-        writer.writeheader()
-        for key in sorted(rows, key=lambda item: rows[item].get("file_name", item).lower()):
-            row = rows[key]
-            writer.writerow({column: row.get(column, "") for column in MANIFEST_COLUMNS})
+    upsert_project_rows(
+        manifest_csv,
+        rows.values(),
+        dataset="download_manifest",
+        export_csv=True,
+        fieldnames=MANIFEST_COLUMNS,
+    )
     return manifest_csv
 
 
@@ -1214,40 +1210,46 @@ def write_download_report(
         "granule_id",
         "links",
     ]
-    with config.report_csv.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns)
-        writer.writeheader()
-        for granule in preview.granules:
-            status, local_path = statuses.get(granule.identity, ("MATCHED", ""))
-            raw_exists = local_complete_path(config, granule) is not None
-            known_from_manifest = status == "SKIPPED_MANIFEST"
-            downloaded = (
-                "yes"
-                if raw_exists
-                or known_from_manifest
-                or status in {"DOWNLOADED", "SKIPPED_EXISTING", "LOCAL_COMPLETE"}
-                else "no"
-            )
-            writer.writerow(
-                {
-                    "status": status,
-                    "file_name": granule.file_name,
-                    "utm_tile": granule.utm_tile,
-                    "start_time": granule.start_time,
-                    "end_time": granule.end_time,
-                    "size_mb": "" if granule.size_mb is None else f"{granule.size_mb:.3f}",
-                    "downloaded": downloaded,
-                    "raw_exists": "yes" if raw_exists else "no",
-                    "known_from_manifest": "yes" if known_from_manifest else "no",
-                    "selected_for_download": "yes" if granule.selected_for_download else "no",
-                    "duplicate_filter_status": granule.duplicate_filter_status,
-                    "preferred_file_name": granule.preferred_file_name,
-                    "duplicate_reason": granule.duplicate_reason,
-                    "local_path": local_path,
-                    "granule_id": granule.identity,
-                    "links": " ".join(granule.links),
-                }
-            )
+    report_rows = []
+    for granule in preview.granules:
+        status, local_path = statuses.get(granule.identity, ("MATCHED", ""))
+        raw_exists = local_complete_path(config, granule) is not None
+        known_from_manifest = status == "SKIPPED_MANIFEST"
+        downloaded = (
+            "yes"
+            if raw_exists
+            or known_from_manifest
+            or status in {"DOWNLOADED", "SKIPPED_EXISTING", "LOCAL_COMPLETE"}
+            else "no"
+        )
+        report_rows.append(
+            {
+                "status": status,
+                "file_name": granule.file_name,
+                "utm_tile": granule.utm_tile,
+                "start_time": granule.start_time,
+                "end_time": granule.end_time,
+                "size_mb": "" if granule.size_mb is None else f"{granule.size_mb:.3f}",
+                "downloaded": downloaded,
+                "raw_exists": "yes" if raw_exists else "no",
+                "known_from_manifest": "yes" if known_from_manifest else "no",
+                "selected_for_download": "yes" if granule.selected_for_download else "no",
+                "duplicate_filter_status": granule.duplicate_filter_status,
+                "preferred_file_name": granule.preferred_file_name,
+                "duplicate_reason": granule.duplicate_reason,
+                "local_path": local_path,
+                "granule_id": granule.identity,
+                "links": " ".join(granule.links),
+            }
+        )
+    upsert_project_rows(
+        config.report_csv,
+        report_rows,
+        dataset="download_preview",
+        replace_dataset=True,
+        export_csv=True,
+        fieldnames=columns,
+    )
     return config.report_csv
 
 

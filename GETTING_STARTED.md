@@ -104,6 +104,7 @@ The project folder contains:
 
 ```text
 <project_root>\project.yaml
+<project_root>\swotflow.sqlite3
 <project_root>\01_raw_downloads
 <project_root>\02_extracted_geotiffs
 <project_root>\03_mosaics
@@ -112,7 +113,9 @@ The project folder contains:
 <project_root>\profiles
 ```
 
-`project.yaml` stores settings and lightweight metadata. Large NetCDF, GeoTIFF, mosaic, log, report, and debug files stay as normal files in the project folders.
+`project.yaml` stores settings and lightweight metadata. `swotflow.sqlite3` stores the indexed processing history used for resume, QA, Statistics, Cleanup, and upload verification. Large NetCDF, GeoTIFF, mosaic, log, report, and debug files stay as normal files in the project folders.
+
+Existing projects are migrated automatically when opened. Their CSV manifests are imported once and retained; after migration, SQLite is authoritative and CSV reports are compatibility exports rather than the live record updated after every file.
 
 `config.yaml` remains a local session mirror for command-line compatibility. It is not the main project record.
 
@@ -156,7 +159,7 @@ Typical steps:
 6. Review file count, size estimate, product-version filtering, raw-file status, and manifest-known status.
 7. Click `Download Matches`.
 
-The raw files go to `01_raw_downloads` by default. The preview report and cumulative download manifest go to `00_logs`.
+The raw files go to `01_raw_downloads` by default. Download records are stored in the project database, with preview and manifest CSV exports under `00_logs`.
 
 For large searches, the status text may say `Searching CMR`. CMR is NASA's Common Metadata Repository, the metadata service used by PO.DAAC/Earthdata. Large tile/date searches can spend time listing metadata before the first download starts; SWOTFlow reports paged CMR progress such as total matching granules and metadata retrieved so the window does not look idle.
 
@@ -200,7 +203,7 @@ Typical steps:
 3. Choose upload scope: all files, or selected UTM/source tiles only.
 4. If selected-tile scope is active, choose upload tiles from the list, or type/paste tile IDs and optionally click `Validate Typed Tiles`.
 5. In the `Execution` box, run `Run Dry Run`.
-6. Review `00_logs\upload_report.csv`.
+6. Review the Upload summary or the exported `00_logs\upload_report.csv`.
 7. In the `Execution` box, run `Run Real Upload`.
 
 List clicks update the optional UTM filter immediately. `Validate Typed Tiles` only checks typed or pasted tile IDs and refreshes the list highlighting. It does not start an upload.
@@ -215,7 +218,7 @@ If the Earth Engine page appears loaded but the upload console reports a page-lo
 
 ### 6. Statistics
 
-The Statistics tab reads project manifests, reports, and local folders. It summarizes:
+The Statistics tab reads the SQLite project record and local folders. It summarizes:
 
 - total files and size by processing level
 - processing levels such as `PGD0_01` or any future CRID/product-counter level, including how many remote matches, downloads, extractions, mosaic sources, and uploaded/verified assets are recorded for each level
@@ -309,13 +312,12 @@ In a project workflow, reports and debug output are written under:
 Common files include:
 
 - `download_preview.csv`
-- `download_manifest.csv`
-- `extract_manifest.csv`
-- `mosaic_manifest.csv`
+- `swotflow.sqlite3` as the authoritative cumulative record
+- `download_manifest.csv`, `extract_manifest.csv`, and `mosaic_manifest.csv` as compatibility exports
 - `mosaic_report.csv`
 - `upload_report.csv`
 - `ee_asset_inventory.csv`
-- `workflow_manifest.csv`
+- legacy `workflow_manifest.csv` files retained during migration; new workflow records are stored in SQLite
 - `statistics\project_statistics_snapshot.json`
 - `statistics\project_statistics_*.csv`
 - `statistics\project_statistics_upload_qa_by_tile.csv`

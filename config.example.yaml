@@ -20,6 +20,9 @@ processing:
   # Default local processing root. These folders are not committed to Git and
   # can be changed in the GUI/config if your data lives elsewhere.
   root: "C:/path/to/SWOT_Processing"
+  # Authoritative indexed project state. CSV reports remain compatibility
+  # exports, but processing history and resume decisions use this database.
+  database: "C:/path/to/SWOT_Processing/swotflow.sqlite3"
   raw_downloads: "C:/path/to/SWOT_Processing/01_raw_downloads"
   extracted_geotiffs: "C:/path/to/SWOT_Processing/02_extracted_geotiffs"
   mosaics: "C:/path/to/SWOT_Processing/03_mosaics"

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Sequence
+
+from project_database import read_project_rows, upsert_project_rows
 
 
 WORKFLOW_COLUMNS = [
@@ -63,46 +64,39 @@ def row_key(row: Mapping[str, str]) -> str:
 
 def read_workflow_manifest(path: str | Path) -> Dict[str, Dict[str, str]]:
     """Load workflow rows keyed by stage and record id."""
-    manifest_path = Path(path)
-    if not manifest_path.exists() or not manifest_path.is_file():
-        return {}
     rows: Dict[str, Dict[str, str]] = {}
-    try:
-        with manifest_path.open("r", encoding="utf-8", newline="") as handle:
-            for raw_row in csv.DictReader(handle):
-                row = {column: raw_row.get(column, "") for column in WORKFLOW_COLUMNS}
-                key = row_key(row)
-                if key.strip():
-                    rows[key] = row
-    except OSError:
-        return {}
+    for raw_row in read_project_rows(path, "workflow_manifest"):
+        row = {column: raw_row.get(column, "") for column in WORKFLOW_COLUMNS}
+        key = row_key(row)
+        if key.strip():
+            rows[key] = row
     return rows
 
 
 def upsert_workflow_manifest(
     path: str | Path,
     rows: Iterable[Mapping[str, Any]],
+    *,
+    export_csv: bool = False,
 ) -> Path:
     """Merge rows into the shared workflow manifest."""
     manifest_path = Path(path)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = read_workflow_manifest(manifest_path)
     now = timestamp_text()
+    normalized_rows = []
     for raw_row in rows:
         row = {column: normalize_cell(raw_row.get(column, "")) for column in WORKFLOW_COLUMNS}
         row["updated_at"] = row.get("updated_at") or now
-        key = row_key(row)
         if not row.get("stage") or not row.get("record_id"):
             continue
-        previous = existing.get(key, {column: "" for column in WORKFLOW_COLUMNS})
-        previous.update(row)
-        existing[key] = previous
-
-    with manifest_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=WORKFLOW_COLUMNS)
-        writer.writeheader()
-        for key in sorted(existing):
-            writer.writerow({column: existing[key].get(column, "") for column in WORKFLOW_COLUMNS})
+        normalized_rows.append(row)
+    upsert_project_rows(
+        manifest_path,
+        normalized_rows,
+        dataset="workflow_manifest",
+        export_csv=export_csv,
+        fieldnames=WORKFLOW_COLUMNS,
+    )
     return manifest_path
 
 

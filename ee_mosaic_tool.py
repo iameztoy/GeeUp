@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 import yaml
 
 from gdal_runtime import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
+from project_database import dataset_for_path, read_project_rows, upsert_project_rows
 from swot_download_tool import normalize_utm_tiles
 from swot_metadata import ParsedMetadata, parse_swot_l2_hr_raster_metadata, swot_product_rank
 from workflow_manifest import (
@@ -413,17 +414,11 @@ def group_source_signature(group: MosaicGroup) -> str:
 
 def read_mosaic_manifest(path: Path) -> Dict[str, Dict[str, str]]:
     """Load the cumulative mosaic manifest keyed by output file name."""
-    if not path.exists() or not path.is_file():
-        return {}
     rows: Dict[str, Dict[str, str]] = {}
-    try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            for row in csv.DictReader(handle):
-                key = Path(row.get("output_file", "")).name
-                if key:
-                    rows[key] = {column: row.get(column, "") for column in REPORT_COLUMNS}
-    except OSError:
-        return {}
+    for row in read_project_rows(path, "mosaic_manifest"):
+        key = Path(row.get("output_file", "")).name
+        if key:
+            rows[key] = {column: row.get(column, "") for column in REPORT_COLUMNS}
     return rows
 
 
@@ -468,7 +463,13 @@ def write_mosaic_manifest(config: MosaicConfig, rows: Iterable[Dict[str, str]]) 
         previous.update(row)
         previous["updated_at"] = timestamp_text()
         existing[key] = previous
-    write_report(config.manifest_csv, existing.values())
+    upsert_project_rows(
+        config.manifest_csv,
+        existing.values(),
+        dataset="mosaic_manifest",
+        export_csv=True,
+        fieldnames=REPORT_COLUMNS,
+    )
 
 
 def write_mosaic_workflow_manifest(config: MosaicConfig, rows: Iterable[Dict[str, str]]) -> None:
@@ -1450,11 +1451,23 @@ def report_row(
 
 def write_report(report_path: Path, rows: Iterable[Dict[str, str]]) -> None:
     """Write the mosaic CSV report."""
+    materialized = list(rows)
+    dataset = dataset_for_path(report_path)
+    if dataset:
+        upsert_project_rows(
+            report_path,
+            materialized,
+            dataset=dataset,
+            replace_dataset=dataset != "mosaic_manifest",
+            export_csv=True,
+            fieldnames=REPORT_COLUMNS,
+        )
+        return
     report_path.parent.mkdir(parents=True, exist_ok=True)
     with report_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=REPORT_COLUMNS)
         writer.writeheader()
-        for row in rows:
+        for row in materialized:
             writer.writerow({column: row.get(column, "") for column in REPORT_COLUMNS})
 
 
@@ -1466,12 +1479,14 @@ def write_mixed_crid_report(
     if report_path is None:
         return
     mixed_rows = [row for row in rows if row.get("mixed_crid") == "true"]
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    with report_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=REPORT_COLUMNS)
-        writer.writeheader()
-        for row in mixed_rows:
-            writer.writerow({column: row.get(column, "") for column in REPORT_COLUMNS})
+    upsert_project_rows(
+        report_path,
+        mixed_rows,
+        dataset="mixed_crid_mosaics",
+        replace_dataset=True,
+        export_csv=True,
+        fieldnames=REPORT_COLUMNS,
+    )
 
 
 def summarize_exit_code(rows: Sequence[Dict[str, str]]) -> int:

@@ -409,7 +409,7 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_upload_report_poll_refreshes_when_report_changes(self) -> None:
+    def test_upload_report_poll_refreshes_after_updates_are_quiet(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             report = Path(temp) / "upload_report.csv"
             report.write_text("final_status\nCOMPLETED\n", encoding="utf-8")
@@ -419,8 +419,12 @@ class GuiLayoutTests(unittest.TestCase):
                 app = LauncherApp(root)
                 with mock.patch.object(app, "refresh_project_statistics_if_active") as refresh:
                     app.poll_upload_statistics_report(str(report), None, 0)
+                    refresh.assert_not_called()
+                    app.upload_statistics_last_change_at -= 20
+                    revision = app.upload_report_revision(report)
+                    app.poll_upload_statistics_report(str(report), revision, 0)
 
-                refresh.assert_called_once_with("upload report")
+                refresh.assert_called_once_with("completed upload report updates")
             finally:
                 root.destroy()
 

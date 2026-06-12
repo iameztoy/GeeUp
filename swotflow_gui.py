@@ -107,6 +107,7 @@ ensure_isolated_python_environment()
 import yaml
 
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env
+from project_database import ProjectDatabase, database_path_for, project_status_counts
 from swotflow_project import (
     SWOTFlowProject,
     TilePreset,
@@ -297,6 +298,10 @@ class LauncherApp:
         self.home_workflow_summary_var = tk.StringVar(value="")
         self.latest_project_insights: Any | None = None
         self.latest_project_statistics_generated_at = ""
+        self.statistics_refresh_running = False
+        self.statistics_refresh_pending = False
+        self.upload_statistics_pending_revision: int | None = None
+        self.upload_statistics_last_change_at = 0.0
         self.project_created_at = ""
         self.project_download_history: list[dict[str, Any]] = []
         self.tile_preset_var = tk.StringVar(value="")
@@ -3539,7 +3544,7 @@ class LauncherApp:
         if available_tiles:
             base_tiles = sorted(set(available_tiles) | set(self.upload_selected_tiles))
             self.upload_tile_availability_var.set(
-                f"Showing {len(available_tiles)} upload-ready tile(s) found in the current origin folder. Files already marked completed or EE-verified in upload_report.csv are excluded."
+                f"Showing {len(available_tiles)} upload-ready tile(s) found in the current origin folder. Files already marked completed or EE-verified in the project database are excluded."
             )
         else:
             base_tiles = list(self.all_utm_tiles)
@@ -4408,6 +4413,13 @@ class LauncherApp:
             "destination_parent": self.destination_var.get().strip(),
             "processing": {
                 "root": self.processing_root_var.get().strip() or DEFAULT_PROCESSING_PATHS["root"],
+                "database": str(
+                    Path(
+                        self.processing_root_var.get().strip()
+                        or DEFAULT_PROCESSING_PATHS["root"]
+                    )
+                    / "swotflow.sqlite3"
+                ),
                 "raw_downloads": self.download_output_var.get().strip()
                 or self.duplicate_input_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["raw_downloads"],
@@ -5864,6 +5876,10 @@ class LauncherApp:
             if notify:
                 self.require_active_project("refresh project statistics")
             return
+        if self.statistics_refresh_running:
+            self.statistics_refresh_pending = True
+            return
+        self.statistics_refresh_running = True
         config = self.build_config()
         self.statistics_status_var.set("Refreshing project statistics in the background...")
         thread = threading.Thread(
@@ -5903,12 +5919,14 @@ class LauncherApp:
 
     def finish_project_statistics_error(self, exc: Exception, notify: bool) -> None:
         """Show a background statistics refresh failure."""
+        self.statistics_refresh_running = False
         self.statistics_status_var.set(f"Could not refresh project statistics: {exc}")
         if notify:
             messagebox.showerror(
                 "Could not refresh statistics",
                 f"Failed to read project manifests or folders:\n{exc}",
             )
+        self.run_pending_statistics_refresh()
 
     def finish_project_statistics_refresh(
         self,
@@ -5918,6 +5936,7 @@ class LauncherApp:
         snapshot_text: str,
     ) -> None:
         """Render a completed background statistics refresh."""
+        self.statistics_refresh_running = False
         suffix = f" after {source}" if source else ""
         if snapshot_text.startswith(" Saved to "):
             self.latest_project_statistics_generated_at = ""
@@ -5926,6 +5945,14 @@ class LauncherApp:
             status_text=f"Project statistics refreshed{suffix}.{snapshot_text}",
             include_cleanup=True,
         )
+        self.run_pending_statistics_refresh()
+
+    def run_pending_statistics_refresh(self) -> None:
+        """Run one coalesced refresh requested while another refresh was active."""
+        if not self.statistics_refresh_pending:
+            return
+        self.statistics_refresh_pending = False
+        self.refresh_project_statistics_async(notify=False, source="queued project changes")
 
     def refresh_project_statistics(
         self,
@@ -6391,7 +6418,7 @@ class LauncherApp:
         ):
             return
         self.cleanup_status_var.set(
-            "Started EE asset sync for cleanup. Waiting for upload_report.csv to update..."
+            "Started EE asset sync for cleanup. Waiting for the project database to update..."
         )
         self.launch_uploader(
             dry_run=False,
@@ -6414,7 +6441,7 @@ class LauncherApp:
     ) -> None:
         """Start the CLI uploader in a new console window when possible."""
         upload_report_path = self.current_upload_report_path()
-        upload_report_mtime = self.file_mtime_ns(upload_report_path)
+        upload_report_revision = self.upload_report_revision(upload_report_path)
         uploader_command = [
             sys.executable,
             str(UPLOADER_SCRIPT),
@@ -6443,7 +6470,7 @@ class LauncherApp:
         self.upload_progress_text_var.set(
             f"Progress: started {run_type}; waiting for report updates..."
         )
-        self.start_upload_statistics_watcher(upload_report_path, upload_report_mtime)
+        self.start_upload_statistics_watcher(upload_report_path, upload_report_revision)
         self.status_var.set(
             f"Started {run_type} in a separate console window. That window now stays open after the run finishes."
         )
@@ -6471,19 +6498,15 @@ class LauncherApp:
             return None
 
     def upload_report_status_counts(self, report_path: Path) -> dict[str, int]:
-        """Return final-status counts from the upload report."""
-        counts: dict[str, int] = {}
-        try:
-            with report_path.open("r", encoding="utf-8", newline="") as handle:
-                for row in csv.DictReader(handle):
-                    status = str(row.get("final_status", "") or "UNKNOWN").strip().upper()
-                    counts[status] = counts.get(status, 0) + 1
-        except OSError:
-            return counts
-        return counts
+        """Return indexed final-status counts from the project database."""
+        return project_status_counts(report_path, "upload_report")
+
+    def upload_report_revision(self, report_path: Path) -> int:
+        """Return the project database revision used by the upload watcher."""
+        return ProjectDatabase(database_path_for(report_path)).revision()
 
     def update_upload_progress_from_report(self, report_path: Path) -> None:
-        """Update Upload progress widgets from upload_report.csv status counts."""
+        """Update Upload progress widgets from indexed upload status counts."""
         counts = self.upload_report_status_counts(report_path)
         if not counts:
             self.upload_progress_var.set(0.0)
@@ -6549,18 +6572,24 @@ class LauncherApp:
         previous_mtime: int | None,
         remaining_polls: int,
     ) -> None:
-        """Refresh Statistics when the upload report changes."""
+        """Refresh progress and Statistics when the project database changes."""
         report_path = Path(report_path_text)
-        current_mtime = self.file_mtime_ns(report_path)
-        if current_mtime is not None:
-            self.update_upload_progress_from_report(report_path)
-        if current_mtime is not None and current_mtime != previous_mtime:
-            self.refresh_project_statistics_if_active("upload report")
+        self.update_upload_progress_from_report(report_path)
+        current_mtime = self.upload_report_revision(report_path)
+        if current_mtime != previous_mtime:
+            self.upload_statistics_pending_revision = current_mtime
+            self.upload_statistics_last_change_at = datetime.now().timestamp()
             previous_mtime = current_mtime
             callback = self.upload_report_update_callback
             if callback is not None:
                 self.upload_report_update_callback = None
                 callback()
+        elif (
+            self.upload_statistics_pending_revision == current_mtime
+            and datetime.now().timestamp() - self.upload_statistics_last_change_at >= 15.0
+        ):
+            self.upload_statistics_pending_revision = None
+            self.refresh_project_statistics_if_active("completed upload report updates")
         if remaining_polls <= 0:
             self.upload_stats_poll_after_id = None
             self.upload_report_update_callback = None

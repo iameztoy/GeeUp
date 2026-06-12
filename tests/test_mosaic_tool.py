@@ -25,6 +25,7 @@ from ee_mosaic_tool import (
     write_mosaic_manifest,
 )
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env, check_gdal_runtime
+from project_database import ProjectDatabase
 from swot_metadata import parse_swot_l2_hr_raster_metadata
 
 
@@ -316,7 +317,10 @@ class MosaicPlanningTests(unittest.TestCase):
             self.assertEqual(rows[0]["status"], "SKIPPED_MANIFEST")
             self.assertEqual(rows[0]["known_from_manifest"], "yes")
             self.assertFalse(group.output_file.exists())
-            self.assertTrue((root / "workflow_manifest.csv").exists())
+            self.assertGreater(
+                ProjectDatabase(root / "swotflow.sqlite3").dataset_count("workflow_manifest"),
+                0,
+            )
 
     def test_disk_write_error_stops_mosaic_run_early(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

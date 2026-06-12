@@ -94,6 +94,13 @@ from swot_metadata import (
     ParsedMetadata,
     parse_swot_l2_hr_raster_metadata,
 )
+from project_database import (
+    ProjectDatabase,
+    database_path_for,
+    export_project_dataset,
+    read_project_rows,
+    upsert_project_rows,
+)
 from workflow_manifest import upsert_workflow_manifest, workflow_manifest_path
 
 
@@ -444,24 +451,21 @@ class TaskRow:
 
 
 class ReportManager:
-    """Read, write, and update the CSV report file."""
+    """Read and update the SQLite upload report with optional CSV exports."""
 
     def __init__(self, report_path: Path) -> None:
         self.report_path = report_path
+        self.database = ProjectDatabase(database_path_for(report_path))
         self.rows: Dict[str, Dict[str, str]] = {}
 
     def load(self) -> None:
         """Load an existing CSV report if one exists."""
-        if not self.report_path.exists():
-            return
-        with self.report_path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
-                asset_id = row.get("asset_id", "").strip()
-                if not asset_id:
-                    continue
-                normalized = {column: row.get(column, "") for column in REPORT_COLUMNS}
-                self.rows[asset_id] = normalized
+        for row in read_project_rows(self.report_path, "upload_report"):
+            asset_id = row.get("asset_id", "").strip()
+            if not asset_id:
+                continue
+            normalized = {column: row.get(column, "") for column in REPORT_COLUMNS}
+            self.rows[asset_id] = normalized
 
     def get_status(self, asset_id: str) -> str:
         """Return the recorded status for an asset ID."""
@@ -478,7 +482,11 @@ class ReportManager:
     def upsert(self, row: Dict[str, str]) -> None:
         """Insert or replace a report row."""
         existing = self.merge_row(row)
-        self.write()
+        upsert_project_rows(
+            self.report_path,
+            [existing],
+            dataset="upload_report",
+        )
         self.write_workflow_rows([existing])
 
     def upsert_many(self, rows: Iterable[Dict[str, str]]) -> None:
@@ -486,7 +494,11 @@ class ReportManager:
         existing_rows = [self.merge_row(row) for row in rows]
         if not existing_rows:
             return
-        self.write()
+        upsert_project_rows(
+            self.report_path,
+            existing_rows,
+            dataset="upload_report",
+        )
         self.write_workflow_rows(existing_rows)
 
     def workflow_row(self, row: Dict[str, str]) -> Dict[str, str]:
@@ -516,16 +528,16 @@ class ReportManager:
         upsert_workflow_manifest(
             workflow_manifest_path(self.report_path),
             [self.workflow_row(row) for row in rows],
+            export_csv=False,
         )
 
     def write(self) -> None:
-        """Write the report to disk."""
-        self.report_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.report_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=REPORT_COLUMNS)
-            writer.writeheader()
-            for asset_id in sorted(self.rows):
-                writer.writerow(self.rows[asset_id])
+        """Export current SQLite records to compatibility CSV files."""
+        export_project_dataset(
+            self.report_path,
+            dataset="upload_report",
+            fieldnames=REPORT_COLUMNS,
+        )
 
     def counts(self, asset_ids: Optional[Iterable[str]] = None) -> Dict[str, int]:
         """Return a simple status count summary."""
@@ -974,6 +986,13 @@ class EarthEngineUIUploader:
         self.config.artifacts.report_csv.parent.mkdir(parents=True, exist_ok=True)
 
     def run(self) -> int:
+        """Run the upload workflow and export compatibility reports once."""
+        try:
+            return self._run()
+        finally:
+            self.report.write()
+
+    def _run(self) -> int:
         """Run the upload workflow end to end."""
         try:
             planned_items = self.build_upload_plan()
@@ -1250,54 +1269,50 @@ class EarthEngineUIUploader:
         return records
 
     def write_asset_inventory(self, records: Sequence[AssetInventoryRecord]) -> None:
-        """Write a compact Earth Engine asset inventory CSV."""
+        """Replace the indexed Earth Engine inventory and export its CSV snapshot."""
         path = self.config.artifacts.ee_asset_inventory_csv
-        path.parent.mkdir(parents=True, exist_ok=True)
         listed_at = now_iso()
-        with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=["asset_id", "asset_name", "asset_type", "parent", "listed_at"],
-            )
-            writer.writeheader()
-            for record in records:
-                writer.writerow(
-                    {
-                        "asset_id": record.asset_id,
-                        "asset_name": record.asset_name,
-                        "asset_type": record.asset_type,
-                        "parent": self.config.destination_parent,
-                        "listed_at": listed_at,
-                    }
-                )
+        inventory_columns = ["asset_id", "asset_name", "asset_type", "parent", "listed_at"]
+        upsert_project_rows(
+            path,
+            [
+                {
+                    "asset_id": record.asset_id,
+                    "asset_name": record.asset_name,
+                    "asset_type": record.asset_type,
+                    "parent": self.config.destination_parent,
+                    "listed_at": listed_at,
+                }
+                for record in records
+            ],
+            dataset="ee_asset_inventory",
+            replace_dataset=True,
+            export_csv=True,
+            fieldnames=inventory_columns,
+        )
 
     def load_mosaic_source_tile_lookup(self) -> Dict[str, List[str]]:
         """Map mosaic outputs to source UTM tiles from the mosaic manifest."""
         path = self.config.mosaic_manifest_csv
-        if path is None or not path.exists():
+        if path is None:
             return {}
         lookup: Dict[str, List[str]] = {}
-        try:
-            with path.open("r", encoding="utf-8", newline="") as handle:
-                rows = csv.DictReader(handle)
-                for row in rows:
-                    output = str(row.get("output_file", "") or "").strip()
-                    if not output:
-                        continue
-                    tiles: set[str] = set()
-                    for source in parse_csv_path_list(row.get("input_files", "")):
-                        tiles.update(source_tiles_from_file_name(source))
-                    if not tiles:
-                        continue
-                    sorted_tiles = sorted(tiles)
-                    output_path = Path(output)
-                    lookup[output_path.name] = sorted_tiles
-                    try:
-                        lookup[str(output_path.resolve())] = sorted_tiles
-                    except OSError:
-                        lookup[str(output_path)] = sorted_tiles
-        except OSError as exc:
-            self.logger.warning("Could not read mosaic source-tile manifest %s: %s", path, exc)
+        for row in read_project_rows(path, "mosaic_manifest"):
+            output = str(row.get("output_file", "") or "").strip()
+            if not output:
+                continue
+            tiles: set[str] = set()
+            for source in parse_csv_path_list(row.get("input_files", "")):
+                tiles.update(source_tiles_from_file_name(source))
+            if not tiles:
+                continue
+            sorted_tiles = sorted(tiles)
+            output_path = Path(output)
+            lookup[output_path.name] = sorted_tiles
+            try:
+                lookup[str(output_path.resolve())] = sorted_tiles
+            except OSError:
+                lookup[str(output_path)] = sorted_tiles
         return lookup
 
     def apply_upload_filter_metadata(
@@ -3226,6 +3241,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         verbose_override=args.verbose or config.execution.verbose_console,
     )
     logger.info("Report CSV: %s", config.artifacts.report_csv)
+    logger.info("Project database: %s", database_path_for(config.artifacts.report_csv))
     logger.info("Artifacts directory: %s", config.artifacts.artifacts_dir)
 
     uploader = EarthEngineUIUploader(
@@ -3234,9 +3250,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         assume_yes=args.yes,
     )
     if args.sync_only:
-        count = uploader.sync_existing_assets_to_report()
-        logger.info("Sync-only finished. Verified %s local file(s) against Earth Engine.", count)
-        return 0
+        try:
+            count = uploader.sync_existing_assets_to_report()
+            logger.info("Sync-only finished. Verified %s local file(s) against Earth Engine.", count)
+            return 0
+        finally:
+            uploader.report.write()
     return uploader.run()
 
 

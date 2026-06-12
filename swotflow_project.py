@@ -12,11 +12,12 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import yaml
 
+from project_database import DATABASE_FILE_NAME, ProjectDatabase, migrate_project_csvs
 from swot_download_tool import normalize_utm_tiles
 
 
 PROJECT_FILE_NAME = "project.yaml"
-PROJECT_SCHEMA_VERSION = 1
+PROJECT_SCHEMA_VERSION = 2
 PRESET_SCHEMA_VERSION = 1
 BUILTIN_PRESET_PATH = Path(__file__).resolve().parent / "spatial_presets" / "continent_utm_tiles.json"
 PROJECT_FOLDERS = {
@@ -107,6 +108,7 @@ def config_for_project(base_config: Mapping[str, Any], root: str | Path) -> Dict
     processing.update(
         {
             "root": _as_text(root_path),
+            "database": _as_text(root_path / DATABASE_FILE_NAME),
             "raw_downloads": raw,
             "extracted_geotiffs": extracted,
             "mosaics": mosaics,
@@ -189,6 +191,7 @@ def create_project(root: str | Path, name: str, base_config: Mapping[str, Any]) 
         download_history=[],
         created_at=now_iso(),
     )
+    ProjectDatabase(root_path / DATABASE_FILE_NAME)
     save_project(project)
     return project
 
@@ -202,7 +205,9 @@ def load_project(path: str | Path) -> SWOTFlowProject:
     root = Path(project_data.get("root") or project_file.parent)
     if not root.is_absolute():
         root = (project_file.parent / root).resolve()
-    return SWOTFlowProject(
+    if not root.exists() and project_file.parent.exists():
+        root = project_file.parent
+    project = SWOTFlowProject(
         name=str(project_data.get("name") or root.name or "SWOTFlow Project"),
         root=root,
         config=document.get("config", {}) or {},
@@ -210,6 +215,12 @@ def load_project(path: str | Path) -> SWOTFlowProject:
         created_at=str(project_data.get("created_at") or ""),
         updated_at=str(project_data.get("updated_at") or ""),
     )
+    ensure_project_structure(project.root)
+    processing = dict(project.config.get("processing", {}))
+    processing.setdefault("database", str(project.root / DATABASE_FILE_NAME))
+    project.config["processing"] = processing
+    migrate_project_csvs(project.root)
+    return project
 
 
 def save_project_config(

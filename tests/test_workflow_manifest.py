@@ -1,4 +1,3 @@
-import csv
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,11 +40,9 @@ class WorkflowManifestTests(unittest.TestCase):
                 ],
             )
 
-            with path.open("r", encoding="utf-8", newline="") as handle:
-                rows = list(csv.DictReader(handle))
             loaded = read_workflow_manifest(path)
 
-            self.assertEqual(len(rows), 2)
+            self.assertEqual(len(loaded), 2)
             self.assertEqual(loaded["download\tG1"]["status"], "SKIPPED_EXISTING")
             self.assertEqual(loaded["extract\tG1|original"]["status"], "written")
 

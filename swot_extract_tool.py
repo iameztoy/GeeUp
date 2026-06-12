@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import yaml
 
 from gdal_runtime import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
+from project_database import read_project_rows, upsert_project_rows
 from swot_download_tool import normalize_utm_tiles
 from workflow_manifest import timestamp_text, upsert_workflow_manifest, workflow_manifest_path
 
@@ -566,18 +567,12 @@ def extract_manifest_key_from_row(row: Dict[str, str]) -> str:
 
 def read_extract_manifest(path: Path) -> Dict[str, Dict[str, str]]:
     """Load the cumulative extraction manifest keyed by input filename and CRS mode."""
-    if not path.exists() or not path.is_file():
-        return {}
     rows: Dict[str, Dict[str, str]] = {}
-    try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            for row in csv.DictReader(handle):
-                normalized = {column: row.get(column, "") for column in MANIFEST_COLUMNS}
-                key = extract_manifest_key_from_row(normalized)
-                if key:
-                    rows[key] = normalized
-    except OSError:
-        return {}
+    for row in read_project_rows(path, "extract_manifest"):
+        normalized = {column: row.get(column, "") for column in MANIFEST_COLUMNS}
+        key = extract_manifest_key_from_row(normalized)
+        if key:
+            rows[key] = normalized
     return rows
 
 
@@ -608,7 +603,13 @@ def write_extract_manifest(config: ExtractConfig, results: Iterable[Dict[str, An
         previous = existing.get(key, {column: "" for column in MANIFEST_COLUMNS})
         previous.update(row)
         existing[key] = previous
-    write_csv(config.manifest_csv, MANIFEST_COLUMNS, existing.values())
+    upsert_project_rows(
+        config.manifest_csv,
+        existing.values(),
+        dataset="extract_manifest",
+        export_csv=True,
+        fieldnames=MANIFEST_COLUMNS,
+    )
 
 
 def write_extract_workflow_manifest(
@@ -904,7 +905,14 @@ def run_extract(
         errors.extend(row for _index, row in sorted(indexed_errors, key=lambda item: item[0]))
 
     write_extract_manifest(config, results)
-    write_csv(config.errors_csv, ERROR_COLUMNS, errors)
+    upsert_project_rows(
+        config.errors_csv,
+        errors,
+        dataset="extract_errors",
+        replace_dataset=True,
+        export_csv=True,
+        fieldnames=ERROR_COLUMNS,
+    )
     write_extract_workflow_manifest(config, results, errors)
     return (2 if errors else 0), plan, results, errors
 

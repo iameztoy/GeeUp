@@ -21,6 +21,7 @@ from ee_ui_uploader import (
     normalize_dialog_error_messages,
     parse_config,
 )
+from project_database import read_project_rows
 
 
 class UploaderDialogRegressionTests(unittest.TestCase):
@@ -73,8 +74,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
         return EarthEngineUIUploader(config, logger, assume_yes=True)
 
     def read_report_rows(self, path: Path) -> list[dict[str, str]]:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            return list(csv.DictReader(handle))
+        return read_project_rows(path, "upload_report")
 
     def test_active_upload_dialog_helper_filters_visible_dialogs(self) -> None:
         script = active_upload_dialog_helper_js()

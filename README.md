@@ -83,6 +83,7 @@ A SWOTFlow project keeps settings and intermediate files together:
 
 ```text
 <project_root>\project.yaml
+<project_root>\swotflow.sqlite3
 <project_root>\01_raw_downloads
 <project_root>\02_extracted_geotiffs
 <project_root>\03_mosaics
@@ -91,13 +92,14 @@ A SWOTFlow project keeps settings and intermediate files together:
 <project_root>\profiles
 ```
 
-Large NetCDF, GeoTIFF, mosaic, report, and debug files stay in the project folders. The project file stores settings and lightweight metadata, not the data itself.
+`swotflow.sqlite3` is the authoritative indexed project record for downloads, extractions, mosaics, uploads, Earth Engine inventory, and workflow history. CSV files under `00_logs` remain readable exports and migration snapshots. Large NetCDF, GeoTIFF, mosaic, report, and debug files stay in the project folders.
 
 ## Repository Map
 
 - `swotflow_gui.py`: desktop launcher with Home, Automation, Download, Duplicate Removal, Extraction, Mosaic, Upload, Statistics, and Cleanup tools.
 - `swotflow_automation.py`: tile-by-tile unattended workflow orchestration.
 - `swotflow_project.py`: project metadata, project folders, history, and tile profile helpers.
+- `project_database.py`: SQLite project store, legacy CSV migration, indexed status queries, and CSV exports.
 - `swot_download_tool.py`: Earthdata / PO.DAAC search, preview, manifest, and download logic.
 - `swot_duplicate_remover.py`: local raw-file duplicate cleanup.
 - `swot_extract_tool.py`: GDAL-backed SWOT NetCDF to GeoTIFF extraction.

@@ -68,6 +68,7 @@ class ProjectTests(unittest.TestCase):
 
             self.assertEqual(config["processing"]["root"], str(root))
             self.assertEqual(config["download"]["report_csv"], str(root / "00_logs" / "download_preview.csv"))
+            self.assertEqual(config["processing"]["database"], str(root / "swotflow.sqlite3"))
             self.assertEqual(config["download"]["manifest_csv"], str(root / "00_logs" / "download_manifest.csv"))
             self.assertEqual(config["duplicates"]["input_folder"], str(root / "01_raw_downloads"))
             self.assertEqual(config["mosaic"]["input_folder"], str(root / "02_extracted_geotiffs"))

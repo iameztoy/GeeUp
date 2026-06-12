@@ -8,10 +8,17 @@ import re
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
-from swot_metadata import parse_swot_l2_hr_raster_metadata, swot_product_rank
+from project_database import (
+    ProjectDatabase,
+    database_path_from_config,
+    dataset_for_path,
+    read_project_rows,
+)
+from swot_metadata import SWOT_L2_HR_RASTER_PATTERN, swot_product_rank
 
 
 COMPLETED_EXTRACT_STATUSES = {
@@ -39,6 +46,21 @@ UPLOAD_CLEANUP_STATUSES = {
 EE_VERIFIED_STATUS = "EE_VERIFIED_EXISTS"
 UTM_TILE_TOKEN_RE = re.compile(r"^UTM(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])$")
 LINEAGE_SNAPSHOT_LIMIT = 1000
+
+
+@lru_cache(maxsize=None)
+def cached_swot_filename_fields(file_name: str) -> Dict[str, str] | None:
+    """Parse filename fields without converting timestamps for statistics."""
+    stem = Path(str(file_name or "")).stem
+    match = SWOT_L2_HR_RASTER_PATTERN.match(stem)
+    if match is None:
+        return None
+    fields = {key: str(value or "") for key, value in match.groupdict().items()}
+    descriptor_parts = fields["descriptor"].split("_")
+    fields["grid_resolution"] = descriptor_parts[0] if descriptor_parts else ""
+    fields["coordinate_system"] = descriptor_parts[1] if len(descriptor_parts) > 1 else ""
+    fields["granule_overlap"] = descriptor_parts[2] if len(descriptor_parts) > 2 else ""
+    return fields
 
 
 @dataclass
@@ -88,8 +110,10 @@ def statistics_snapshot_path(config: Mapping[str, Any]) -> Path:
 
 
 def read_csv_rows(path: str | Path) -> List[Dict[str, str]]:
-    """Read CSV rows, returning an empty list for missing files."""
+    """Read project rows from SQLite, falling back to unregistered CSV files."""
     csv_path = Path(path)
+    if dataset_for_path(csv_path):
+        return read_project_rows(csv_path)
     if not csv_path.exists() or not csv_path.is_file():
         return []
     try:
@@ -231,12 +255,12 @@ def processing_level_label(crid: str, product_counter: str | int | None) -> str:
 
 def parsed_processing_level(file_name: str | Path) -> str:
     """Return the processing level parsed from a SWOT filename."""
-    parsed = parse_swot_l2_hr_raster_metadata(file_name)
-    if parsed is None:
+    fields = cached_swot_filename_fields(str(file_name))
+    if fields is None:
         return ""
     return processing_level_label(
-        parsed.fields.get("crid", ""),
-        parsed.fields.get("product_counter", ""),
+        fields.get("crid", ""),
+        fields.get("product_counter", ""),
     )
 
 
@@ -261,10 +285,10 @@ def row_processing_level(
 
 def file_utm_tile(file_name: str | Path) -> str:
     """Return the UTM tile parsed from a SWOT filename."""
-    parsed = parse_swot_l2_hr_raster_metadata(file_name)
-    if parsed is None:
+    fields = cached_swot_filename_fields(str(file_name))
+    if fields is None:
         return ""
-    return normalize_utm_tile_token(parsed.fields.get("coordinate_system", ""))
+    return normalize_utm_tile_token(fields.get("coordinate_system", ""))
 
 
 def level_sort_key(level: str) -> tuple[tuple[int, int, int, int, int], str]:
@@ -292,20 +316,20 @@ def mosaic_output_grid(row: Mapping[str, str]) -> str:
     grid = str(row.get("coordinate_system", "") or "").strip().upper()
     if grid:
         return grid
-    parsed = parse_swot_l2_hr_raster_metadata(row.get("output_file", ""))
-    if parsed is None:
+    fields = cached_swot_filename_fields(str(row.get("output_file", "")))
+    if fields is None:
         return ""
-    return str(parsed.fields.get("coordinate_system", "") or "").strip().upper()
+    return str(fields.get("coordinate_system", "") or "").strip().upper()
 
 
 def mosaic_source_tiles(row: Mapping[str, str]) -> List[str]:
     """Return unique source UTM tiles contributing to one mosaic row."""
     tiles: set[str] = set()
     for file_name in parse_path_list(row.get("input_files", "")):
-        parsed = parse_swot_l2_hr_raster_metadata(file_name)
-        if parsed is None:
+        fields = cached_swot_filename_fields(str(file_name))
+        if fields is None:
             continue
-        tile = normalize_utm_tile_token(parsed.fields.get("coordinate_system", ""))
+        tile = normalize_utm_tile_token(fields.get("coordinate_system", ""))
         if tile:
             tiles.add(tile)
     return sorted(tiles)
@@ -719,10 +743,9 @@ def add_unique_swot_fields(
             if text:
                 values[key].add(text)
 
-        parsed = parse_swot_l2_hr_raster_metadata(row.get(file_key, ""))
-        if parsed is None:
+        fields = cached_swot_filename_fields(str(row.get(file_key, "")))
+        if fields is None:
             continue
-        fields = parsed.fields
         parsed_pairs = {
             "cycles": fields.get("cycle_id"),
             "passes": fields.get("pass_id"),
@@ -783,10 +806,10 @@ def asset_name_from_asset_id(asset_id: str) -> str:
 
 def inferred_source_tiles_from_text(text: str) -> List[str]:
     """Return source UTM tiles parsed from a file or asset name."""
-    parsed = parse_swot_l2_hr_raster_metadata(text)
-    if parsed is None:
+    fields = cached_swot_filename_fields(str(text))
+    if fields is None:
         return []
-    tile = normalize_utm_tile_token(parsed.fields.get("coordinate_system", ""))
+    tile = normalize_utm_tile_token(fields.get("coordinate_system", ""))
     return [tile] if tile else []
 
 
@@ -795,10 +818,10 @@ def inventory_verified_upload_row(row: Mapping[str, str]) -> Dict[str, str]:
     asset_id = str(row.get("asset_id", "") or "").strip()
     asset_name = str(row.get("asset_name", "") or "").strip() or asset_name_from_asset_id(asset_id)
     tiles = inferred_source_tiles_from_text(asset_name)
-    parsed = parse_swot_l2_hr_raster_metadata(asset_name)
+    fields = cached_swot_filename_fields(asset_name)
     output_grid = ""
-    if parsed is not None:
-        output_grid = str(parsed.fields.get("coordinate_system", "") or "").upper()
+    if fields is not None:
+        output_grid = str(fields.get("coordinate_system", "") or "").upper()
     return {
         "local_file": asset_name,
         "asset_id": asset_id,
@@ -1059,7 +1082,7 @@ def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]
     return sorted(candidates.values(), key=lambda item: (item.stage, str(item.path).lower()))
 
 
-def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
+def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     """Compute project-level metrics from manifests, reports, and local folders."""
     raw_folder = processing_path(config, "raw_downloads")
     extracted_folder = processing_path(config, "extracted_geotiffs")
@@ -1075,14 +1098,16 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     ee_inventory_rows = read_csv_rows(artifacts.get("ee_asset_inventory_csv", "")) if isinstance(artifacts, Mapping) else []
     ee_inventory_images = ee_inventory_image_rows(ee_inventory_rows)
     upload_rows = merge_upload_rows_with_ee_inventory(upload_report_rows, ee_inventory_rows)
-    workflow_rows = read_csv_rows(logs_folder / "workflow_manifest.csv")
+    project_database = ProjectDatabase(database_path_from_config(config))
+    workflow_row_count = project_database.dataset_count("workflow_manifest")
 
     stage_counts: Counter[tuple[str, str]] = Counter()
     update_stage_counts(stage_counts, "download", download_rows, "last_status")
     update_stage_counts(stage_counts, "extract", extract_rows, "status")
     update_stage_counts(stage_counts, "mosaic", mosaic_rows, "status")
     update_stage_counts(stage_counts, "upload", upload_rows, "final_status")
-    update_stage_counts(stage_counts, "workflow", workflow_rows, "status")
+    for stage, status, count in project_database.workflow_stage_status_counts():
+        stage_counts[(f"workflow:{stage}", status)] += count
 
     tile_counter: Counter[str] = Counter()
     date_counter: Counter[str] = Counter()
@@ -1201,8 +1226,8 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         uploaded_level_counter[level] += 1
         grid = str(row.get("output_grid", "") or "").strip().upper()
         if not grid:
-            parsed = parse_swot_l2_hr_raster_metadata(local_file)
-            grid = str((parsed.fields.get("coordinate_system", "") if parsed else "") or "").upper()
+            fields = cached_swot_filename_fields(str(local_file))
+            grid = str((fields.get("coordinate_system", "") if fields else "") or "").upper()
         uploaded_grid_counter[grid or "UNKNOWN"] += 1
 
     level_counter: Dict[str, Counter[str]] = {}
@@ -1375,7 +1400,7 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Unique uploaded processing levels"] = str(len([level for level in uploaded_level_counter if level != "UNKNOWN"]))
     metrics["Upload failures/errors recorded"] = str(sum(upload_error_counter.values()))
     metrics["Upload-ready mosaics not uploaded/verified"] = str(len(ready_not_uploaded))
-    metrics["Workflow manifest rows"] = str(len(workflow_rows))
+    metrics["Workflow manifest rows"] = str(workflow_row_count)
     metrics["Unique UTM tiles observed"] = str(len(tile_counter))
     metrics["Unique dates observed"] = str(len(date_counter))
     metrics["Unique SWOT cycles observed"] = str(len(unique_fields["cycles"]))
@@ -1462,6 +1487,15 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         mosaic_lineage_rows=mosaic_lineage_rows,
         cleanup_candidates=cleanup_candidates,
     )
+
+
+def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
+    """Compute project insights with a bounded per-refresh filename cache."""
+    cached_swot_filename_fields.cache_clear()
+    try:
+        return _collect_project_insights(config)
+    finally:
+        cached_swot_filename_fields.cache_clear()
 
 
 def delete_cleanup_candidates(candidates: Iterable[CleanupCandidate]) -> tuple[int, int, List[str]]:
