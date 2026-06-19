@@ -58,16 +58,16 @@ download:
   # Preview and final download status report.
   report_csv: "C:/path/to/SWOT_Processing/00_logs/download_preview.csv"
 
-  # Cumulative project memory of granules already downloaded. This lets SWOTFlow
-  # skip previously completed granules even if raw NetCDF files are deleted
-  # after duplicate cleanup/extraction.
+  # Readable compatibility export of granules already downloaded. The SQLite
+  # project database is the authoritative memory used to skip previously
+  # completed granules even if raw NetCDF files are deleted after processing.
   manifest_csv: "C:/path/to/SWOT_Processing/00_logs/download_manifest.csv"
 
   # Existing local files with the same expected filename are skipped.
   skip_existing: true
 
-  # Granules already marked downloaded in manifest_csv are skipped, even when
-  # the raw NetCDF file is no longer present.
+  # Granules already marked downloaded in the project records are skipped, even
+  # when the raw NetCDF file is no longer present.
   skip_manifest_existing: true
 
   # earthaccess parallel workers per batch.
@@ -123,12 +123,13 @@ extract:
   # Optional automation-only UTM scope. Leave empty for normal manual runs.
   utm_tiles: []
 
+  # Readable exports written from the indexed project records.
   manifest_csv: "C:/path/to/SWOT_Processing/00_logs/extract_manifest.csv"
   errors_csv: "C:/path/to/SWOT_Processing/00_logs/extract_errors.csv"
 
 gdal:
   # Python executable from the Miniforge/conda GDAL environment.
-  # SWOTFlow uses this runtime for mosaic processing and future NetCDF extraction.
+  # SWOTFlow uses this runtime for NetCDF extraction and mosaic processing.
   python: "./.conda/swot_gdal/python.exe"
 
 mosaic:
@@ -171,6 +172,7 @@ mosaic:
     - ".tif"
     - ".tiff"
 
+  # Readable exports written from the indexed project records.
   report_csv: "C:/path/to/SWOT_Processing/00_logs/mosaic_report.csv"
   manifest_csv: "C:/path/to/SWOT_Processing/00_logs/mosaic_manifest.csv"
   skip_manifest_existing: true
@@ -313,12 +315,13 @@ execution:
 artifacts:
   logs_dir: "C:/path/to/SWOT_Processing/00_logs"
   artifacts_dir: "C:/path/to/SWOT_Processing/00_logs/upload_artifacts"
+  # Readable exports written from the indexed project records.
   report_csv: "C:/path/to/SWOT_Processing/00_logs/upload_report.csv"
   ee_asset_inventory_csv: "C:/path/to/SWOT_Processing/00_logs/ee_asset_inventory.csv"
 
 automation:
   # Unattended tile-by-tile workflow settings used by the Automation tab.
-  # Manual workflow tabs remain available and share the same project manifests.
+  # Manual workflow tabs remain available and share the same project database.
   # In the GUI, use "Copy Download Date Range" when automation should match the
   # manual Download tab's temporal window.
   utm_tiles: []

@@ -21,7 +21,7 @@ python swotflow_gui.py
 - **Mosaic:** reduces GeoTIFF counts before upload, while keeping SWOT-compatible naming and metadata parsing, with optional cautious group parallelism.
 - **Upload:** uploads GeoTIFFs to Google Earth Engine through Chrome/Selenium, with optional UTM/source-tile filtering and Earth Engine asset verification.
 - **Statistics:** summarizes project coverage, processing status, file counts, dates, UTM tiles, uploads, and QA tables.
-- **Cleanup:** previews and deletes safe intermediate-file cleanup candidates with downstream manifest proof.
+- **Cleanup:** previews and deletes safe intermediate-file cleanup candidates with downstream project-record proof.
 
 ## Basic Workflow
 
@@ -31,7 +31,7 @@ python swotflow_gui.py
 4. In **Extraction**, convert cleaned raw NetCDF files to GeoTIFFs using the GDAL conda runtime.
 5. In **Mosaic**, optionally group GeoTIFFs into upload-ready mosaics.
 6. In **Upload**, run a dry run first, then upload to the target Earth Engine ImageCollection.
-7. Use **Statistics** to check coverage, manifests, uploads, and QA tables.
+7. Use **Statistics** to check coverage, project records, uploads, and QA tables.
 8. Use **Cleanup** to preview and delete safe intermediate files when you need to recover disk space.
 
 ## Important Warnings
@@ -42,6 +42,7 @@ python swotflow_gui.py
 - The project intentionally uses two Python environments: `.venv` for the GUI/download/upload utilities, and a GDAL conda environment for extraction and mosaicking.
 - Do not store Earthdata or Google credentials in `config.yaml`. Earthdata login is handled by `earthaccess`; Earth Engine login is handled through Chrome and, for asset listing, the Earth Engine Python API authentication.
 - Use a SWOTFlow project before previewing, downloading, processing, or uploading. `config.yaml` is only the active session mirror and may contain paths from a previous session.
+- Do not delete `swotflow.sqlite3`; it is the authoritative project record. CSV files in `00_logs` are readable exports, snapshots, and compatibility reports.
 
 ## Quick Start
 

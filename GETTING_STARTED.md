@@ -208,11 +208,11 @@ Typical steps:
 
 List clicks update the optional UTM filter immediately. `Validate Typed Tiles` only checks typed or pasted tile IDs and refreshes the list highlighting. It does not start an upload.
 
-Dry run is recommended when you changed the origin folder, destination collection, upload scope, selected tiles, naming prefix/suffix, or metadata settings. If only retrying the same checked setup, you can run the real upload directly. The dry-run console prints only a short preview; the full per-file plan is written to `upload_report.csv`. The Upload tab progress bar reads that report and summarizes planned, submitted, completed, failed, and filtered rows.
+Dry run is recommended when you changed the origin folder, destination collection, upload scope, selected tiles, naming prefix/suffix, or metadata settings. If only retrying the same checked setup, you can run the real upload directly. The dry-run console prints only a short preview; the full per-file plan is saved in the project database and exported to `upload_report.csv`. The Upload tab progress bar reads indexed project status counts and summarizes planned, submitted, completed, failed, and filtered rows.
 
-If a real upload was submitted but the console was closed before SWOTFlow finished monitoring Earth Engine tasks, `upload_report.csv` may still show `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It lists the destination collection and marks matching local mosaics as `EE_VERIFIED_EXISTS`, which also updates Statistics and Cleanup eligibility.
+If a real upload was submitted but the console was closed before SWOTFlow finished monitoring Earth Engine tasks, the project upload records may still show `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It lists the destination collection and marks matching local mosaics as `EE_VERIFIED_EXISTS`, which also updates Statistics and Cleanup eligibility.
 
-Before planning uploads, SWOTFlow can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the local upload report is incomplete. The Upload tile list also excludes local files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS` in `upload_report.csv`; the status text shows which source tiles are already completed or verified.
+Before planning uploads, SWOTFlow can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the exported upload report is incomplete. The Upload tile list also excludes local files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS`; the status text shows which source tiles are already completed or verified.
 
 If the Earth Engine page appears loaded but the upload console reports a page-load timeout, rerun with `Resume previous run` enabled. Recent SWOTFlow versions check whether the Earth Engine UI is already usable after a timeout and continue when possible. If Earth Engine rejects the dialog with `Please provide an asset ID`, SWOTFlow retries the Asset Name field with keyboard input and records unrecoverable browser failures as `ERROR` rows so they can be retried.
 
@@ -243,11 +243,11 @@ Each refresh writes a saved statistics snapshot under:
 <project_root>\00_logs\statistics
 ```
 
-When you reopen a project, SWOTFlow reloads the latest saved snapshot so the Statistics tab is not blank. Click `Refresh Statistics` again whenever files or manifests have changed and you want to recompute and resave the statistics.
+When you reopen a project, SWOTFlow reloads the latest saved snapshot so the Statistics tab is not blank. Click `Refresh Statistics` again whenever files or project records have changed and you want to recompute and resave the statistics.
 
 ### 7. Cleanup
 
-Cleanup is a separate tab because it can delete local intermediate files. Click `Preview Cleanup` first; SWOTFlow only offers files with downstream manifest proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine. Then delete selected rows, or delete all previewed candidates when you are sure the project stage is complete.
+Cleanup is a separate tab because it can delete local intermediate files. Click `Preview Cleanup` first; SWOTFlow only offers files with downstream project-record proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine. Then delete selected rows, or delete all previewed candidates when you are sure the project stage is complete.
 
 ## Manual CLI Commands
 

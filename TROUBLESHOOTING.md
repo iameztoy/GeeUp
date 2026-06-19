@@ -10,6 +10,12 @@ If Chrome or ChromeDriver loses its session, the uploader now treats that as fat
 
 This file covers the most common problems when automating Earth Engine uploads through the browser UI.
 
+## Project Opens Slowly After A Long Upload
+
+A one-time delay of a few seconds can happen on HDD projects while Windows warms the SQLite file cache and SWOTFlow starts background status scans. This should not require any action if the window opens normally on the next launch.
+
+If project opening repeatedly takes more than 10-15 seconds, check that no old uploader, ChromeDriver, or Python process is still running for the same project. After the window opens, use `Sync EE Assets` or `Refresh Statistics` only when you need a fresh verification pass.
+
 ## How To Stop a Running Upload
 
 What to do:
@@ -21,7 +27,8 @@ What to do:
 What happens:
 
 - the script exits
-- the current CSV report stays saved
+- the current project upload records stay saved
+- `upload_report.csv` is kept as the latest readable export when the run reaches an export point
 - the log file stays saved
 
 Closing the terminal window also stops the run, but `Ctrl+C` is better because it gives the script a chance to exit cleanly.
@@ -362,7 +369,7 @@ Symptoms:
 What to check:
 
 1. Confirm the filename follows the SWOT L2 HR Raster pattern with cycle, pass, scene, start time, end time, CRID, and product counter.
-2. Run a dry run and inspect `metadata_start_time`, `metadata_end_time`, `metadata_properties`, and `metadata_status` in `reports/upload_report.csv`.
+2. Run a dry run and inspect `metadata_start_time`, `metadata_end_time`, `metadata_properties`, and `metadata_status` in the Upload summary or exported `<project_root>\00_logs\upload_report.csv`.
 3. If your filenames are not SWOT names, set `metadata.require_match: false` or `metadata.enabled: false`.
 4. If filenames parse correctly but the browser fields are not filled, inspect the upload dialog's Properties controls and update the metadata selector labels in `ee_selectors.py`.
 5. Test one real upload and verify the asset properties manually in Earth Engine before running a large batch.
