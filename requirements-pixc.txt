@@ -1,0 +1,7 @@
+# Optional PIXC visualization and reference imagery dependencies.
+#
+# Install these in the lightweight GUI environment when you want to visualize
+# real PIXC NetCDF files or use dated Earth Engine reference imagery.
+netCDF4>=1.6,<2
+numpy>=1.24,<3
+earthengine-api>=1.6,<2

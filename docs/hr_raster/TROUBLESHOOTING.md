@@ -1,9 +1,4 @@
-# Troubleshooting
-
-Documentation has moved to a product-family structure. This root copy is kept
-for compatibility during migration. The canonical HR Raster troubleshooting
-guide is [docs/hr_raster/TROUBLESHOOTING.md](./docs/hr_raster/TROUBLESHOOTING.md),
-and the platform overview is [README.md](./README.md).
+# SWOTFlow HR Raster Troubleshooting
 
 ## Upload Run Exhausts Memory Or The Desktop Turns Black
 

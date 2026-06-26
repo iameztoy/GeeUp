@@ -1,11 +1,6 @@
-# SWOT Processing Guide
+# SWOTFlow HR Raster Processing Guide
 
-Documentation has moved to a product-family structure. This root copy is kept
-for compatibility during migration. The canonical HR Raster processing guide is
-[docs/hr_raster/PROCESSING_GUIDE.md](./docs/hr_raster/PROCESSING_GUIDE.md), and
-the platform overview is [README.md](./README.md).
-
-This document keeps the processing-specific behavior that is too detailed for the main README. For installation, first launch, and day-to-day GUI usage, see [GETTING_STARTED.md](./GETTING_STARTED.md).
+This document keeps the HR Raster processing-specific behavior that is too detailed for the product README. For installation, first launch, and day-to-day GUI usage, see [GETTING_STARTED.md](./GETTING_STARTED.md).
 
 ## Processing Order
 

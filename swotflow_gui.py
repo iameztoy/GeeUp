@@ -21,9 +21,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 PROJECT_ROOT = Path(__file__).resolve().parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
 HOME_BANNER_PATH = ASSETS_DIR / "swotflow_home_banner.png"
-README_PATH = PROJECT_ROOT / "README.md"
-GETTING_STARTED_PATH = PROJECT_ROOT / "GETTING_STARTED.md"
-SWOT_PROCESSING_GUIDE_PATH = PROJECT_ROOT / "SWOT_PROCESSING_GUIDE.md"
+HR_RASTER_DOCS_DIR = PROJECT_ROOT / "docs" / "hr_raster"
+README_PATH = HR_RASTER_DOCS_DIR / "README.md"
+GETTING_STARTED_PATH = HR_RASTER_DOCS_DIR / "GETTING_STARTED.md"
+SWOT_PROCESSING_GUIDE_PATH = HR_RASTER_DOCS_DIR / "PROCESSING_GUIDE.md"
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 CONFIG_EXAMPLE_PATH = PROJECT_ROOT / "config.example.yaml"
 UPLOADER_SCRIPT = PROJECT_ROOT / "ee_ui_uploader.py"
@@ -6792,4 +6793,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

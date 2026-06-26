@@ -1,11 +1,6 @@
 # SWOTFlow Getting Started
 
-Documentation has moved to a product-family structure. This root copy is kept
-for compatibility during migration. The canonical HR Raster guide is
-[docs/hr_raster/GETTING_STARTED.md](./docs/hr_raster/GETTING_STARTED.md), and
-the platform overview is [README.md](./README.md).
-
-This guide covers installation, first launch, project setup, and the normal GUI workflow. Detailed processing rules are kept in [SWOT_PROCESSING_GUIDE.md](./SWOT_PROCESSING_GUIDE.md).
+This guide covers installation, first launch, project setup, and the normal HR Raster GUI workflow. Detailed processing rules are kept in [PROCESSING_GUIDE.md](./PROCESSING_GUIDE.md).
 
 ## Environment Strategy
 
@@ -172,7 +167,7 @@ For large searches, the status text may say `Searching CMR`. CMR is NASA's Commo
 
 Run Duplicate Removal when repeated raw product versions are present or when you want a conservative cleanup pass before extraction.
 
-The tool keeps the preferred version in place and moves older versions into a `moved` subfolder. See [SWOT_PROCESSING_GUIDE.md](./SWOT_PROCESSING_GUIDE.md) for the CRID/product-counter ranking rules.
+The tool keeps the preferred version in place and moves older versions into a `moved` subfolder. See [PROCESSING_GUIDE.md](./PROCESSING_GUIDE.md) for the CRID/product-counter ranking rules.
 
 ### 3. Extraction
 
@@ -343,6 +338,6 @@ The GUI consumes the generated JSON files. It does not require geopandas, shapel
 
 ## More Documentation
 
-- [SWOT_PROCESSING_GUIDE.md](./SWOT_PROCESSING_GUIDE.md): detailed behavior, manifests, processing rules, mosaics, upload filtering, and cleanup logic.
+- [PROCESSING_GUIDE.md](./PROCESSING_GUIDE.md): detailed behavior, manifests, processing rules, mosaics, upload filtering, and cleanup logic.
 - [TROUBLESHOOTING.md](./TROUBLESHOOTING.md): common errors and fixes.
-- [config.example.yaml](./config.example.yaml): complete configuration template.
+- [config.example.yaml](../../config.example.yaml): complete configuration template.
