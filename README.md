@@ -32,6 +32,19 @@ python swotflow_gui.py
 Use this direct entry point when you want to run the current HR Raster workflow
 without going through the product selector.
 
+## HR Raster Workflow Features
+
+- **Projects:** one folder per AOI or workflow, with project-specific raw downloads, extracted GeoTIFFs, mosaics, logs, presets, and settings.
+- **Home:** a visual landing tab with project status, workflow shortcuts, GitHub access, and selected-tile summary.
+- **Automation:** runs the project workflow tile by tile after a required preflight, with resumable manifests and verified-stage cleanup.
+- **Download:** searches and downloads PO.DAAC SWOT L2 HR Raster 100 m data through `earthaccess`, with date and UTM tile filtering.
+- **Duplicate Removal:** moves older local raw granule versions when several CRID/product-counter versions exist.
+- **Extraction:** converts SWOT NetCDF files into two-band GeoTIFFs with `wse` and `wse_qual`, with optional worker-based parallelism.
+- **Mosaic:** reduces GeoTIFF counts before upload, while keeping SWOT-compatible naming and metadata parsing, with optional cautious group parallelism.
+- **Upload:** uploads GeoTIFFs to Google Earth Engine through Chrome/Selenium, with optional UTM/source-tile filtering and Earth Engine asset verification.
+- **Statistics:** summarizes project coverage, update coverage, processing status, file counts, dates, UTM tiles, uploads, and QA tables.
+- **Cleanup:** previews and deletes safe intermediate-file cleanup candidates with downstream project-record proof.
+
 ## Product Documentation
 
 - [HR Raster 100 m README](./docs/hr_raster/README.md): current production
@@ -121,23 +134,31 @@ inspection will add optional NetCDF/data-analysis dependencies when implemented.
 ## Repository Map
 
 - `swotflow_platform.py`: product-family selector.
-- `swotflow_gui.py`: existing HR Raster desktop workflow.
+- `swotflow_gui.py`: HR Raster desktop workflow with Home, Automation, Download, Duplicate Removal, Extraction, Mosaic, Upload, Statistics, and Cleanup tools.
 - `products/hr_raster/`: wrapper around the current HR Raster workflow.
-- `products/pixc/`: initial PIXC workflow shell and product constants.
-- `products/pixc/inspect.py`: optional-dependency NetCDF inspection backend.
-- `swot_download_tool.py`: current HR Raster Earthdata search/download logic.
-- `swot_duplicate_remover.py`: current HR Raster local duplicate cleanup.
-- `swot_extract_tool.py`: current HR Raster GDAL NetCDF-to-GeoTIFF extraction.
-- `ee_mosaic_tool.py`: current HR Raster GDAL mosaic creation.
-- `ee_ui_uploader.py`: current HR Raster Earth Engine browser upload helper.
-- `swotflow_project.py`: current project metadata and folder helpers.
-- `project_database.py`: SQLite-backed project record store.
-- `project_insights.py`: current HR Raster statistics and cleanup planning.
-- `utm_map_selector.py`: current HR Raster UTM tile selector.
-- `config.example.yaml`: current HR Raster configuration template.
-- `environment_swot_gdal.yml`: GDAL processing environment definition.
-- `requirements.txt`: lightweight GUI/download/upload environment dependencies.
-- `requirements-pixc.txt`: optional dependencies for real PIXC NetCDF inspection.
+- `swotflow_automation.py`: tile-by-tile unattended workflow orchestration.
+- `swotflow_project.py`: project metadata, project folders, history, and tile profile helpers.
+- `project_database.py`: SQLite project store, legacy CSV migration, indexed status queries, and CSV exports.
+- `project_updates.py`: persistent date-window update campaigns and expected-granule records.
+- `swot_download_tool.py`: Earthdata / PO.DAAC search, preview, manifest, and download logic.
+- `swot_duplicate_remover.py`: local raw-file duplicate cleanup.
+- `swot_extract_tool.py`: GDAL-backed SWOT NetCDF to GeoTIFF extraction.
+- `ee_mosaic_tool.py`: GDAL-backed GeoTIFF mosaic creation.
+- `ee_ui_uploader.py`: Earth Engine browser upload automation and asset verification.
+- `project_insights.py`: project statistics and cleanup candidate logic.
+- `utm_map_selector.py`: pure Tkinter visual UTM tile selector.
+- `products/pixc/`: PIXC workflow shell, project helpers, preview/download, AOI/reference tile tools, NetCDF inspection, and point visualization.
+- `build_spatial_presets.py`: offline builder for continent and UTM display preset JSON.
+- `build_pixc_reference_tiles.py`: offline builder for compact SWOT PIXC tile/pass reference presets.
+- `swot_metadata.py`: shared SWOT filename parser.
+- `ee_selectors.py`: Earth Engine web UI selectors used by the uploader.
+- `config.example.yaml`: tracked configuration template.
+- `environment_swot_gdal.yml`: conda environment definition for GDAL processing.
+- `requirements.txt`: `.venv` dependencies for the launcher, downloader, uploader, and Earth Engine utilities.
+- `requirements-pixc.txt`: optional dependencies for real PIXC NetCDF inspection, visualization, and reference imagery.
+- `assets/swotflow_home_banner.png`: original SWOTFlow home banner displayed in the desktop app.
+- `Utils/delete_ee_collection_children.py`: optional Earth Engine ImageCollection cleanup utility.
+- `Utils/generate_home_banner.py`: standard-library utility that regenerates the bundled home banner asset.
 
 ## Official References
 

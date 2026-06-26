@@ -18,6 +18,8 @@ from project_database import (
     dataset_for_path,
     read_project_rows,
 )
+from project_updates import campaign_rows as read_update_campaigns
+from project_updates import expected_rows as read_update_expected
 from swot_metadata import SWOT_L2_HR_RASTER_PATTERN, swot_product_rank
 
 
@@ -93,6 +95,13 @@ class ProjectInsights:
     uploaded_grid_counts: List[tuple[str, int]]
     upload_error_counts: List[tuple[str, str, int]]
     upload_qa_tile_rows: List[tuple[str, int, int, int, int, int]]
+    update_coverage_tile_rows: List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]]
+    update_campaigns: List[tuple[str, str, str, str, str, int, int]]
+    update_coverage_campaign_rows: Dict[
+        str,
+        List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]],
+    ]
+    active_update_campaign_id: str
     ready_not_uploaded_rows: List[tuple[str, str, str, str]]
     mosaic_exclusion_rows: List[tuple[str, str, str, str, str]]
     mosaic_lineage_rows: List[Dict[str, str]]
@@ -240,6 +249,32 @@ def normalize_utm_tile_token(value: str) -> str:
     if match is None:
         return ""
     return f"UTM{int(match.group('zone')):02d}{match.group('band')}"
+
+
+def date_in_window(date_text: str, start_date: str = "", end_date: str = "") -> bool:
+    """Return True when an ISO date falls inside an optional inclusive window."""
+    date_value = date_from_text(date_text)
+    if not date_value:
+        return False
+    start = str(start_date or "").strip()[:10]
+    end = str(end_date or "").strip()[:10]
+    if start and date_value < start:
+        return False
+    if end and date_value > end:
+        return False
+    return True
+
+
+def source_file_key(value: str | Path) -> str:
+    """Return a comparable source-granule filename key for NetCDF/GeoTIFF paths."""
+    path = Path(str(value or ""))
+    name = path.name.strip()
+    if not name:
+        return ""
+    suffix = path.suffix.lower()
+    if suffix in {".tif", ".tiff"}:
+        return f"{path.stem}.nc".lower()
+    return name.lower()
 
 
 def processing_level_label(crid: str, product_counter: str | int | None) -> str:
@@ -871,6 +906,344 @@ def merge_upload_rows_with_ee_inventory(
     return merged
 
 
+def update_status_from_counts(
+    expected: int,
+    downloaded: int,
+    extracted: int,
+    mosaic_sources: int,
+    uploaded_sources: int,
+) -> str:
+    """Return a date-window update status from comparable source-file counts."""
+    expected = max(0, int(expected))
+    downloaded = max(0, int(downloaded))
+    extracted = max(0, int(extracted))
+    mosaic_sources = max(0, int(mosaic_sources))
+    uploaded_sources = max(0, int(uploaded_sources))
+    if expected == 0:
+        return "no_expected"
+    if uploaded_sources >= expected:
+        return "complete"
+    if mosaic_sources >= expected:
+        return "pending_upload"
+    if extracted >= expected:
+        return "pending_mosaic"
+    if downloaded >= expected:
+        return "pending_extract"
+    if any((downloaded, extracted, mosaic_sources, uploaded_sources)):
+        return "pending_download"
+    return "not_started"
+
+
+def update_latest_date(
+    latest_by_tile: Dict[str, str],
+    tile: str,
+    date_text: str,
+) -> None:
+    """Update a per-tile latest date dictionary with one date value."""
+    date_value = date_from_text(date_text)
+    if not tile or not date_value:
+        return
+    current = latest_by_tile.get(tile, "")
+    if not current or date_value > current:
+        latest_by_tile[tile] = date_value
+
+
+def build_update_coverage_tile_rows(
+    *,
+    config: Mapping[str, Any],
+    download_preview_rows: Sequence[Mapping[str, str]],
+    download_rows: Sequence[Mapping[str, str]],
+    extract_rows: Sequence[Mapping[str, str]],
+    mosaic_rows: Sequence[Mapping[str, str]],
+    upload_rows: Sequence[Mapping[str, str]],
+) -> List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]]:
+    """Build per-tile update coverage rows for the current Download date window.
+
+    The latest Download preview is treated as the expected remote set. Users
+    should run Preview Search for the update window before relying on this view.
+    """
+    download_config = config.get("download", {})
+    if not isinstance(download_config, Mapping):
+        download_config = {}
+    start_date = str(download_config.get("start_date", "") or "").strip()[:10]
+    end_date = str(download_config.get("end_date", "") or "").strip()[:10]
+    selected_tiles: set[str] = set()
+    raw_tiles = download_config.get("utm_tiles", []) or []
+    if isinstance(raw_tiles, str):
+        raw_tiles = re.split(r"[\s,;]+", raw_tiles.strip())
+    for value in raw_tiles:
+        tile = normalize_utm_tile_token(str(value))
+        if tile:
+            selected_tiles.add(tile)
+
+    expected_by_tile: Dict[str, set[str]] = {}
+    downloaded_by_tile: Dict[str, set[str]] = {}
+    extracted_by_tile: Dict[str, set[str]] = {}
+    mosaic_source_by_tile: Dict[str, set[str]] = {}
+    uploaded_source_by_tile: Dict[str, set[str]] = {}
+    latest_expected: Dict[str, str] = {}
+    latest_downloaded: Dict[str, str] = {}
+    latest_extracted: Dict[str, str] = {}
+    latest_mosaicked: Dict[str, str] = {}
+    latest_uploaded: Dict[str, str] = {}
+    source_tile_date: Dict[str, tuple[str, str]] = {}
+
+    for row in download_preview_rows:
+        status = str(row.get("status", "") or "").upper()
+        duplicate_status = str(row.get("duplicate_filter_status", "") or "").strip().lower()
+        selected = str(row.get("selected_for_download", "yes") or "yes").strip().lower()
+        if selected == "no" or status == "EXCLUDED_OLDER_VERSION" or duplicate_status == "excluded_older_version":
+            continue
+        file_name = str(row.get("file_name", "") or "")
+        key = source_file_key(file_name)
+        tile = normalize_utm_tile_token(str(row.get("utm_tile", "") or "")) or file_utm_tile(file_name)
+        date_text = date_from_text(str(row.get("start_time", "") or file_name))
+        if not key or not tile or not date_in_window(date_text, start_date, end_date):
+            continue
+        expected_by_tile.setdefault(tile, set()).add(key)
+        source_tile_date[key] = (tile, date_text)
+        update_latest_date(latest_expected, tile, date_text)
+        if str(row.get("downloaded", "") or "").strip().lower() == "yes":
+            downloaded_by_tile.setdefault(tile, set()).add(key)
+            update_latest_date(latest_downloaded, tile, date_text)
+
+    for row in download_rows:
+        if str(row.get("downloaded", "") or "").strip().lower() not in {"yes", "true", "1"}:
+            continue
+        file_name = str(row.get("file_name", "") or "")
+        key = source_file_key(file_name)
+        tile = normalize_utm_tile_token(str(row.get("utm_tile", "") or "")) or file_utm_tile(file_name)
+        date_text = date_from_text(str(row.get("start_time", "") or file_name))
+        if not key or not tile or not date_in_window(date_text, start_date, end_date):
+            continue
+        downloaded_by_tile.setdefault(tile, set()).add(key)
+        source_tile_date.setdefault(key, (tile, date_text))
+        update_latest_date(latest_downloaded, tile, date_text)
+
+    extract_output_to_source: Dict[str, tuple[str, str, str]] = {}
+    for row in completed_extract_rows(extract_rows):
+        input_nc = str(row.get("input_nc", "") or "")
+        output_tif = str(row.get("output_tif", "") or "")
+        key = source_file_key(input_nc)
+        tile = normalize_utm_tile_token(f"UTM{row.get('utm_zone', '')}{row.get('mgrs_band', '')}") or file_utm_tile(input_nc)
+        date_text = date_from_text(str(row.get("date", "") or row.get("start", "") or input_nc))
+        if not key or not tile or not date_in_window(date_text, start_date, end_date):
+            continue
+        extracted_by_tile.setdefault(tile, set()).add(key)
+        source_tile_date.setdefault(key, (tile, date_text))
+        update_latest_date(latest_extracted, tile, date_text)
+        if output_tif:
+            for path_key in path_lookup_keys(output_tif):
+                extract_output_to_source[path_key] = (key, tile, date_text)
+
+    mosaic_output_to_sources: Dict[str, set[str]] = {}
+    for row in completed_mosaic_rows(mosaic_rows):
+        output_file = str(row.get("output_file", "") or "")
+        output_sources: set[str] = set()
+        for source in parse_path_list(row.get("input_files", "")):
+            mapped = next(
+                (
+                    extract_output_to_source[path_key]
+                    for path_key in path_lookup_keys(source)
+                    if path_key in extract_output_to_source
+                ),
+                None,
+            )
+            if mapped is None:
+                key = source_file_key(source)
+                tile = file_utm_tile(source)
+                date_text = date_from_text(source)
+            else:
+                key, tile, date_text = mapped
+            if not key or not tile or not date_in_window(date_text, start_date, end_date):
+                continue
+            output_sources.add(key)
+            mosaic_source_by_tile.setdefault(tile, set()).add(key)
+            source_tile_date.setdefault(key, (tile, date_text))
+            update_latest_date(latest_mosaicked, tile, date_text)
+        if output_file and output_sources:
+            for path_key in path_lookup_keys(output_file):
+                mosaic_output_to_sources[path_key] = set(output_sources)
+
+    for row in upload_rows:
+        if str(row.get("final_status", "") or "").upper() not in UPLOAD_CLEANUP_STATUSES:
+            continue
+        local_file = str(row.get("local_file", "") or "")
+        source_keys = next(
+            (
+                mosaic_output_to_sources[path_key]
+                for path_key in path_lookup_keys(local_file)
+                if path_key in mosaic_output_to_sources
+            ),
+            set(),
+        )
+        if not source_keys:
+            key = source_file_key(local_file)
+            if key:
+                source_keys = {key}
+                date_text = date_from_text(str(row.get("metadata_start_time", "") or local_file))
+                tiles = upload_row_source_tiles(row, {})
+                tile = tiles[0] if len(tiles) == 1 else file_utm_tile(local_file)
+                if tile and date_text:
+                    source_tile_date.setdefault(key, (tile, date_text))
+        for key in source_keys:
+            tile_date = source_tile_date.get(key)
+            if tile_date is None:
+                continue
+            tile, date_text = tile_date
+            if not date_in_window(date_text, start_date, end_date):
+                continue
+            uploaded_source_by_tile.setdefault(tile, set()).add(key)
+            update_latest_date(latest_uploaded, tile, date_text)
+
+    has_expected_rows = any(expected_by_tile.values())
+    all_tiles = sorted(
+        selected_tiles | set(expected_by_tile)
+        if has_expected_rows
+        else (
+            selected_tiles
+            | set(downloaded_by_tile)
+            | set(extracted_by_tile)
+            | set(mosaic_source_by_tile)
+            | set(uploaded_source_by_tile)
+        )
+    )
+    rows: List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]] = []
+    for tile in all_tiles:
+        expected_keys = expected_by_tile.get(tile, set())
+        expected = len(expected_keys)
+        downloaded_keys = downloaded_by_tile.get(tile, set())
+        extracted_keys = extracted_by_tile.get(tile, set())
+        mosaic_keys = mosaic_source_by_tile.get(tile, set())
+        uploaded_keys = uploaded_source_by_tile.get(tile, set())
+        downloaded = len(downloaded_keys & expected_keys) if expected_keys else len(downloaded_keys)
+        extracted = len(extracted_keys & expected_keys) if expected_keys else len(extracted_keys)
+        mosaic_sources = len(mosaic_keys & expected_keys) if expected_keys else len(mosaic_keys)
+        uploaded_sources = len(uploaded_keys & expected_keys) if expected_keys else len(uploaded_keys)
+        rows.append(
+            (
+                tile,
+                expected,
+                downloaded,
+                extracted,
+                mosaic_sources,
+                uploaded_sources,
+                latest_expected.get(tile, ""),
+                latest_downloaded.get(tile, ""),
+                latest_extracted.get(tile, ""),
+                latest_mosaicked.get(tile, ""),
+                latest_uploaded.get(tile, ""),
+                update_status_from_counts(
+                    expected,
+                    downloaded,
+                    extracted,
+                    mosaic_sources,
+                    uploaded_sources,
+                ),
+            )
+        )
+    return rows
+
+
+def build_update_campaign_coverage(
+    *,
+    config: Mapping[str, Any],
+    download_rows: Sequence[Mapping[str, str]],
+    legacy_preview_rows: Sequence[Mapping[str, str]],
+    extract_rows: Sequence[Mapping[str, str]],
+    mosaic_rows: Sequence[Mapping[str, str]],
+    upload_rows: Sequence[Mapping[str, str]],
+) -> tuple[
+    List[tuple[str, str, str, str, str, int, int]],
+    Dict[str, List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]]],
+    str,
+]:
+    """Build selectable persistent update-window coverage summaries."""
+    campaigns = read_update_campaigns(config)
+    expected = read_update_expected(config)
+    if not campaigns:
+        legacy_rows = build_update_coverage_tile_rows(
+            config=config,
+            download_preview_rows=legacy_preview_rows,
+            download_rows=download_rows,
+            extract_rows=extract_rows,
+            mosaic_rows=mosaic_rows,
+            upload_rows=upload_rows,
+        )
+        if not legacy_rows:
+            return [], {}, ""
+        download_config = config.get("download", {})
+        start_date = str(download_config.get("start_date", "") or "")[:10]
+        end_date = str(download_config.get("end_date", "") or "")[:10]
+        label = f"{start_date or '?'} to {end_date or '?'} | latest preview"
+        return [
+            ("legacy", label, start_date, end_date, "", sum(row[1] for row in legacy_rows), len(legacy_rows))
+        ], {"legacy": legacy_rows}, "legacy"
+
+    expected_by_campaign: Dict[str, List[Mapping[str, str]]] = {}
+    for row in expected:
+        campaign_id = str(row.get("campaign_id", "") or "")
+        if campaign_id:
+            expected_by_campaign.setdefault(campaign_id, []).append(row)
+
+    campaign_summaries: List[tuple[str, str, str, str, str, int, int]] = []
+    coverage_by_campaign: Dict[
+        str,
+        List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]],
+    ] = {}
+    ordered_campaigns = sorted(
+        campaigns,
+        key=lambda row: (str(row.get("updated_at", "") or ""), str(row.get("campaign_id", "") or "")),
+        reverse=True,
+    )
+    for campaign in ordered_campaigns:
+        campaign_id = str(campaign.get("campaign_id", "") or "")
+        if not campaign_id:
+            continue
+        start_date = str(campaign.get("start_date", "") or "")[:10]
+        end_date = str(campaign.get("end_date", "") or "")[:10]
+        tile_values: list[str] = []
+        try:
+            parsed_tiles = json.loads(str(campaign.get("tiles", "") or "[]"))
+            if isinstance(parsed_tiles, list):
+                tile_values = [str(value) for value in parsed_tiles]
+        except json.JSONDecodeError:
+            tile_values = []
+        campaign_config = dict(config)
+        campaign_download = dict(config.get("download", {}))
+        campaign_download.update(
+            {
+                "start_date": start_date,
+                "end_date": end_date,
+                "utm_tiles": tile_values,
+            }
+        )
+        campaign_config["download"] = campaign_download
+        campaign_expected = expected_by_campaign.get(campaign_id, [])
+        rows = build_update_coverage_tile_rows(
+            config=campaign_config,
+            download_preview_rows=campaign_expected,
+            download_rows=download_rows,
+            extract_rows=extract_rows,
+            mosaic_rows=mosaic_rows,
+            upload_rows=upload_rows,
+        )
+        coverage_by_campaign[campaign_id] = rows
+        campaign_summaries.append(
+            (
+                campaign_id,
+                str(campaign.get("label", "") or f"{start_date} to {end_date}"),
+                start_date,
+                end_date,
+                str(campaign.get("updated_at", "") or ""),
+                sum(row[1] for row in rows),
+                len(rows),
+            )
+        )
+    active_id = campaign_summaries[0][0] if campaign_summaries else ""
+    return campaign_summaries, coverage_by_campaign, active_id
+
+
 def cleanup_path_size(path: Path) -> int:
     """Return file size or zero when unavailable."""
     try:
@@ -1090,6 +1463,9 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     logs_folder = processing_path(config, "logs")
 
     download_rows = read_csv_rows(config_path(config, "download", "manifest_csv"))
+    download_preview_rows = read_csv_rows(
+        config_path(config, "download", "report_csv", str(logs_folder / "download_preview.csv"))
+    )
     extract_rows = read_csv_rows(config_path(config, "extract", "manifest_csv"))
     extract_error_rows = read_csv_rows(config_path(config, "extract", "errors_csv"))
     mosaic_rows = read_csv_rows(config_path(config, "mosaic", "manifest_csv"))
@@ -1175,7 +1551,10 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         row for row in upload_rows if row.get("final_status", "").upper() == "EE_VERIFIED_EXISTS"
     ]
     submitted_upload_rows = [
-        row for row in upload_rows if row.get("final_status", "").upper() == "SUBMITTED"
+        row
+        for row in upload_rows
+        if row.get("final_status", "").upper()
+        in {"SUBMITTED", "SUBMITTED_PENDING_VERIFICATION"}
     ]
     filtered_upload_rows = [
         row
@@ -1198,7 +1577,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     mosaic_tiles_by_output = mosaic_source_tile_lookup(complete_mosaic_rows)
     for row in upload_rows:
         status = str(row.get("final_status", "") or "UNKNOWN").upper()
-        if status == "SUBMITTED":
+        if status in {"SUBMITTED", "SUBMITTED_PENDING_VERIFICATION"}:
             submitted_tiles = upload_row_source_tiles(row, mosaic_tiles_by_output)
             if not submitted_tiles:
                 submitted_tiles = ["UNKNOWN"]
@@ -1459,6 +1838,30 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         )
         for tile in all_qa_tiles
     ]
+    (
+        update_campaign_summaries,
+        update_coverage_campaign_rows,
+        active_update_campaign_id,
+    ) = build_update_campaign_coverage(
+        config=config,
+        download_rows=download_rows,
+        legacy_preview_rows=download_preview_rows,
+        extract_rows=extract_rows,
+        mosaic_rows=mosaic_rows,
+        upload_rows=upload_rows,
+    )
+    update_coverage_rows = update_coverage_campaign_rows.get(active_update_campaign_id, [])
+    update_status_counter = Counter(row[-1] for row in update_coverage_rows)
+    if update_coverage_rows:
+        metrics["Update coverage expected granules"] = str(sum(row[1] for row in update_coverage_rows))
+        metrics["Update coverage complete tiles"] = str(update_status_counter.get("complete", 0))
+        metrics["Update coverage tiles needing work"] = str(
+            sum(
+                count
+                for status, count in update_status_counter.items()
+                if status not in {"complete", "no_expected"}
+            )
+        )
 
     return ProjectInsights(
         metrics=metrics,
@@ -1482,6 +1885,10 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
             for (status, message), count in upload_error_counter.most_common(100)
         ],
         upload_qa_tile_rows=upload_qa_rows,
+        update_coverage_tile_rows=update_coverage_rows,
+        update_campaigns=update_campaign_summaries,
+        update_coverage_campaign_rows=update_coverage_campaign_rows,
+        active_update_campaign_id=active_update_campaign_id,
         ready_not_uploaded_rows=ready_not_uploaded,
         mosaic_exclusion_rows=mosaic_exclusion_rows,
         mosaic_lineage_rows=mosaic_lineage_rows,
@@ -1609,6 +2016,77 @@ def project_insights_snapshot(insights: ProjectInsights) -> Dict[str, Any]:
             }
             for tile, downloaded, extracted, mosaic_sources, uploaded, missing_upload in insights.upload_qa_tile_rows
         ],
+        "update_coverage_tile_rows": [
+            {
+                "tile": tile,
+                "expected": expected,
+                "downloaded": downloaded,
+                "extracted": extracted,
+                "mosaic_sources": mosaic_sources,
+                "uploaded_sources": uploaded_sources,
+                "latest_expected_date": latest_expected_date,
+                "latest_downloaded_date": latest_downloaded_date,
+                "latest_extracted_date": latest_extracted_date,
+                "latest_mosaicked_date": latest_mosaicked_date,
+                "latest_uploaded_date": latest_uploaded_date,
+                "status": status,
+            }
+            for (
+                tile,
+                expected,
+                downloaded,
+                extracted,
+                mosaic_sources,
+                uploaded_sources,
+                latest_expected_date,
+                latest_downloaded_date,
+                latest_extracted_date,
+                latest_mosaicked_date,
+                latest_uploaded_date,
+                status,
+            ) in insights.update_coverage_tile_rows
+        ],
+        "update_campaigns": [
+            {
+                "campaign_id": campaign_id,
+                "label": label,
+                "start_date": start_date,
+                "end_date": end_date,
+                "updated_at": updated_at,
+                "expected_granules": expected_granules,
+                "tile_count": tile_count,
+            }
+            for (
+                campaign_id,
+                label,
+                start_date,
+                end_date,
+                updated_at,
+                expected_granules,
+                tile_count,
+            ) in insights.update_campaigns
+        ],
+        "update_coverage_campaign_rows": {
+            campaign_id: [
+                {
+                    "tile": row[0],
+                    "expected": row[1],
+                    "downloaded": row[2],
+                    "extracted": row[3],
+                    "mosaic_sources": row[4],
+                    "uploaded_sources": row[5],
+                    "latest_expected_date": row[6],
+                    "latest_downloaded_date": row[7],
+                    "latest_extracted_date": row[8],
+                    "latest_mosaicked_date": row[9],
+                    "latest_uploaded_date": row[10],
+                    "status": row[11],
+                }
+                for row in rows
+            ]
+            for campaign_id, rows in insights.update_coverage_campaign_rows.items()
+        },
+        "active_update_campaign_id": insights.active_update_campaign_id,
         "ready_not_uploaded_rows": [
             {
                 "output_file": output_file,
@@ -1724,6 +2202,61 @@ def write_project_insights_snapshot(config: Mapping[str, Any], insights: Project
         folder / "project_statistics_upload_qa_by_tile.csv",
         ["tile", "downloaded", "extracted", "mosaic_sources", "uploaded", "missing_upload"],
         snapshot["upload_qa_tile_rows"],
+    )
+    write_csv_rows(
+        folder / "project_statistics_update_coverage_by_tile.csv",
+        [
+            "tile",
+            "expected",
+            "downloaded",
+            "extracted",
+            "mosaic_sources",
+            "uploaded_sources",
+            "latest_expected_date",
+            "latest_downloaded_date",
+            "latest_extracted_date",
+            "latest_mosaicked_date",
+            "latest_uploaded_date",
+            "status",
+        ],
+        snapshot["update_coverage_tile_rows"],
+    )
+    write_csv_rows(
+        folder / "project_statistics_update_campaigns.csv",
+        [
+            "campaign_id",
+            "label",
+            "start_date",
+            "end_date",
+            "updated_at",
+            "expected_granules",
+            "tile_count",
+        ],
+        snapshot["update_campaigns"],
+    )
+    campaign_coverage_rows = [
+        {"campaign_id": campaign_id, **row}
+        for campaign_id, rows in snapshot["update_coverage_campaign_rows"].items()
+        for row in rows
+    ]
+    write_csv_rows(
+        folder / "project_statistics_update_campaigns_by_tile.csv",
+        [
+            "campaign_id",
+            "tile",
+            "expected",
+            "downloaded",
+            "extracted",
+            "mosaic_sources",
+            "uploaded_sources",
+            "latest_expected_date",
+            "latest_downloaded_date",
+            "latest_extracted_date",
+            "latest_mosaicked_date",
+            "latest_uploaded_date",
+            "status",
+        ],
+        campaign_coverage_rows,
     )
     write_csv_rows(
         folder / "project_statistics_ready_not_uploaded.csv",
@@ -1866,6 +2399,58 @@ def load_project_insights_snapshot(
             )
             for row in snapshot.get("upload_qa_tile_rows", [])
         ],
+        update_coverage_tile_rows=[
+            (
+                str(row.get("tile", "")),
+                _int_value(row.get("expected")),
+                _int_value(row.get("downloaded")),
+                _int_value(row.get("extracted")),
+                _int_value(row.get("mosaic_sources")),
+                _int_value(row.get("uploaded_sources")),
+                str(row.get("latest_expected_date", "")),
+                str(row.get("latest_downloaded_date", "")),
+                str(row.get("latest_extracted_date", "")),
+                str(row.get("latest_mosaicked_date", "")),
+                str(row.get("latest_uploaded_date", "")),
+                str(row.get("status", "")),
+            )
+            for row in snapshot.get("update_coverage_tile_rows", [])
+        ],
+        update_campaigns=[
+            (
+                str(row.get("campaign_id", "")),
+                str(row.get("label", "")),
+                str(row.get("start_date", "")),
+                str(row.get("end_date", "")),
+                str(row.get("updated_at", "")),
+                _int_value(row.get("expected_granules")),
+                _int_value(row.get("tile_count")),
+            )
+            for row in snapshot.get("update_campaigns", [])
+        ],
+        update_coverage_campaign_rows={
+            str(campaign_id): [
+                (
+                    str(row.get("tile", "")),
+                    _int_value(row.get("expected")),
+                    _int_value(row.get("downloaded")),
+                    _int_value(row.get("extracted")),
+                    _int_value(row.get("mosaic_sources")),
+                    _int_value(row.get("uploaded_sources")),
+                    str(row.get("latest_expected_date", "")),
+                    str(row.get("latest_downloaded_date", "")),
+                    str(row.get("latest_extracted_date", "")),
+                    str(row.get("latest_mosaicked_date", "")),
+                    str(row.get("latest_uploaded_date", "")),
+                    str(row.get("status", "")),
+                )
+                for row in rows
+                if isinstance(row, Mapping)
+            ]
+            for campaign_id, rows in snapshot.get("update_coverage_campaign_rows", {}).items()
+            if isinstance(rows, list)
+        },
+        active_update_campaign_id=str(snapshot.get("active_update_campaign_id", "")),
         ready_not_uploaded_rows=[
             (
                 str(row.get("output_file", "")),

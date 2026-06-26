@@ -213,6 +213,50 @@ PIPELINE_STATUS_STYLES = {
 }
 
 
+UPDATE_COVERAGE_STATUS_STYLES = {
+    "no_expected": {
+        "label": "No preview matches",
+        "fill": "#f1f1f1",
+        "outline": "#d2d2d2",
+    },
+    "not_started": {
+        "label": "Not started",
+        "fill": "#c9c9c9",
+        "outline": "#8b8b8b",
+    },
+    "pending_download": {
+        "label": "Needs download",
+        "fill": "#5b8fd6",
+        "outline": "#2f5e9e",
+    },
+    "pending_extract": {
+        "label": "Needs extraction",
+        "fill": "#31a6a6",
+        "outline": "#197272",
+    },
+    "pending_mosaic": {
+        "label": "Needs mosaic",
+        "fill": "#e89b33",
+        "outline": "#a46212",
+    },
+    "pending_upload": {
+        "label": "Needs upload/verification",
+        "fill": "#d6b13f",
+        "outline": "#8d7014",
+    },
+    "complete": {
+        "label": "Complete for update preview",
+        "fill": "#4f9f50",
+        "outline": "#2d6b2f",
+    },
+    "attention": {
+        "label": "Partial or inconsistent",
+        "fill": "#d95f5f",
+        "outline": "#8f2f2f",
+    },
+}
+
+
 @dataclass
 class TilePipelineStatus:
     """Per-tile project status used by the Statistics status map."""
@@ -231,6 +275,32 @@ class TilePipelineStatus:
         return PIPELINE_STATUS_STYLES.get(
             self.status,
             PIPELINE_STATUS_STYLES["none"],
+        )["label"]
+
+
+@dataclass
+class TileUpdateCoverageStatus:
+    """Per-tile update-window coverage status used by the Statistics status map."""
+
+    token: str
+    expected: int = 0
+    downloaded: int = 0
+    extracted: int = 0
+    mosaic_sources: int = 0
+    uploaded_sources: int = 0
+    latest_expected_date: str = ""
+    latest_downloaded_date: str = ""
+    latest_extracted_date: str = ""
+    latest_mosaicked_date: str = ""
+    latest_uploaded_date: str = ""
+    status: str = "no_expected"
+
+    @property
+    def label(self) -> str:
+        """Return a human-readable update coverage status label."""
+        return UPDATE_COVERAGE_STATUS_STYLES.get(
+            self.status,
+            UPDATE_COVERAGE_STATUS_STYLES["attention"],
         )["label"]
 
 
@@ -288,6 +358,31 @@ def pipeline_status_from_qa_row(row: Sequence[object]) -> TilePipelineStatus:
     )
 
 
+def update_coverage_status_from_row(row: Sequence[object]) -> TileUpdateCoverageStatus:
+    """Create a tile update coverage status from a ProjectInsights row."""
+    if len(row) < 12:
+        raise ValueError("Update coverage row must contain twelve values.")
+    token = str(row[0])
+    try:
+        normalized = normalize_utm_tiles([token])[0]
+    except ValueError:
+        normalized = token.strip().upper()
+    return TileUpdateCoverageStatus(
+        token=normalized,
+        expected=int(row[1]),
+        downloaded=int(row[2]),
+        extracted=int(row[3]),
+        mosaic_sources=int(row[4]),
+        uploaded_sources=int(row[5]),
+        latest_expected_date=str(row[6]),
+        latest_downloaded_date=str(row[7]),
+        latest_extracted_date=str(row[8]),
+        latest_mosaicked_date=str(row[9]),
+        latest_uploaded_date=str(row[10]),
+        status=str(row[11] or "no_expected"),
+    )
+
+
 class UTMPipelineStatusMap(ttk.Frame):
     """Read-only UTM status map for project pipeline QA/QC."""
 
@@ -302,6 +397,11 @@ class UTMPipelineStatusMap(ttk.Frame):
         super().__init__(master)
         self.geometry_data = geometry
         self.tile_statuses: Dict[str, TilePipelineStatus] = {}
+        self.update_coverage_statuses: Dict[str, TileUpdateCoverageStatus] = {}
+        self.update_coverage_campaign_rows: Dict[str, Sequence[Sequence[object]]] = {}
+        self.update_campaign_label_by_id: Dict[str, str] = {}
+        self.update_campaign_id_by_label: Dict[str, str] = {}
+        self.active_update_campaign_id = ""
         self.transform = CanvasTransform(
             geometry.bounds if geometry is not None else (-180.0, -80.0, 180.0, 84.0),
             self.canvas_width,
@@ -313,6 +413,9 @@ class UTMPipelineStatusMap(ttk.Frame):
         )
         self.missing_upload_rows_by_tile: Dict[str, List[Tuple[str, str, str]]] = {}
         self.show_labels_var = tk.BooleanVar(value=True)
+        self.map_mode_var = tk.StringVar(value="Pipeline Status")
+        self.update_campaign_var = tk.StringVar(value="")
+        self.legend_frame: ttk.Frame | None = None
         self.build_layout()
         self.draw_map()
 
@@ -329,12 +432,35 @@ class UTMPipelineStatusMap(ttk.Frame):
             text="UTM Pipeline Status Map",
             font=("Segoe UI", 10, "bold"),
         ).grid(row=0, column=0, sticky="w")
+        ttk.Label(controls, text="Mode").grid(row=0, column=1, sticky="e", padx=(8, 4))
+        self.map_mode_combo = ttk.Combobox(
+            controls,
+            textvariable=self.map_mode_var,
+            values=("Pipeline Status", "Update Coverage"),
+            state="readonly",
+            width=18,
+        )
+        self.map_mode_combo.grid(row=0, column=2, sticky="e")
+        self.map_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self.on_mode_changed())
+        ttk.Label(controls, text="Update window").grid(row=0, column=3, sticky="e", padx=(10, 4))
+        self.update_campaign_combo = ttk.Combobox(
+            controls,
+            textvariable=self.update_campaign_var,
+            values=(),
+            state="disabled",
+            width=34,
+        )
+        self.update_campaign_combo.grid(row=0, column=4, sticky="e")
+        self.update_campaign_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.on_update_campaign_changed(),
+        )
         ttk.Checkbutton(
             controls,
             text="Show UTM labels",
             variable=self.show_labels_var,
             command=self.draw_map,
-        ).grid(row=0, column=1, sticky="e")
+        ).grid(row=0, column=5, sticky="e", padx=(10, 0))
 
         self.canvas = tk.Canvas(
             self,
@@ -350,14 +476,66 @@ class UTMPipelineStatusMap(ttk.Frame):
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         self.canvas.bind("<Leave>", self.on_canvas_leave)
 
-        legend = ttk.Frame(self, padding=(0, 8, 0, 0))
-        legend.grid(row=2, column=0, sticky="ew")
-        legend.columnconfigure(0, weight=1)
-        for index, key in enumerate(
-            ("downloaded", "extracted", "mosaicked", "uploaded", "attention", "none")
-        ):
-            style = PIPELINE_STATUS_STYLES[key]
-            item = ttk.Frame(legend)
+        self.legend_frame = ttk.Frame(self, padding=(0, 8, 0, 0))
+        self.legend_frame.grid(row=2, column=0, sticky="ew")
+        self.legend_frame.columnconfigure(0, weight=1)
+        self.draw_legend()
+
+        ttk.Label(
+            self,
+            textvariable=self.status_var,
+            foreground="#184a8b",
+            wraplength=900,
+        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+    def current_mode_key(self) -> str:
+        """Return the selected status-map mode key."""
+        return "update" if self.map_mode_var.get() == "Update Coverage" else "pipeline"
+
+    def on_mode_changed(self) -> None:
+        """Redraw when the status-map mode changes."""
+        self.update_campaign_combo.configure(
+            state="readonly"
+            if self.current_mode_key() == "update" and self.update_campaign_id_by_label
+            else "disabled"
+        )
+        self.draw_legend()
+        self.draw_map()
+        self.update_summary_status()
+
+    def on_update_campaign_changed(self) -> None:
+        """Switch the Update Coverage map to another persisted date window."""
+        campaign_id = self.update_campaign_id_by_label.get(self.update_campaign_var.get(), "")
+        if not campaign_id:
+            return
+        self.active_update_campaign_id = campaign_id
+        self.set_update_coverage_statuses(
+            self.update_coverage_campaign_rows.get(campaign_id, [])
+        )
+
+    def draw_legend(self) -> None:
+        """Draw the legend for the active status-map mode."""
+        if self.legend_frame is None:
+            return
+        for child in self.legend_frame.winfo_children():
+            child.destroy()
+        if self.current_mode_key() == "update":
+            styles = UPDATE_COVERAGE_STATUS_STYLES
+            keys = (
+                "not_started",
+                "pending_download",
+                "pending_extract",
+                "pending_mosaic",
+                "pending_upload",
+                "complete",
+                "no_expected",
+            )
+        else:
+            styles = PIPELINE_STATUS_STYLES
+            keys = ("downloaded", "extracted", "mosaicked", "uploaded", "attention", "none")
+        for index, key in enumerate(keys):
+            style = styles[key]
+            item = ttk.Frame(self.legend_frame)
             item.grid(row=0, column=index, sticky="w", padx=(0, 12))
             swatch = tk.Canvas(item, width=16, height=12, highlightthickness=0)
             swatch.grid(row=0, column=0, sticky="w")
@@ -370,13 +548,6 @@ class UTMPipelineStatusMap(ttk.Frame):
                 outline=style["outline"],
             )
             ttk.Label(item, text=style["label"]).grid(row=0, column=1, sticky="w", padx=(4, 0))
-
-        ttk.Label(
-            self,
-            textvariable=self.status_var,
-            foreground="#184a8b",
-            wraplength=900,
-        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
 
     def set_geometry(self, geometry: UTMDisplayGeometry) -> None:
         """Set display geometry and redraw the status map."""
@@ -399,6 +570,60 @@ class UTMPipelineStatusMap(ttk.Frame):
         self.draw_map()
         self.update_summary_status()
 
+    def set_update_coverage_statuses(self, rows: Sequence[Sequence[object]]) -> None:
+        """Update map statuses from ProjectInsights update coverage rows."""
+        statuses: Dict[str, TileUpdateCoverageStatus] = {}
+        for row in rows:
+            try:
+                status = update_coverage_status_from_row(row)
+            except (TypeError, ValueError):
+                continue
+            statuses[status.token] = status
+        self.update_coverage_statuses = statuses
+        self.draw_map()
+        self.update_summary_status()
+
+    def set_update_campaigns(
+        self,
+        campaigns: Sequence[Sequence[object]],
+        rows_by_campaign: Mapping[str, Sequence[Sequence[object]]],
+        active_campaign_id: str = "",
+    ) -> None:
+        """Load persisted update windows and select the latest/current campaign."""
+        self.update_coverage_campaign_rows = {
+            str(campaign_id): rows
+            for campaign_id, rows in rows_by_campaign.items()
+        }
+        self.update_campaign_label_by_id = {}
+        self.update_campaign_id_by_label = {}
+        labels: list[str] = []
+        for campaign in campaigns:
+            if len(campaign) < 7:
+                continue
+            campaign_id = str(campaign[0])
+            label = f"{campaign[1]} ({campaign[6]} tiles, {campaign[5]} expected)"
+            self.update_campaign_label_by_id[campaign_id] = label
+            self.update_campaign_id_by_label[label] = campaign_id
+            labels.append(label)
+        selected_id = (
+            active_campaign_id
+            if active_campaign_id in self.update_campaign_label_by_id
+            else (str(campaigns[0][0]) if campaigns else "")
+        )
+        self.active_update_campaign_id = selected_id
+        selected_label = self.update_campaign_label_by_id.get(selected_id, "")
+        self.update_campaign_var.set(selected_label)
+        self.update_campaign_combo.configure(
+            values=labels,
+            state="readonly"
+            if self.current_mode_key() == "update" and labels
+            else "disabled",
+        )
+        if selected_id:
+            self.set_update_coverage_statuses(
+                self.update_coverage_campaign_rows.get(selected_id, [])
+            )
+
     def set_missing_upload_rows(self, rows: Sequence[Sequence[object]]) -> None:
         """Track upload-ready mosaic rows that are not yet uploaded/verified."""
         missing_by_tile: Dict[str, List[Tuple[str, str, str]]] = {}
@@ -420,6 +645,13 @@ class UTMPipelineStatusMap(ttk.Frame):
     def clear_statuses(self) -> None:
         """Clear all project status data from the map."""
         self.tile_statuses = {}
+        self.update_coverage_statuses = {}
+        self.update_coverage_campaign_rows = {}
+        self.update_campaign_label_by_id = {}
+        self.update_campaign_id_by_label = {}
+        self.active_update_campaign_id = ""
+        self.update_campaign_var.set("")
+        self.update_campaign_combo.configure(values=(), state="disabled")
         self.missing_upload_rows_by_tile = {}
         self.draw_map()
         self.status_var.set("Refresh statistics to populate the UTM pipeline status map.")
@@ -427,6 +659,10 @@ class UTMPipelineStatusMap(ttk.Frame):
     def tile_status(self, token: str) -> TilePipelineStatus:
         """Return current status for a tile, defaulting to no project records."""
         return self.tile_statuses.get(token, TilePipelineStatus(token=token))
+
+    def tile_update_coverage_status(self, token: str) -> TileUpdateCoverageStatus:
+        """Return current update coverage for a tile, defaulting to no expected rows."""
+        return self.update_coverage_statuses.get(token, TileUpdateCoverageStatus(token=token))
 
     def draw_map(self) -> None:
         """Redraw continents, tiles, labels, and status colors."""
@@ -445,9 +681,17 @@ class UTMPipelineStatusMap(ttk.Frame):
 
         self.draw_continents(fill="#e1e5dc", outline="#b8beb2", width=0.7)
         for token, tile in self.geometry_data.tiles.items():
-            status = self.tile_status(token)
-            style = PIPELINE_STATUS_STYLES.get(status.status, PIPELINE_STATUS_STYLES["none"])
-            width = 1.1 if status.status != "none" else 0.5
+            if self.current_mode_key() == "update":
+                status = self.tile_update_coverage_status(token)
+                style = UPDATE_COVERAGE_STATUS_STYLES.get(
+                    status.status,
+                    UPDATE_COVERAGE_STATUS_STYLES["attention"],
+                )
+                width = 1.1 if status.status != "no_expected" else 0.5
+            else:
+                status = self.tile_status(token)
+                style = PIPELINE_STATUS_STYLES.get(status.status, PIPELINE_STATUS_STYLES["none"])
+                width = 1.1 if status.status != "none" else 0.5
             for ring in tile.polygons:
                 points = ring_to_canvas_points(self.transform, ring)
                 if len(points) >= 8:
@@ -575,6 +819,9 @@ class UTMPipelineStatusMap(ttk.Frame):
 
     def update_tile_status(self, token: str) -> None:
         """Show a detailed status message for one tile."""
+        if self.current_mode_key() == "update":
+            self.update_tile_coverage_status(token)
+            return
         status = self.tile_status(token)
         self.status_var.set(
             f"{token}: {status.label}. "
@@ -592,8 +839,34 @@ class UTMPipelineStatusMap(ttk.Frame):
                 "Ready Mosaics Not Uploaded/Verified."
             )
 
+    def update_tile_coverage_status(self, token: str) -> None:
+        """Show a detailed update-window coverage message for one tile."""
+        status = self.tile_update_coverage_status(token)
+        date_bits = []
+        if status.latest_expected_date:
+            date_bits.append(f"latest expected {status.latest_expected_date}")
+        if status.latest_uploaded_date:
+            date_bits.append(f"latest uploaded/verified {status.latest_uploaded_date}")
+        date_text = "; ".join(date_bits)
+        if date_text:
+            date_text = f" {date_text}."
+        self.status_var.set(
+            f"{token}: {status.label}. "
+            f"Expected {status.expected}; downloaded {status.downloaded}; "
+            f"extracted {status.extracted}; mosaic sources {status.mosaic_sources}; "
+            f"uploaded/verified sources {status.uploaded_sources}.{date_text}"
+        )
+        if status.expected == 0:
+            self.status_var.set(
+                f"{self.status_var.get()} Run Download > Preview Search for the update date window "
+                "to populate expected remote matches."
+            )
+
     def update_summary_status(self) -> None:
         """Show a compact project status summary."""
+        if self.current_mode_key() == "update":
+            self.update_coverage_summary_status()
+            return
         counts: Dict[str, int] = {}
         for status in self.tile_statuses.values():
             counts[status.status] = counts.get(status.status, 0) + 1
@@ -606,6 +879,39 @@ class UTMPipelineStatusMap(ttk.Frame):
             if counts.get(key)
         ]
         self.status_var.set("Project tile status. " + "; ".join(ordered) + ".")
+
+    def update_coverage_summary_status(self) -> None:
+        """Show a compact update coverage summary."""
+        counts: Dict[str, int] = {}
+        expected_total = 0
+        for status in self.update_coverage_statuses.values():
+            counts[status.status] = counts.get(status.status, 0) + 1
+            expected_total += status.expected
+        if not counts:
+            self.status_var.set(
+                "No update coverage rows are available. Run Download > Preview Search "
+                "for the update window, then Refresh Statistics."
+            )
+            return
+        ordered = [
+            f"{UPDATE_COVERAGE_STATUS_STYLES[key]['label']}: {counts[key]}"
+            for key in (
+                "complete",
+                "pending_upload",
+                "pending_mosaic",
+                "pending_extract",
+                "pending_download",
+                "not_started",
+                "no_expected",
+            )
+            if counts.get(key)
+        ]
+        self.status_var.set(
+            f"Update coverage for {self.update_campaign_label_by_id.get(self.active_update_campaign_id, 'latest Download preview')}. "
+            f"Expected granules: {expected_total}. "
+            + "; ".join(ordered)
+            + "."
+        )
 
 
 class UTMMapSelectorDialog(tk.Toplevel):

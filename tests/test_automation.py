@@ -10,9 +10,15 @@ from swotflow_automation import (
     AutomationRunState,
     AutomationStageResult,
     AutomationTilePlan,
+    PROJECT_ROOT,
     build_tile_config_dict,
+    execute_download_result,
+    execute_command_result,
+    load_latest_automation_run_state,
     preflight_automation,
     run_automation,
+    write_run_state,
+    write_tile_config,
 )
 
 
@@ -83,6 +89,7 @@ class AutomationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = base_config(root)
+            config["chrome"] = {"user_data_dir": "./chrome-profile"}
             tile_config = build_tile_config_dict(
                 config,
                 "UTM34M",
@@ -98,6 +105,10 @@ class AutomationTests(unittest.TestCase):
             self.assertEqual(tile_config["mosaic"]["utm_tiles"], ["UTM34M"])
             self.assertEqual(tile_config["upload"]["scope"], "selected_utm")
             self.assertEqual(tile_config["upload"]["utm_tiles"], ["UTM34M"])
+            self.assertEqual(
+                tile_config["chrome"]["user_data_dir"],
+                str((PROJECT_ROOT / "chrome-profile").resolve()),
+            )
             self.assertEqual(
                 tile_config["download"]["manifest_csv"],
                 config["download"]["manifest_csv"],
@@ -149,11 +160,81 @@ class AutomationTests(unittest.TestCase):
 
             classifications = {plan.tile: plan.classification for plan in state.tile_plans}
             pending = {plan.tile: plan.pending_downloads for plan in state.tile_plans}
+            estimated_mosaics = {plan.tile: plan.estimated_mosaic_groups for plan in state.tile_plans}
             self.assertTrue(state.preflight_ok)
             self.assertEqual(classifications["UTM34M"], "already complete")
             self.assertEqual(classifications["UTM35M"], "new")
             self.assertEqual(pending["UTM34M"], 0)
             self.assertEqual(pending["UTM35M"], 1)
+            self.assertEqual(estimated_mosaics["UTM34M"], 1)
+            self.assertEqual(estimated_mosaics["UTM35M"], 1)
+
+    def test_upload_enabled_preflight_syncs_ee_before_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = base_config(root)
+
+            def preview_builder(download_config):
+                granule = fake_granule(download_config.utm_tiles[0])
+                return SimpleNamespace(
+                    granules=[granule],
+                    selected_granules=[granule],
+                    excluded_granules=[],
+                )
+
+            automation_config = AutomationConfig(
+                project_root=root,
+                base_config=config,
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=True,
+                min_free_space_gb=0,
+            )
+            progress_rows = []
+            with mock.patch(
+                "swotflow_automation.sync_ee_assets_for_preflight",
+                return_value=(0, "Earth Engine asset sync completed.", root / "sync.log"),
+            ) as sync:
+                with mock.patch(
+                    "swotflow_automation.tile_counts_from_insights",
+                    return_value={},
+                ):
+                    state = preflight_automation(
+                        automation_config,
+                        preview_builder=preview_builder,
+                        progress_callback=lambda *row: progress_rows.append(row),
+                    )
+
+            sync.assert_called_once()
+            self.assertTrue(state.preflight_ok)
+            self.assertTrue(any(row[1] == "ee_sync" and row[2] == "success" for row in progress_rows))
+
+    def test_upload_enabled_preflight_blocks_when_ee_sync_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            automation_config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=True,
+                min_free_space_gb=0,
+            )
+            preview_builder = mock.Mock()
+            with mock.patch(
+                "swotflow_automation.sync_ee_assets_for_preflight",
+                return_value=(1, "credentials unavailable", root / "sync.log"),
+            ):
+                state = preflight_automation(
+                    automation_config,
+                    preview_builder=preview_builder,
+                )
+
+            self.assertFalse(state.preflight_ok)
+            self.assertIn("Earth Engine asset sync failed", state.errors[0])
+            preview_builder.assert_not_called()
 
     def test_run_automation_skips_complete_tiles_and_continues_new_tiles(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -173,7 +254,229 @@ class AutomationTests(unittest.TestCase):
                 AutomationTilePlan(tile="UTM35M", classification="new", message="new", pending_downloads=1),
             ]
 
-            def command_result(state_arg, tile, stage, tile_config_path, gdal_python):
+            def command_result(state_arg, tile, stage, tile_config_path, gdal_python, **_kwargs):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="ok",
+                )
+
+            def download_result(state_arg, tile, tile_config_path, **_kwargs):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage="download",
+                    status="success",
+                    message="download ok",
+                )
+
+            def cleanup_result(state_arg, tile_config, tile, stage):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="cleanup ok",
+                )
+
+            with mock.patch("swotflow_automation.execute_download_result", side_effect=download_result):
+                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+                        result = run_automation(config, preflight_state=state)
+
+            complete_rows = [row for row in result.stage_results if row.tile == "UTM34M"]
+            skipped = [row for row in complete_rows if row.status == "skipped"]
+            cleaned = [row.stage for row in complete_rows if row.status == "success"]
+            executed = [row.stage for row in result.stage_results if row.tile == "UTM35M"]
+            self.assertTrue(skipped)
+            self.assertEqual(cleaned, ["raw_cleanup", "extracted_cleanup"])
+            self.assertEqual(
+                executed,
+                ["download", "duplicates", "extract", "raw_cleanup", "mosaic", "extracted_cleanup"],
+            )
+
+    def test_run_automation_cleans_complete_uploaded_tile_mosaics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=True,
+                min_free_space_gb=0,
+            )
+            run_dir = root / "00_logs" / "automation_runs" / "run"
+            state = AutomationRunState(run_id="run", run_dir=run_dir, config=config, preflight_ok=True)
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="already complete", message="done"),
+            ]
+
+            def cleanup_result(state_arg, tile_config, tile, stage):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="cleanup ok",
+                    deleted_files=1,
+                )
+
+            with mock.patch("swotflow_automation.execute_download_result") as download:
+                with mock.patch("swotflow_automation.execute_command_result") as command:
+                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+                        result = run_automation(config, preflight_state=state)
+
+            download.assert_not_called()
+            command.assert_not_called()
+            cleaned = [
+                row.stage
+                for row in result.stage_results
+                if row.tile == "UTM34M" and row.status == "success"
+            ]
+            self.assertEqual(cleaned, ["raw_cleanup", "extracted_cleanup", "mosaic_cleanup"])
+
+    def test_execute_download_result_runs_in_process_and_forwards_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = base_config(root)
+            run_dir = root / "00_logs" / "automation_runs" / "run"
+            tile_config = build_tile_config_dict(
+                config,
+                "UTM34M",
+                run_dir,
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=False,
+            )
+            tile_config_path = write_tile_config(tile_config, run_dir / "UTM34M" / "automation_config.yaml")
+            state = AutomationRunState(run_id="run", run_dir=run_dir, config=AutomationConfig(
+                project_root=root,
+                base_config=config,
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+            ))
+            granule = fake_granule("UTM34M")
+            fake_result = SimpleNamespace(
+                preview=SimpleNamespace(
+                    granules=[granule],
+                    selected_granules=[granule],
+                    excluded_granules=[],
+                ),
+                downloaded_files=[root / "01_raw_downloads" / granule.file_name],
+                skipped_existing=[],
+                skipped_manifest=[],
+                failures=[],
+                missing_granules=[],
+                stopped=False,
+                report_csv=run_dir / "UTM34M" / "download_preview.csv",
+                complete_count=1,
+            )
+            progress_rows = []
+
+            def fake_run_download(download_config, *, progress_callback=None, stop_event=None):
+                self.assertEqual(download_config.utm_tiles, ["UTM34M"])
+                self.assertIsNone(stop_event)
+                self.assertIsNotNone(progress_callback)
+                progress_callback(1, 1, "downloaded test granule")
+                return fake_result
+
+            with mock.patch("swotflow_automation.run_download", side_effect=fake_run_download):
+                result = execute_download_result(
+                    state,
+                    "UTM34M",
+                    tile_config_path,
+                    progress_callback=lambda tile, stage, status, message: progress_rows.append(
+                        (tile, stage, status, message)
+                    ),
+                )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.return_code, 0)
+            self.assertIn("Download complete", result.message)
+            self.assertEqual(progress_rows[-1], ("UTM34M", "download", "running", "downloaded test granule"))
+            self.assertIn("GEEUP_PROGRESS\tdownload\t1\t1", Path(result.log_path).read_text(encoding="utf-8"))
+
+    def test_latest_automation_run_state_round_trips_from_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=True,
+                run_id="run",
+                run_dir=root / "00_logs" / "automation_runs" / "run",
+            )
+            state = AutomationRunState(run_id="run", run_dir=config.run_dir, config=config, preflight_ok=True)
+            state.tile_plans = [
+                AutomationTilePlan(
+                    tile="UTM34M",
+                    classification="new",
+                    message="pending",
+                    pending_downloads=1,
+                    estimated_mosaic_groups=2,
+                    recorded_mosaic_groups=1,
+                    pending_mosaic_groups=1,
+                )
+            ]
+            state.stage_results = [
+                AutomationStageResult(
+                    run_id="run",
+                    tile="UTM34M",
+                    stage="download",
+                    status="success",
+                    message="ok",
+                )
+            ]
+            write_run_state(state)
+
+            loaded = load_latest_automation_run_state(config.base_config, root)
+
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.run_id, "run")
+            self.assertEqual(loaded.config.utm_tiles, ["UTM34M"])
+            self.assertTrue(loaded.config.include_upload)
+            self.assertEqual(loaded.tile_plans[0].pending_downloads, 1)
+            self.assertEqual(loaded.tile_plans[0].estimated_mosaic_groups, 2)
+            self.assertEqual(loaded.tile_plans[0].recorded_mosaic_groups, 1)
+            self.assertEqual(loaded.tile_plans[0].pending_mosaic_groups, 1)
+            self.assertEqual(loaded.stage_results[0].stage, "download")
+
+    def test_run_automation_resume_skips_completed_stage_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                min_free_space_gb=0,
+            )
+            run_dir = root / "00_logs" / "automation_runs" / "run"
+            state = AutomationRunState(run_id="run", run_dir=run_dir, config=config, preflight_ok=True)
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="new", message="new", pending_downloads=1),
+            ]
+            state.stage_results = [
+                AutomationStageResult(
+                    run_id="run",
+                    tile="UTM34M",
+                    stage="download",
+                    status="success",
+                    message="already done",
+                )
+            ]
+
+            def command_result(state_arg, tile, stage, tile_config_path, gdal_python, **_kwargs):
                 return AutomationStageResult(
                     run_id=state_arg.run_id,
                     tile=tile,
@@ -191,18 +494,125 @@ class AutomationTests(unittest.TestCase):
                     message="cleanup ok",
                 )
 
-            with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
-                with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
-                    result = run_automation(config, preflight_state=state)
+            with mock.patch("swotflow_automation.execute_download_result") as download:
+                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+                        result = run_automation(config, preflight_state=state)
 
-            skipped = [row for row in result.stage_results if row.tile == "UTM34M"]
-            executed = [row.stage for row in result.stage_results if row.tile == "UTM35M"]
-            self.assertTrue(skipped)
-            self.assertTrue(all(row.status == "skipped" for row in skipped))
-            self.assertEqual(
-                executed,
-                ["download", "duplicates", "extract", "raw_cleanup", "mosaic", "extracted_cleanup"],
+            download.assert_not_called()
+            download_rows = [
+                row
+                for row in result.stage_results
+                if row.tile == "UTM34M" and row.stage == "download"
+            ]
+            self.assertEqual(len(download_rows), 1)
+            self.assertEqual(download_rows[0].status, "success")
+
+    def test_upload_exit_code_two_is_warning_so_automation_can_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=True,
             )
+            state = AutomationRunState(
+                run_id="run",
+                run_dir=root / "00_logs" / "automation_runs" / "run",
+                config=config,
+            )
+            config_path = write_tile_config(
+                build_tile_config_dict(
+                    config.base_config,
+                    "UTM34M",
+                    state.run_dir,
+                    start_date=config.start_date,
+                    end_date=config.end_date,
+                    include_upload=True,
+                ),
+                state.run_dir / "UTM34M" / "automation_config.yaml",
+            )
+            with mock.patch(
+                "swotflow_automation.run_subprocess_stage",
+                return_value=(2, "Run finished with upload errors."),
+            ):
+                result = execute_command_result(
+                    state,
+                    "UTM34M",
+                    "upload",
+                    config_path,
+                    Path(sys.executable),
+                )
+
+            self.assertEqual(result.status, "warning")
+            self.assertIn("preserve unverified mosaics", result.message)
+
+    def test_run_automation_resume_clears_stopped_flag_without_duplicate_skip_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                min_free_space_gb=0,
+            )
+            run_dir = root / "00_logs" / "automation_runs" / "run"
+            state = AutomationRunState(
+                run_id="run",
+                run_dir=run_dir,
+                config=config,
+                preflight_ok=True,
+                stopped=True,
+            )
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="new", message="new", pending_downloads=1),
+            ]
+            state.stage_results = [
+                AutomationStageResult(
+                    run_id="run",
+                    tile="UTM34M",
+                    stage="download",
+                    status="success",
+                    message="already done",
+                )
+            ]
+
+            def command_result(state_arg, tile, stage, tile_config_path, gdal_python, **_kwargs):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="ok",
+                )
+
+            def cleanup_result(state_arg, tile_config, tile, stage):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="cleanup ok",
+                )
+
+            with mock.patch("swotflow_automation.execute_download_result") as download:
+                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+                        result = run_automation(config, preflight_state=state)
+
+            download.assert_not_called()
+            self.assertFalse(result.stopped)
+            download_rows = [
+                row
+                for row in result.stage_results
+                if row.tile == "UTM34M" and row.stage == "download"
+            ]
+            self.assertEqual(len(download_rows), 1)
 
 
 if __name__ == "__main__":

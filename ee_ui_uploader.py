@@ -137,6 +137,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
         "retry_attempts": 3,
         "retry_wait_seconds": 3.0,
+        "submission_confirmation_timeout_seconds": 30,
+        "submission_transfer_timeout_minutes": 30,
         "fail_fast": False,
     },
     "metadata": {
@@ -187,6 +189,7 @@ REPORT_COLUMNS = [
 ]
 
 RESUME_SKIP_STATUSES = {
+    "SUBMITTED_PENDING_VERIFICATION",
     "SUBMITTED",
     "READY",
     "RUNNING",
@@ -218,6 +221,7 @@ PRESERVE_ON_FILTER_STATUSES = RESUME_SKIP_STATUSES | {
 }
 
 UNKNOWN_AFTER_CLICK_STATUS = "UNKNOWN_AFTER_CLICK"
+SUBMITTED_PENDING_VERIFICATION_STATUS = "SUBMITTED_PENDING_VERIFICATION"
 PLANNED_UPLOAD_STATUS = "PLANNED_UPLOAD"
 UPLOAD_SCOPE_ALL = "all"
 UPLOAD_SCOPE_SELECTED_UTM = "selected_utm"
@@ -366,6 +370,8 @@ class UploadConfig:
     )
     retry_attempts: int = 3
     retry_wait_seconds: float = 3.0
+    submission_confirmation_timeout_seconds: int = 30
+    submission_transfer_timeout_minutes: int = 30
     fail_fast: bool = False
 
 
@@ -448,6 +454,14 @@ class TaskRow:
         """Return a compact task label."""
         first_line = self.raw_text.splitlines()[0].strip()
         return first_line[:300]
+
+
+@dataclass(frozen=True)
+class SubmissionOutcome:
+    """Immediate browser-side result after clicking the upload dialog."""
+
+    status: str
+    task_name: str = ""
 
 
 class ReportManager:
@@ -735,6 +749,14 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
             ),
             retry_attempts=max(1, int(upload_data.get("retry_attempts", 3))),
             retry_wait_seconds=float(upload_data.get("retry_wait_seconds", 3.0)),
+            submission_confirmation_timeout_seconds=max(
+                5,
+                int(upload_data.get("submission_confirmation_timeout_seconds", 30)),
+            ),
+            submission_transfer_timeout_minutes=max(
+                1,
+                int(upload_data.get("submission_transfer_timeout_minutes", 30)),
+            ),
             fail_fast=bool(upload_data.get("fail_fast", False)),
         ),
         metadata=MetadataConfig(
@@ -1171,7 +1193,7 @@ class EarthEngineUIUploader:
             return True
         if status in {"READY", "RUNNING"}:
             return True
-        if status == "SUBMITTED":
+        if status in {"SUBMITTED", SUBMITTED_PENDING_VERIFICATION_STATUS}:
             return False
         if status == EE_VERIFIED_EXISTS_STATUS:
             return True
@@ -1243,6 +1265,45 @@ class EarthEngineUIUploader:
             self.config.artifacts.report_csv,
         )
         return len(rows)
+
+    def verify_tracked_assets_with_inventory(self, pending_asset_ids: set[str]) -> int:
+        """Mark pending tracked uploads as verified when they are now present in Earth Engine."""
+        if not pending_asset_ids or not self.config.upload.ee_sync_before_upload:
+            return 0
+        try:
+            self.sync_earth_engine_inventory()
+        except Exception as exc:  # noqa: BLE001 - inventory sync is a fallback, not the upload driver.
+            self.logger.warning("Could not verify pending uploads with Earth Engine inventory: %s", exc)
+            return 0
+
+        verified_rows: List[Dict[str, str]] = []
+        verified_at = now_iso()
+        for asset_id in sorted(pending_asset_ids):
+            if asset_id not in self.ee_existing_asset_ids:
+                continue
+            item = self.tracked_items.get(asset_id)
+            if item is None:
+                continue
+            item.ee_asset_exists = True
+            item.ee_verified_at = verified_at
+            item.verification_source = "ee.data.listAssets"
+            existing = self.report.rows.get(asset_id, {})
+            verified_rows.append(
+                self.make_report_row(
+                    item=item,
+                    submit_time=existing.get("submit_time", ""),
+                    detected_task_name=existing.get("detected_task_name", ""),
+                    final_status=EE_VERIFIED_EXISTS_STATUS,
+                    error_message="Asset exists in the target Earth Engine collection.",
+                )
+            )
+        if verified_rows:
+            self.report.upsert_many(verified_rows)
+            self.logger.info(
+                "Earth Engine inventory verified %s pending tracked upload(s).",
+                len(verified_rows),
+            )
+        return len(verified_rows)
 
     def list_earth_engine_assets(self, ee: Any) -> List[AssetInventoryRecord]:
         """Return direct child assets from the configured destination parent."""
@@ -1704,14 +1765,18 @@ class EarthEngineUIUploader:
                 self.ensure_assets_tab()
                 self.open_image_upload_dialog()
                 self.populate_upload_dialog(item)
-                task_name = self.submit_upload_dialog(item)
+                outcome = self.submit_upload_dialog(item)
                 self.report.upsert(
                     self.make_report_row(
                         item=item,
                         submit_time=now_iso(),
-                        detected_task_name=task_name,
-                        final_status="SUBMITTED",
-                        error_message="",
+                        detected_task_name=outcome.task_name,
+                        final_status=outcome.status,
+                        error_message=(
+                            "Upload dialog closed; awaiting Tasks-panel or Earth Engine asset verification."
+                            if outcome.status == SUBMITTED_PENDING_VERIFICATION_STATUS
+                            else ""
+                        ),
                     )
                 )
                 return
@@ -1787,6 +1852,21 @@ class EarthEngineUIUploader:
 
         message = str(last_exception) if last_exception else "Unknown error"
         self.logger.error("Giving up on %s: %s", item.asset_id, message)
+        try:
+            self.close_dialog_if_possible()
+        except (
+            RetryableUIError,
+            TimeoutException,
+            StaleElementReferenceException,
+            ElementClickInterceptedException,
+            WebDriverException,
+        ) as close_exc:
+            raise_if_invalid_browser_session(close_exc)
+            self.logger.warning(
+                "Could not close the failed upload dialog for %s: %s",
+                item.asset_id,
+                close_exc,
+            )
         self.report.upsert(
             self.make_report_row(
                 item=item,
@@ -1898,8 +1978,9 @@ class EarthEngineUIUploader:
         self.clear_and_type(name_field, item.asset_name)
         return True
 
-    def submit_upload_dialog(self, item: UploadItem) -> str:
-        """Click UPLOAD and return a detected task name when possible."""
+    def submit_upload_dialog(self, item: UploadItem) -> SubmissionOutcome:
+        """Click UPLOAD and return once the browser accepts or rejects the dialog."""
+        timeout_seconds = self.config.upload.submission_confirmation_timeout_seconds
         if self.is_current_upload_dialog_open():
             self._click_current_ui_upload_button()
             time.sleep(self.config.execution.short_ui_wait_seconds)
@@ -1910,18 +1991,8 @@ class EarthEngineUIUploader:
                     raise AlreadyExistsError(error_message)
                 raise RetryableUIError(error_message)
 
-            try:
-                return self.wait_for_task_name(item, timeout_seconds=30)
-            except TimeoutException as exc:
-                error_message = self.read_dialog_error_message()
-                if error_message:
-                    if "already exists" in error_message.lower():
-                        raise AlreadyExistsError(error_message) from exc
-                    raise RetryableUIError(error_message) from exc
-                raise UnknownAfterClickError(
-                    "Upload was clicked, but no matching task row or explicit upload-dialog error was detected. "
-                    "Verify the asset in Earth Engine before retrying."
-                ) from exc
+            self.wait_for_current_upload_dialog_close(item, idle_timeout_seconds=timeout_seconds)
+            return SubmissionOutcome(status=SUBMITTED_PENDING_VERIFICATION_STATUS)
 
         self.click_first_available("upload_button")
         time.sleep(self.config.execution.short_ui_wait_seconds)
@@ -1933,7 +2004,8 @@ class EarthEngineUIUploader:
             raise RetryableUIError(error_message)
 
         try:
-            return self.wait_for_task_name(item, timeout_seconds=30)
+            task_name = self.wait_for_task_name(item, timeout_seconds=timeout_seconds)
+            return SubmissionOutcome(status="SUBMITTED", task_name=task_name)
         except TimeoutException as exc:
             error_message = self.read_dialog_error_message()
             if error_message:
@@ -1941,9 +2013,95 @@ class EarthEngineUIUploader:
                     raise AlreadyExistsError(error_message) from exc
                 raise RetryableUIError(error_message) from exc
             raise UnknownAfterClickError(
-                "Upload was clicked, but no matching task row or explicit upload-dialog error was detected. "
-                "Verify the asset in Earth Engine before retrying."
+                "Upload was clicked, but no matching Earth Engine task or explicit error was detected. "
+                "The file is recorded as UNKNOWN_AFTER_CLICK and will be reconciled by EE asset sync before retry."
             ) from exc
+
+    def current_upload_progress_signature(self) -> str:
+        """Return a compact signature of visible upload progress in the active dialog."""
+        if not self.is_current_upload_dialog_open():
+            return ""
+        value = self.execute_script(
+            f"""
+            {active_upload_dialog_helper_js()}
+            const dialog = findActiveUploadDialog();
+            if (!dialog || !dialog.shadowRoot) return '';
+
+            function collect(root, output = [], seen = new Set()) {{
+              if (!root || seen.has(root)) return output;
+              seen.add(root);
+              if (root.nodeType === Node.ELEMENT_NODE) output.push(root);
+              const children = [
+                ...Array.from(root.children || []),
+                ...(root.shadowRoot ? Array.from(root.shadowRoot.children) : []),
+              ];
+              for (const child of children) collect(child, output, seen);
+              return output;
+            }}
+
+            const values = [];
+            for (const element of collect(dialog.shadowRoot)) {{
+              const tag = (element.tagName || '').toLowerCase();
+              const role = (element.getAttribute && element.getAttribute('role')) || '';
+              if (tag === 'progress' || tag === 'paper-progress' || role === 'progressbar') {{
+                values.push([
+                  tag,
+                  element.value ?? '',
+                  element.max ?? '',
+                  element.getAttribute('aria-valuenow') || '',
+                  element.getAttribute('aria-valuemax') || '',
+                ].join(':'));
+              }}
+              const text = (element.innerText || element.textContent || '').trim();
+              const matches = text.match(/\\b\\d{{1,3}}(?:\\.\\d+)?%\\b/g);
+              if (matches) values.push(...matches);
+            }}
+            return Array.from(new Set(values)).sort().join('|');
+            """
+        )
+        return str(value or "")
+
+    def wait_for_current_upload_dialog_close(
+        self,
+        item: UploadItem,
+        *,
+        idle_timeout_seconds: int,
+    ) -> None:
+        """Wait for browser-side transfer acceptance, detecting stalled open dialogs."""
+        hard_deadline = (
+            time.monotonic()
+            + self.config.upload.submission_transfer_timeout_minutes * 60
+        )
+        idle_deadline = time.monotonic() + idle_timeout_seconds
+        last_progress = self.current_upload_progress_signature()
+        while self.is_current_upload_dialog_open():
+            error_message = self.read_dialog_error_message()
+            if error_message:
+                if "already exists" in error_message.lower():
+                    raise AlreadyExistsError(error_message)
+                raise RetryableUIError(error_message)
+
+            progress = self.current_upload_progress_signature()
+            if progress and progress != last_progress:
+                last_progress = progress
+                idle_deadline = time.monotonic() + idle_timeout_seconds
+                self.logger.debug(
+                    "Browser upload progress changed for %s: %s",
+                    item.asset_id,
+                    progress,
+                )
+            now = time.monotonic()
+            if now > hard_deadline:
+                raise RetryableUIError(
+                    f"The upload dialog remained open for more than "
+                    f"{self.config.upload.submission_transfer_timeout_minutes} minutes."
+                )
+            if now > idle_deadline:
+                raise RetryableUIError(
+                    "The Earth Engine upload dialog remained open without detectable progress. "
+                    "The dialog will be recovered and this file retried."
+                )
+            time.sleep(0.5)
 
     def apply_pyramiding_policy(self) -> None:
         """Best-effort handling for optional pyramiding policy controls."""
@@ -2681,7 +2839,9 @@ class EarthEngineUIUploader:
             if matched is not None:
                 return matched.task_name
             time.sleep(2)
-        return ""
+        raise TimeoutException(
+            f"No matching Earth Engine task appeared for {item.asset_id} within {timeout_seconds} seconds."
+        )
 
     def wait_for_batch_gate(self, batch: Sequence[UploadItem]) -> None:
         """Wait until the batch completes or active ingestions drop below the threshold."""
@@ -2727,10 +2887,13 @@ class EarthEngineUIUploader:
             if self.report.get_status(asset_id) in ACTIVE_STATUSES
         }
         if not pending:
+            self.verify_unconfirmed_submissions()
             return
 
         timeout_seconds = self.config.execution.wait_timeout_minutes * 60
         deadline = time.monotonic() + timeout_seconds
+        inventory_interval = max(60, self.config.execution.task_poll_seconds * 3)
+        next_inventory_check = time.monotonic()
 
         while pending:
             rows = self.collect_task_rows()
@@ -2741,19 +2904,48 @@ class EarthEngineUIUploader:
                 if self.report.get_status(asset_id) in ACTIVE_STATUSES
             }
             if not pending:
+                self.verify_unconfirmed_submissions()
                 return
+            if time.monotonic() >= next_inventory_check:
+                verified = self.verify_tracked_assets_with_inventory(pending)
+                pending = {
+                    asset_id
+                    for asset_id in self.tracked_items
+                    if self.report.get_status(asset_id) in ACTIVE_STATUSES
+                }
+                if not pending:
+                    self.verify_unconfirmed_submissions()
+                    return
+                self.logger.info(
+                    "Earth Engine inventory verified %s tracked upload(s); %s still pending.",
+                    verified,
+                    len(pending),
+                )
+                next_inventory_check = time.monotonic() + inventory_interval
             if time.monotonic() > deadline:
                 self.logger.warning(
                     "Final task monitoring timed out. Remaining assets will stay in their last known state."
                 )
                 self.capture_debug_artifacts("final_monitor_timeout")
-                return
+                break
             self.logger.info(
                 "Waiting for %s tracked uploads to finish. Polling again in %s seconds.",
                 len(pending),
                 self.config.execution.task_poll_seconds,
             )
             time.sleep(self.config.execution.task_poll_seconds)
+        self.verify_unconfirmed_submissions()
+
+    def verify_unconfirmed_submissions(self) -> int:
+        """Run one EE inventory check for dialog-accepted submissions without matched tasks."""
+        unresolved = {
+            asset_id
+            for asset_id in self.tracked_items
+            if self.report.get_status(asset_id) == SUBMITTED_PENDING_VERIFICATION_STATUS
+        }
+        if unresolved:
+            return self.verify_tracked_assets_with_inventory(unresolved)
+        return 0
 
     def collect_task_rows(self) -> List[TaskRow]:
         """Read task rows from the Tasks panel and normalize their statuses."""

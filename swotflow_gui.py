@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import csv
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -157,8 +158,10 @@ from swot_download_tool import (
     write_download_report,
 )
 from swotflow_automation import (
+    AUTOMATION_STAGES,
     AutomationConfig,
     AutomationRunState,
+    load_latest_automation_run_state,
     preflight_automation,
     run_automation,
 )
@@ -335,6 +338,9 @@ class LauncherApp:
         self.automation_continue_on_failure_var = tk.BooleanVar(
             value=bool(automation_data.get("continue_on_tile_failure", True))
         )
+        self.automation_auto_start_after_preflight_var = tk.BooleanVar(
+            value=bool(automation_data.get("auto_start_after_preflight", False))
+        )
         self.automation_status_var = tk.StringVar(
             value="Open a project, select tiles, then run the automation preflight."
         )
@@ -343,6 +349,10 @@ class LauncherApp:
         self.automation_preflight_state: AutomationRunState | None = None
         self.automation_running = False
         self.automation_stop_event: threading.Event | None = None
+        self.automation_progress_tiles: list[str] = []
+        self.automation_progress_stages: list[str] = []
+        self.automation_progress_completed_keys: set[tuple[str, str]] = set()
+        self.automation_progress_total_units = 0
         for date_var in (
             self.download_start_date_var,
             self.download_end_date_var,
@@ -977,13 +987,25 @@ class LauncherApp:
             text="Continue with next tile after failure",
             variable=self.automation_continue_on_failure_var,
         ).grid(row=1, column=3, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Button(
+            settings,
+            text="Authenticate Earthdata",
+            command=self.authenticate_download,
+        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(
+            settings,
+            textvariable=self.download_auth_status_var,
+            foreground="#184a8b",
+            wraplength=760,
+            justify="left",
+        ).grid(row=2, column=1, columnspan=7, sticky="w", padx=(8, 0), pady=(8, 0))
         ttk.Label(
             settings,
             textvariable=self.automation_date_status_var,
             foreground="#184a8b",
             wraplength=980,
             justify="left",
-        ).grid(row=2, column=0, columnspan=8, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
 
         tiles = ttk.LabelFrame(parent, text="Automation UTM Tiles", padding=10)
         tiles.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
@@ -1044,7 +1066,7 @@ class LauncherApp:
             state=tk.DISABLED,
         )
         self.automation_start_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Button(actions, text="Resume Run", command=self.start_automation).grid(
+        ttk.Button(actions, text="Resume Run", command=self.resume_automation_run).grid(
             row=0, column=2, sticky="w", padx=(8, 0)
         )
         ttk.Button(
@@ -1052,6 +1074,11 @@ class LauncherApp:
             text="Stop After Current Stage",
             command=self.stop_automation_after_current_stage,
         ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+        ttk.Checkbutton(
+            actions,
+            text="Start automatically after successful preflight",
+            variable=self.automation_auto_start_after_preflight_var,
+        ).grid(row=0, column=4, columnspan=2, sticky="w", padx=(12, 0))
         ttk.Progressbar(
             actions,
             variable=self.automation_progress_var,
@@ -2906,6 +2933,7 @@ class LauncherApp:
             data = self.build_config()
             self.write_config_data(data)
         self.load_saved_project_statistics()
+        self.load_latest_automation_run_for_project(notify=False)
         self.refresh_home_summary()
 
     def try_auto_open_project_from_config(self) -> None:
@@ -2919,7 +2947,7 @@ class LauncherApp:
         try:
             project = load_project(project_file)
             ensure_project_structure(project.root)
-        except (OSError, ValueError, yaml.YAMLError) as exc:
+        except (OSError, ValueError, sqlite3.Error, yaml.YAMLError) as exc:
             self.project_status_var.set(
                 f"config.yaml points at a project folder, but it could not be opened: {exc}"
             )
@@ -3070,9 +3098,14 @@ class LauncherApp:
         self.automation_continue_on_failure_var.set(
             bool(automation_data.get("continue_on_tile_failure", True))
         )
+        self.automation_auto_start_after_preflight_var.set(
+            bool(automation_data.get("auto_start_after_preflight", False))
+        )
         self.automation_preflight_state = None
         if hasattr(self, "automation_start_button"):
             self.automation_start_button.configure(state=tk.DISABLED)
+        if hasattr(self, "automation_tree"):
+            self.clear_treeview(self.automation_tree)
         self.refresh_automation_tile_list()
         self.update_automation_date_status()
 
@@ -3780,7 +3813,7 @@ class LauncherApp:
         manifest_path = Path(self.download_manifest_var.get().strip() or "")
         try:
             return manifest_downloaded_tiles(manifest_path)
-        except OSError:
+        except (OSError, sqlite3.Error, ValueError):
             return []
 
     def apply_utm_map_selection(self, tiles: list[str]) -> None:
@@ -4545,6 +4578,8 @@ class LauncherApp:
                 },
                 "retry_attempts": retry_attempts,
                 "retry_wait_seconds": retry_wait,
+                "submission_confirmation_timeout_seconds": 30,
+                "submission_transfer_timeout_minutes": 30,
                 "fail_fast": self.fail_fast_var.get(),
             },
             "execution": {
@@ -4611,6 +4646,7 @@ class LauncherApp:
                     50.0,
                 ),
                 "continue_on_tile_failure": self.automation_continue_on_failure_var.get(),
+                "auto_start_after_preflight": self.automation_auto_start_after_preflight_var.get(),
             },
         }
 
@@ -4747,7 +4783,17 @@ class LauncherApp:
     def run_automation_preflight_process(self, automation_config: AutomationConfig) -> None:
         """Run automation preflight away from the Tkinter thread."""
         try:
-            state = preflight_automation(automation_config)
+            state = preflight_automation(
+                automation_config,
+                progress_callback=lambda tile, stage, status, message: self.root.after(
+                    0,
+                    self.update_automation_progress,
+                    tile,
+                    stage,
+                    status,
+                    message,
+                ),
+            )
         except Exception as exc:
             self.root.after(0, self.finish_automation_preflight_error, exc)
             return
@@ -4777,6 +4823,13 @@ class LauncherApp:
             self.automation_status_var.set(
                 f"Preflight ready for {len(state.tile_plans)} tile(s).{warning_text} Run folder: {state.run_dir}"
             )
+            if self.automation_auto_start_after_preflight_var.get():
+                self.automation_status_var.set(
+                    f"Preflight ready for {len(state.tile_plans)} tile(s).{warning_text} "
+                    "Starting automation automatically..."
+                )
+                self.root.after(0, self.start_automation)
+                return
             messagebox.showinfo(
                 "Automation preflight finished",
                 (
@@ -4803,8 +4856,14 @@ class LauncherApp:
         self.clear_treeview(self.automation_tree)
         for plan in state.tile_plans:
             counts = (
-                f"matched {plan.matched_granules}, selected {plan.selected_granules}, "
-                f"pending {plan.pending_downloads}, uploaded {plan.uploaded}, missing upload {plan.missing_upload}"
+                f"request: matched {plan.matched_granules}, selected {plan.selected_granules}, "
+                f"pending downloads {plan.pending_downloads}, "
+                f"est. mosaics {plan.estimated_mosaic_groups}, "
+                f"recorded mosaics {plan.recorded_mosaic_groups}, "
+                f"pending mosaics {plan.pending_mosaic_groups}; "
+                f"project totals: downloaded {plan.downloaded}, extracted {plan.extracted}, "
+                f"mosaic sources {plan.mosaic_sources}, uploaded/verified {plan.uploaded}, "
+                f"missing upload {plan.missing_upload}"
             )
             self.automation_tree.insert(
                 "",
@@ -4821,6 +4880,89 @@ class LauncherApp:
                 values=(result.tile, result.stage, result.status, counts, result.message[:300]),
             )
 
+    def apply_automation_run_state(
+        self,
+        state: AutomationRunState,
+        *,
+        status_text: str = "",
+    ) -> None:
+        """Load a persisted automation run into the Automation tab."""
+        config = state.config
+        try:
+            tiles = normalize_utm_tiles(config.utm_tiles)
+        except ValueError:
+            tiles = []
+        self.automation_selected_tiles = set(tiles)
+        self.automation_selected_tiles_var.set(", ".join(tiles))
+        self.automation_start_date_var.set(config.start_date)
+        self.automation_end_date_var.set(config.end_date)
+        self.automation_include_upload_var.set(bool(config.include_upload))
+        self.automation_cleanup_enabled_var.set(bool(config.cleanup_enabled))
+        self.automation_min_free_space_var.set(str(config.min_free_space_gb))
+        self.automation_continue_on_failure_var.set(bool(config.continue_on_tile_failure))
+        self.automation_preflight_state = state
+        self.refresh_automation_tile_list()
+        self.update_automation_date_status()
+        self.populate_automation_tree(state)
+        self.automation_start_button.configure(state=tk.NORMAL if state.preflight_ok else tk.DISABLED)
+        self.initialize_automation_progress_tracker(state)
+        if state.finished_at:
+            self.set_automation_progress_text(
+                "latest automation run stopped" if state.stopped else "latest automation run loaded"
+            )
+        else:
+            self.set_automation_progress_text("latest automation run loaded")
+        if not status_text:
+            failed = sum(1 for result in state.stage_results if result.status == "failed")
+            status_text = (
+                f"Loaded automation run {state.run_id}: {len(state.tile_plans)} tile(s), "
+                f"{len(state.stage_results)} stage row(s), failed stages {failed}. "
+                "Use Resume Run to continue this run, or Run Preflight for a fresh plan."
+            )
+        self.automation_status_var.set(status_text)
+
+    def load_latest_automation_run_for_project(self, notify: bool = False) -> bool:
+        """Load the newest persisted automation run for the open project into the GUI."""
+        project_root = self.current_project_root_var.get().strip()
+        if not project_root:
+            return False
+        try:
+            state = load_latest_automation_run_state(
+                self.build_config(dry_run_override=False),
+                project_root,
+            )
+        except (OSError, ValueError) as exc:
+            message = f"Could not load the latest automation run: {exc}"
+            self.automation_status_var.set(message)
+            if notify:
+                messagebox.showwarning("Automation run not loaded", message)
+            return False
+        if state is None:
+            self.automation_preflight_state = None
+            if hasattr(self, "automation_tree"):
+                self.clear_treeview(self.automation_tree)
+            if hasattr(self, "automation_start_button"):
+                self.automation_start_button.configure(state=tk.DISABLED)
+            self.automation_status_var.set("No saved automation run found for this project.")
+            if notify:
+                messagebox.showinfo(
+                    "No automation run",
+                    "No saved automation run was found for this project. Run Preflight to create one.",
+                )
+            return False
+        self.apply_automation_run_state(state)
+        return True
+
+    def resume_automation_run(self) -> None:
+        """Load the latest run when needed, then continue automation."""
+        if self.automation_running:
+            messagebox.showwarning("Automation running", "Automation is already running.")
+            return
+        if self.automation_preflight_state is None:
+            if not self.load_latest_automation_run_for_project(notify=True):
+                return
+        self.start_automation()
+
     def start_automation(self) -> None:
         """Start or resume the preflighted automation run."""
         if self.automation_running:
@@ -4832,6 +4974,18 @@ class LauncherApp:
                 "Run a successful automation preflight before starting automation.",
             )
             return
+        pending_downloads = sum(
+            max(0, int(getattr(plan, "pending_downloads", 0) or 0))
+            for plan in self.automation_preflight_state.tile_plans
+        )
+        if pending_downloads and not self.download_authenticated:
+            message = (
+                f"Automation has {pending_downloads} pending download(s). "
+                "Click Authenticate Earthdata in the Automation tab before starting."
+            )
+            self.automation_status_var.set(message)
+            messagebox.showwarning("Earthdata login required", message)
+            return
         try:
             automation_config = self.automation_config_from_ui()
         except Exception as exc:
@@ -4841,8 +4995,8 @@ class LauncherApp:
         automation_config.run_dir = self.automation_preflight_state.run_dir
         self.automation_running = True
         self.automation_stop_event = threading.Event()
-        self.automation_progress_var.set(0.0)
-        self.automation_progress_text_var.set("Progress: automation running")
+        self.initialize_automation_progress_tracker(self.automation_preflight_state)
+        self.set_automation_progress_text("automation running")
         self.automation_status_var.set("Automation started. Do not run manual workflow actions until it finishes.")
         thread = threading.Thread(
             target=self.run_automation_process,
@@ -4879,8 +5033,72 @@ class LauncherApp:
 
     def update_automation_progress(self, tile: str, stage: str, status: str, message: str) -> None:
         """Update automation status during a run."""
-        self.automation_progress_text_var.set(f"Progress: {tile} / {stage} / {status}")
+        if self.automation_running:
+            normalized_status = str(status or "").strip().lower()
+            if (
+                tile in self.automation_progress_tiles
+                and stage in self.automation_progress_stages
+                and normalized_status in {"success", "skipped", "warning"}
+            ):
+                self.automation_progress_completed_keys.add((tile, stage))
+            self.set_automation_progress_text(
+                f"{self.automation_tile_position_text(tile)}{tile} / {stage} / {status}"
+            )
+        else:
+            self.automation_progress_text_var.set(f"Progress: {tile} / {stage} / {status}")
         self.automation_status_var.set(str(message).strip()[:500])
+
+    def automation_stage_names(self, include_upload: bool) -> list[str]:
+        """Return stage units included in one automation run."""
+        return [
+            stage
+            for stage in AUTOMATION_STAGES
+            if include_upload or stage not in {"upload", "ee_sync", "mosaic_cleanup"}
+        ]
+
+    def initialize_automation_progress_tracker(self, state: AutomationRunState) -> None:
+        """Initialize aggregate progress from persisted unique tile/stage results."""
+        self.automation_progress_tiles = list(state.config.utm_tiles)
+        self.automation_progress_stages = self.automation_stage_names(state.config.include_upload)
+        valid_tiles = set(self.automation_progress_tiles)
+        valid_stages = set(self.automation_progress_stages)
+        terminal_statuses = {"success", "skipped", "warning"}
+        self.automation_progress_completed_keys = {
+            (result.tile, result.stage)
+            for result in state.stage_results
+            if result.tile in valid_tiles
+            and result.stage in valid_stages
+            and str(result.status or "").lower() in terminal_statuses
+        }
+        self.automation_progress_total_units = (
+            len(self.automation_progress_tiles) * len(self.automation_progress_stages)
+        )
+        self.update_automation_progress_percentage()
+
+    def update_automation_progress_percentage(self) -> float:
+        """Update and return the aggregate Automation percentage."""
+        total = self.automation_progress_total_units
+        completed = min(total, len(self.automation_progress_completed_keys))
+        percentage = 0.0 if total <= 0 else completed / total * 100.0
+        self.automation_progress_var.set(percentage)
+        return percentage
+
+    def automation_tile_position_text(self, tile: str) -> str:
+        """Return a compact tile ordinal for progress display."""
+        try:
+            index = self.automation_progress_tiles.index(tile) + 1
+        except ValueError:
+            return ""
+        return f"tile {index}/{len(self.automation_progress_tiles)} | "
+
+    def set_automation_progress_text(self, detail: str) -> None:
+        """Render percentage, stage-unit count, and current activity."""
+        percentage = self.update_automation_progress_percentage()
+        total = self.automation_progress_total_units
+        completed = min(total, len(self.automation_progress_completed_keys))
+        self.automation_progress_text_var.set(
+            f"Progress: {percentage:.1f}% ({completed}/{total} stages) | {detail}"
+        )
 
     def stop_automation_after_current_stage(self) -> None:
         """Request automation to stop between stages."""
@@ -4889,13 +5107,13 @@ class LauncherApp:
             return
         self.automation_stop_event.set()
         self.automation_status_var.set("Stop requested. Automation will stop after the current stage finishes.")
-        self.automation_progress_text_var.set("Progress: stop requested")
+        self.set_automation_progress_text("stop requested")
 
     def finish_automation_error(self, exc: Exception) -> None:
         """Show unexpected automation failure."""
         self.automation_running = False
         self.automation_stop_event = None
-        self.automation_progress_text_var.set("Progress: automation failed")
+        self.set_automation_progress_text("automation failed")
         self.automation_status_var.set(f"Automation failed: {exc}")
         self.refresh_project_statistics_if_active("automation")
         messagebox.showerror("Automation failed", str(exc))
@@ -4906,13 +5124,27 @@ class LauncherApp:
         self.automation_stop_event = None
         self.automation_preflight_state = state
         self.populate_automation_tree(state)
-        self.automation_progress_var.set(100.0)
-        self.automation_progress_text_var.set(
-            "Progress: automation stopped" if state.stopped else "Progress: automation finished"
+        self.initialize_automation_progress_tracker(state)
+        failed_results = [result for result in state.stage_results if result.status == "failed"]
+        warning_results = [result for result in state.stage_results if result.status == "warning"]
+        failed = len(failed_results)
+        warnings = len(warning_results)
+        if not state.stopped and not failed:
+            self.automation_progress_completed_keys = {
+                (tile, stage)
+                for tile in self.automation_progress_tiles
+                for stage in self.automation_progress_stages
+            }
+        self.set_automation_progress_text(
+            "automation stopped" if state.stopped else "automation finished"
         )
-        failed = sum(1 for result in state.stage_results if result.status == "failed")
+        first_failure = ""
+        if failed_results:
+            result = failed_results[0]
+            first_failure = f" First failure: {result.tile}/{result.stage}: {result.message[:300]}"
         self.automation_status_var.set(
-            f"Automation {'stopped' if state.stopped else 'finished'}. Failed stages: {failed}. Run folder: {state.run_dir}"
+            f"Automation {'stopped' if state.stopped else 'finished'}. "
+            f"Failed stages: {failed}; warning stages: {warnings}.{first_failure} Run folder: {state.run_dir}"
         )
         self.refresh_project_statistics_if_active("automation")
         messagebox.showinfo(
@@ -4920,6 +5152,8 @@ class LauncherApp:
             (
                 f"Stopped: {'yes' if state.stopped else 'no'}\n"
                 f"Failed stages: {failed}\n"
+                f"Warning stages: {warnings}\n"
+                f"{first_failure.strip()}\n"
                 f"Run CSV:\n{state.csv_path}\n"
                 f"Run JSON:\n{state.json_path}"
             ),
@@ -5004,6 +5238,7 @@ class LauncherApp:
         self.download_authenticated = True
         self.download_auth_status_var.set("Earthdata authentication: succeeded")
         self.download_status_var.set("Earthdata authentication succeeded for this session.")
+        self.automation_status_var.set("Earthdata authentication succeeded for this session.")
 
     def finish_download_authentication_error(self, exc: Exception) -> None:
         """Show failed Earthdata authentication."""
@@ -5012,6 +5247,7 @@ class LauncherApp:
         self.set_download_progress_indeterminate(False)
         self.download_auth_status_var.set(f"Earthdata authentication: failed ({exc})")
         self.download_status_var.set("Earthdata authentication failed. Check credentials or _netrc.")
+        self.automation_status_var.set("Earthdata authentication failed. Check credentials or _netrc.")
         messagebox.showerror(
             "Earthdata authentication failed",
             f"earthaccess could not authenticate with Earthdata Login:\n{exc}",
@@ -5606,6 +5842,14 @@ class LauncherApp:
                 )
                 return
         self.stats_status_map.set_tile_statuses(insights.upload_qa_tile_rows)
+        self.stats_status_map.set_update_coverage_statuses(
+            getattr(insights, "update_coverage_tile_rows", [])
+        )
+        self.stats_status_map.set_update_campaigns(
+            getattr(insights, "update_campaigns", []),
+            getattr(insights, "update_coverage_campaign_rows", {}),
+            getattr(insights, "active_update_campaign_id", ""),
+        )
         self.stats_status_map.set_missing_upload_rows(insights.ready_not_uploaded_rows)
 
     def display_project_statistics(
@@ -6519,7 +6763,10 @@ class LauncherApp:
         planned = counts.get("PLANNED_UPLOAD", 0)
         dry_planned = counts.get("PLANNED_DRY_RUN", 0)
         filtered = counts.get("FILTERED_UTM_TILE", 0)
-        submitted = counts.get("SUBMITTED", 0)
+        submitted = (
+            counts.get("SUBMITTED", 0)
+            + counts.get("SUBMITTED_PENDING_VERIFICATION", 0)
+        )
         active = counts.get("READY", 0) + counts.get("RUNNING", 0)
         completed = (
             counts.get("COMPLETED", 0)
