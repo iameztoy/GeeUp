@@ -20,7 +20,7 @@ python swotflow_gui.py
 - **Extraction:** converts SWOT NetCDF files into two-band GeoTIFFs with `wse` and `wse_qual`, with optional worker-based parallelism.
 - **Mosaic:** reduces GeoTIFF counts before upload, while keeping SWOT-compatible naming and metadata parsing, with optional cautious group parallelism.
 - **Upload:** uploads GeoTIFFs to Google Earth Engine through Chrome/Selenium, with optional UTM/source-tile filtering and Earth Engine asset verification.
-- **Statistics:** summarizes project coverage, processing status, file counts, dates, UTM tiles, uploads, and QA tables.
+- **Statistics:** summarizes project coverage, update coverage, processing status, file counts, dates, UTM tiles, uploads, and QA tables.
 - **Cleanup:** previews and deletes safe intermediate-file cleanup candidates with downstream project-record proof.
 
 ## Basic Workflow
@@ -101,6 +101,7 @@ A SWOTFlow project keeps settings and intermediate files together:
 - `swotflow_automation.py`: tile-by-tile unattended workflow orchestration.
 - `swotflow_project.py`: project metadata, project folders, history, and tile profile helpers.
 - `project_database.py`: SQLite project store, legacy CSV migration, indexed status queries, and CSV exports.
+- `project_updates.py`: persistent date-window update campaigns and expected-granule records.
 - `swot_download_tool.py`: Earthdata / PO.DAAC search, preview, manifest, and download logic.
 - `swot_duplicate_remover.py`: local raw-file duplicate cleanup.
 - `swot_extract_tool.py`: GDAL-backed SWOT NetCDF to GeoTIFF extraction.

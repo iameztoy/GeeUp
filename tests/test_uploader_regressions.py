@@ -11,6 +11,7 @@ from ee_ui_uploader import (
     EE_VERIFIED_EXISTS_STATUS,
     FILTERED_UTM_STATUS,
     RESUME_SKIP_STATUSES,
+    SUBMITTED_PENDING_VERIFICATION_STATUS,
     TERMINAL_STATUSES,
     UNKNOWN_AFTER_CLICK_STATUS,
     EarthEngineUIUploader,
@@ -107,6 +108,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
 
     def test_resume_skips_submitted_but_not_error_or_unknown_after_click(self) -> None:
         self.assertIn("SUBMITTED", RESUME_SKIP_STATUSES)
+        self.assertIn(SUBMITTED_PENDING_VERIFICATION_STATUS, RESUME_SKIP_STATUSES)
         self.assertIn("READY", RESUME_SKIP_STATUSES)
         self.assertIn("RUNNING", RESUME_SKIP_STATUSES)
         self.assertIn("COMPLETED", RESUME_SKIP_STATUSES)
@@ -157,12 +159,139 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                 mock.patch.object(uploader, "submit_upload_dialog", side_effect=RetryableUIError("Please provide an asset ID.")),
                 mock.patch.object(uploader, "recover_ui_state", side_effect=TimeoutException("renderer timeout")),
                 mock.patch.object(uploader, "capture_debug_artifacts"),
+                mock.patch.object(uploader, "close_dialog_if_possible") as close_dialog,
             ):
                 uploader.submit_with_retries(item)
 
             rows = self.read_report_rows(config.artifacts.report_csv)
             self.assertEqual(rows[0]["final_status"], "ERROR")
             self.assertIn("renderer timeout", rows[0]["error_message"])
+            close_dialog.assert_called_once()
+
+    def test_open_dialog_after_click_timeout_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            uploader = self.uploader(self.uploader_config(root))
+            item = UploadItem(
+                local_file=root / "inputs" / "a.tif",
+                asset_name="a",
+                asset_id="projects/example/assets/collection/a",
+            )
+            with (
+                mock.patch.object(uploader, "is_current_upload_dialog_open", return_value=True),
+                mock.patch.object(uploader, "_click_current_ui_upload_button"),
+                mock.patch.object(uploader, "read_dialog_error_message", return_value=""),
+                mock.patch.object(
+                    uploader,
+                    "wait_for_current_upload_dialog_close",
+                    side_effect=RetryableUIError("remained open without progress"),
+                ),
+                mock.patch("ee_ui_uploader.time.sleep"),
+            ):
+                with self.assertRaises(RetryableUIError) as raised:
+                    uploader.submit_upload_dialog(item)
+
+            self.assertIn("remained open", str(raised.exception))
+
+    def test_closed_current_dialog_returns_pending_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            uploader = self.uploader(self.uploader_config(root))
+            item = UploadItem(
+                local_file=root / "inputs" / "a.tif",
+                asset_name="a",
+                asset_id="projects/example/assets/collection/a",
+            )
+            with (
+                mock.patch.object(
+                    uploader,
+                    "is_current_upload_dialog_open",
+                    return_value=True,
+                ),
+                mock.patch.object(uploader, "_click_current_ui_upload_button"),
+                mock.patch.object(uploader, "read_dialog_error_message", return_value=""),
+                mock.patch.object(
+                    uploader,
+                    "wait_for_current_upload_dialog_close",
+                ),
+                mock.patch("ee_ui_uploader.time.sleep"),
+            ):
+                outcome = uploader.submit_upload_dialog(item)
+
+            self.assertEqual(outcome.status, SUBMITTED_PENDING_VERIFICATION_STATUS)
+            self.assertEqual(outcome.task_name, "")
+
+    def test_dialog_close_wait_accepts_normal_closure_without_task_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            uploader = self.uploader(self.uploader_config(root))
+            item = UploadItem(
+                local_file=root / "inputs" / "a.tif",
+                asset_name="a",
+                asset_id="projects/example/assets/collection/a",
+            )
+            with (
+                mock.patch.object(
+                    uploader,
+                    "is_current_upload_dialog_open",
+                    side_effect=[True, False],
+                ),
+                mock.patch.object(uploader, "current_upload_progress_signature", return_value=""),
+                mock.patch.object(uploader, "read_dialog_error_message", return_value=""),
+                mock.patch("ee_ui_uploader.time.sleep"),
+            ):
+                uploader.wait_for_current_upload_dialog_close(
+                    item,
+                    idle_timeout_seconds=30,
+                )
+
+    def test_wait_for_task_name_raises_instead_of_returning_blank(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            uploader = self.uploader(self.uploader_config(root))
+            item = UploadItem(
+                local_file=root / "inputs" / "a.tif",
+                asset_name="a",
+                asset_id="projects/example/assets/collection/a",
+            )
+            with mock.patch.object(uploader, "collect_task_rows", return_value=[]):
+                with self.assertRaises(TimeoutException):
+                    uploader.wait_for_task_name(item, timeout_seconds=0)
+
+    def test_submit_with_retries_records_pending_verification_after_dialog_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "inputs" / "a.tif"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"1")
+            config = self.uploader_config(root)
+            uploader = self.uploader(config)
+            item = UploadItem(
+                local_file=path,
+                asset_name="a",
+                asset_id="projects/example/assets/collection/a",
+            )
+            with (
+                mock.patch.object(uploader, "ensure_assets_tab"),
+                mock.patch.object(uploader, "open_image_upload_dialog"),
+                mock.patch.object(uploader, "populate_upload_dialog"),
+                mock.patch.object(
+                    uploader,
+                    "submit_upload_dialog",
+                    return_value=mock.Mock(
+                        status=SUBMITTED_PENDING_VERIFICATION_STATUS,
+                        task_name="",
+                    ),
+                ),
+            ):
+                uploader.submit_with_retries(item)
+
+            rows = self.read_report_rows(config.artifacts.report_csv)
+            self.assertEqual(
+                rows[0]["final_status"],
+                SUBMITTED_PENDING_VERIFICATION_STATUS,
+            )
+            self.assertIn("awaiting", rows[0]["error_message"].lower())
 
     def test_open_earth_engine_continues_when_timeout_page_is_visible(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -500,6 +629,46 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             self.assertEqual(count, 1)
             self.assertEqual(rows[0]["final_status"], EE_VERIFIED_EXISTS_STATUS)
             self.assertEqual(rows[0]["source_utm_tiles"], '["UTM34M"]')
+
+    def test_wait_for_tracked_tasks_uses_ee_inventory_when_task_rows_do_not_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "inputs"
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PGC0_01.tif"
+            )
+            path.write_bytes(b"1")
+            config = self.uploader_config(root, ee_sync=True)
+            uploader = self.uploader(config)
+            asset_name = path.stem
+            asset_id = f"{config.destination_parent}/{asset_name}"
+            item = UploadItem(local_file=path, asset_name=asset_name, asset_id=asset_id, batch_number=1)
+            uploader.tracked_items[asset_id] = item
+            uploader.report.upsert(
+                uploader.make_report_row(
+                    item=item,
+                    submit_time="2026-01-02T00:00:00",
+                    detected_task_name="",
+                    final_status="SUBMITTED",
+                    error_message="Submitted in browser.",
+                )
+            )
+
+            def fake_sync_inventory() -> None:
+                uploader.ee_existing_asset_ids = {asset_id}
+
+            with mock.patch.object(uploader, "collect_task_rows", return_value=[]):
+                with mock.patch.object(uploader, "sync_earth_engine_inventory", side_effect=fake_sync_inventory):
+                    with mock.patch("ee_ui_uploader.time.sleep") as sleep:
+                        uploader.wait_for_all_tracked_tasks()
+
+            rows = self.read_report_rows(config.artifacts.report_csv)
+            self.assertEqual(rows[0]["final_status"], EE_VERIFIED_EXISTS_STATUS)
+            self.assertEqual(rows[0]["ee_asset_exists"], "yes")
+            self.assertEqual(rows[0]["verification_source"], "ee.data.listAssets")
+            sleep.assert_not_called()
 
 
 if __name__ == "__main__":

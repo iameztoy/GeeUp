@@ -90,7 +90,15 @@ Create or open a project before running workflow actions. SWOTFlow projects keep
 
 SWOTFlow opens on the **Home** tab. Use it for the project summary, selected-tile overview, workflow shortcuts, and GitHub link; use the processing tabs for the actual work.
 
-The **Automation** tab is for unattended tile-by-tile runs inside an open project. Select tiles, choose the date range, run `Run Preflight`, then start automation only after the preflight passes. Use `Copy Download Date Range` when you want automation to use the same temporal window as the manual Download tab; SWOTFlow warns when the two date ranges differ. Upload is optional because browser-based Earth Engine upload still needs an untouched Chrome/session.
+The **Automation** tab is for unattended tile-by-tile runs inside an open project. Use `Authenticate Earthdata` there, or authenticate from Download, before a run that needs new PO.DAAC downloads. Select tiles, choose the date range, run `Run Preflight`, then start automation only after the preflight passes. When `Include upload` is enabled, preflight first synchronizes the target Earth Engine collection automatically so tile classifications and cleanup decisions use current verified assets. Enable `Start automatically after successful preflight` when you want the run to begin without a second click. `Stop After Current Stage` records a resumable run. After reopening an unchanged project, authenticate Earthdata if downloads remain and click `Resume Run`; a new preflight is not required. Run a fresh preflight instead when dates, tiles, settings, project files, uploads, cleanup, or manual processing changed while Automation was stopped. Use `Copy Download Date Range` when you want automation to use the same temporal window as the manual Download tab; SWOTFlow warns when the two date ranges differ. Upload is optional because browser-based Earth Engine upload still needs an untouched Chrome/session.
+
+During execution, Automation reports an aggregate percentage based on completed or skipped tile-stage units, together with the current tile position and stage. This gives a stable overview for large queues while detailed file progress remains in the status message and stage logs.
+
+Use this restart rule:
+
+- **Stopped with `Stop After Current Stage`:** reopen the same project, authenticate Earthdata if needed, then click `Resume Run`.
+- **Complete update campaign:** keep the saved campaign for Statistics. Set the next date range, run a new preflight, then start a new Automation run.
+- **Power loss or unexpected shutdown:** reopen the same project and normally use `Resume Run`. If upload was active, wait for Earth Engine tasks to settle, run a fresh preflight so its automatic EE sync verifies submitted assets, then click `Start Automation`.
 
 ## Create Or Open A Project
 
@@ -163,6 +171,8 @@ The raw files go to `01_raw_downloads` by default. Download records are stored i
 
 For large searches, the status text may say `Searching CMR`. CMR is NASA's Common Metadata Repository, the metadata service used by PO.DAAC/Earthdata. Large tile/date searches can spend time listing metadata before the first download starts; SWOTFlow reports paged CMR progress such as total matching granules and metadata retrieved so the window does not look idle.
 
+For recurring tile updates, keep the same project open, select the already processed tiles, set the new date window, and run `Preview Search` before downloading. The latest preview becomes the expected remote set for the Statistics > Status Map `Update Coverage` mode.
+
 ### 2. Duplicate Removal
 
 Run Duplicate Removal when repeated raw product versions are present or when you want a conservative cleanup pass before extraction.
@@ -210,7 +220,9 @@ List clicks update the optional UTM filter immediately. `Validate Typed Tiles` o
 
 Dry run is recommended when you changed the origin folder, destination collection, upload scope, selected tiles, naming prefix/suffix, or metadata settings. If only retrying the same checked setup, you can run the real upload directly. The dry-run console prints only a short preview; the full per-file plan is saved in the project database and exported to `upload_report.csv`. The Upload tab progress bar reads indexed project status counts and summarizes planned, submitted, completed, failed, and filtered rows.
 
-If a real upload was submitted but the console was closed before SWOTFlow finished monitoring Earth Engine tasks, the project upload records may still show `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It lists the destination collection and marks matching local mosaics as `EE_VERIFIED_EXISTS`, which also updates Statistics and Cleanup eligibility.
+If a real upload was accepted by the browser but the task or final asset has not yet been verified, project records may show `SUBMITTED_PENDING_VERIFICATION` or `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It lists the destination collection and marks matching local mosaics as `EE_VERIFIED_EXISTS`, which also updates Statistics and Cleanup eligibility.
+
+For the current Earth Engine dialog, SWOTFlow waits for the browser-side upload dialog to close, records `SUBMITTED_PENDING_VERIFICATION`, and immediately prepares the next file. It does not switch to Tasks after every submission. Tasks are reconciled at batch boundaries and EE assets are checked afterwards. Visible percentage/progress changes keep the dialog wait alive; an open dialog with no detectable progress is recovered and retried. In Automation, file-level problems produce an upload-stage warning rather than stopping later tiles. EE sync verifies successful assets, while unverified mosaics remain on disk and are retryable in a later upload run.
 
 Before planning uploads, SWOTFlow can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the exported upload report is incomplete. The Upload tile list also excludes local files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS`; the status text shows which source tiles are already completed or verified.
 
@@ -231,11 +243,14 @@ The Statistics tab reads the SQLite project record and local folders. It summari
 - upload status, UTM-filtered rows, and EE-verified existing assets
 - uploaded/verified asset counts by status, source UTM tile, date, processing level, and output grid
 - upload QA by UTM tile, comparing downloaded, extracted, mosaicked, and uploaded/verified counts
+- update coverage by UTM tile, grouped into persistent collection/date-window campaigns
 - local mosaics that appear ready but are not yet uploaded or verified in Earth Engine
 - grouped upload failures and warning messages
 - observed SWOT cycles, passes, scenes, CRIDs, and product counters
 
 Use `Refresh Statistics` when you want an immediate update. SWOTFlow also refreshes statistics automatically after major workflow steps.
+
+In the Status Map subtab, use `Pipeline Status` for the cumulative project view and `Update Coverage` for a specific update window. Preview Search and Automation preflight save the expected remote granules as a persistent update campaign identified by collection and date range. Use the `Update window` selector to switch between the current campaign and earlier or later updates. Completed tiles remain green and visible instead of disappearing when their local intermediate files are cleaned. If a campaign is missing, run Preview Search or Automation preflight once for its dates and tiles, then refresh statistics.
 
 Each refresh writes a saved statistics snapshot under:
 

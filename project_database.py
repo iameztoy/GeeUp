@@ -31,6 +31,8 @@ DATASET_BY_FILENAME = {
     "upload_report.csv": "upload_report",
     "ee_asset_inventory.csv": "ee_asset_inventory",
     "workflow_manifest.csv": "workflow_manifest",
+    "update_campaigns.csv": "update_campaigns",
+    "update_expected.csv": "update_expected",
 }
 
 KEY_FIELDS_BY_DATASET = {
@@ -44,6 +46,8 @@ KEY_FIELDS_BY_DATASET = {
     "upload_report": ("asset_id",),
     "ee_asset_inventory": ("asset_id", "id", "name"),
     "workflow_manifest": ("stage", "record_id"),
+    "update_campaigns": ("campaign_id",),
+    "update_expected": ("record_id",),
 }
 
 STATUS_FIELDS_BY_DATASET = {
@@ -57,6 +61,8 @@ STATUS_FIELDS_BY_DATASET = {
     "upload_report": "final_status",
     "ee_asset_inventory": "asset_type",
     "workflow_manifest": "status",
+    "update_campaigns": "status",
+    "update_expected": "status",
 }
 
 
@@ -249,6 +255,19 @@ class ProjectDatabase:
             row = connection.execute(
                 "SELECT COUNT(*) AS count FROM records WHERE dataset = ?",
                 (dataset,),
+            ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def dataset_prefix_count(self, dataset: str, record_key_prefix: str) -> int:
+        """Count rows whose indexed record key begins with a stable prefix."""
+        with self.session() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM records
+                WHERE dataset = ? AND record_key LIKE ?
+                """,
+                (dataset, f"{record_key_prefix}%"),
             ).fetchone()
         return int(row["count"]) if row else 0
 

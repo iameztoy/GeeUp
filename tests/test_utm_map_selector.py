@@ -10,6 +10,7 @@ from utm_map_selector import (
     load_display_geometry,
     pipeline_status_from_qa_row,
     pipeline_status_key,
+    update_coverage_status_from_row,
 )
 
 
@@ -99,6 +100,86 @@ class UTMMapSelectorTests(unittest.TestCase):
 
             self.assertIn("First missing mosaic", widget.status_var.get())
             self.assertIn("SWOT_L2_HR_Raster_100m_UTM34M_example.tif", widget.status_var.get())
+        finally:
+            root.destroy()
+
+    def test_status_map_update_coverage_mode(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            widget = UTMPipelineStatusMap(root, self.geometry)
+            widget.set_update_coverage_statuses(
+                [
+                    (
+                        "UTM34M",
+                        2,
+                        2,
+                        1,
+                        1,
+                        1,
+                        "2026-06-01",
+                        "2026-06-01",
+                        "2026-05-20",
+                        "2026-05-20",
+                        "2026-05-20",
+                        "pending_extract",
+                    )
+                ]
+            )
+            widget.map_mode_var.set("Update Coverage")
+            widget.on_mode_changed()
+            widget.update_tile_status("UTM34M")
+
+            status = update_coverage_status_from_row(
+                (
+                    "UTM34M",
+                    2,
+                    2,
+                    1,
+                    1,
+                    1,
+                    "2026-06-01",
+                    "2026-06-01",
+                    "2026-05-20",
+                    "2026-05-20",
+                    "2026-05-20",
+                    "pending_extract",
+                )
+            )
+
+            self.assertEqual(status.label, "Needs extraction")
+            self.assertIn("Expected 2", widget.status_var.get())
+            self.assertIn("Needs extraction", widget.status_var.get())
+        finally:
+            root.destroy()
+
+    def test_status_map_switches_between_update_campaigns(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            widget = UTMPipelineStatusMap(root, self.geometry)
+            campaigns = [
+                ("new", "2026-06-01 to 2026-12-31", "2026-06-01", "2026-12-31", "", 1, 1),
+                ("old", "2026-01-01 to 2026-05-31", "2026-01-01", "2026-05-31", "", 1, 1),
+            ]
+            rows = {
+                "new": [("UTM35M", 1, 0, 0, 0, 0, "2026-06-02", "", "", "", "", "not_started")],
+                "old": [("UTM34M", 1, 1, 1, 1, 1, "2026-01-02", "2026-01-02", "2026-01-02", "2026-01-02", "2026-01-02", "complete")],
+            }
+            widget.set_update_campaigns(campaigns, rows, "new")
+            widget.map_mode_var.set("Update Coverage")
+            widget.on_mode_changed()
+
+            self.assertEqual(widget.active_update_campaign_id, "new")
+            self.assertIn("UTM35M", widget.update_coverage_statuses)
+
+            old_label = widget.update_campaign_label_by_id["old"]
+            widget.update_campaign_var.set(old_label)
+            widget.on_update_campaign_changed()
+
+            self.assertEqual(widget.active_update_campaign_id, "old")
+            self.assertIn("UTM34M", widget.update_coverage_statuses)
+            self.assertEqual(widget.update_coverage_statuses["UTM34M"].status, "complete")
         finally:
             root.destroy()
 

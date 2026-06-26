@@ -16,6 +16,7 @@ from urllib.parse import unquote, urlparse
 import yaml
 
 from project_database import read_project_rows, upsert_project_rows
+from project_updates import record_update_preview
 from swot_metadata import parse_swot_l2_hr_raster_metadata, swot_product_rank
 from workflow_manifest import upsert_workflow_manifest, workflow_manifest_path
 
@@ -1249,6 +1250,12 @@ def write_download_report(
         replace_dataset=True,
         export_csv=True,
         fieldnames=columns,
+    )
+    record_update_preview(
+        config,
+        preview,
+        source="download_preview",
+        campaign_tiles=config.utm_tiles,
     )
     return config.report_csv
 

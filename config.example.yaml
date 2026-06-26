@@ -253,6 +253,11 @@ upload:
 
   retry_attempts: 3
   retry_wait_seconds: 3.0
+  # Maximum time to wait for a matching Earth Engine task after clicking
+  # UPLOAD when no browser transfer progress is visible.
+  submission_confirmation_timeout_seconds: 30
+  # Hard ceiling for an actively progressing browser-side file transfer.
+  submission_transfer_timeout_minutes: 30
 
   # If true, stop the whole run after the first failed upload.
   fail_fast: false
@@ -331,3 +336,6 @@ automation:
   cleanup_enabled: true
   min_free_space_gb: 50
   continue_on_tile_failure: true
+  # Begin the workflow immediately when preflight succeeds. Leave false when
+  # you want to review the queue before starting.
+  auto_start_after_preflight: false

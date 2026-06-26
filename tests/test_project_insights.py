@@ -12,6 +12,7 @@ from project_insights import (
     plan_cleanup_candidates,
     write_project_insights_snapshot,
 )
+from project_updates import record_update_expected_rows
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -217,6 +218,193 @@ class ProjectInsightsTests(unittest.TestCase):
             )
             self.assertIn(extracted.with_suffix(".tfw"), [candidate.path for candidate in candidates])
             self.assertIn(mosaic.with_suffix(".tif.aux.xml"), [candidate.path for candidate in candidates])
+
+    def test_update_coverage_rows_follow_preview_to_uploaded_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            logs = root / "00_logs"
+            config["download"]["report_csv"] = str(logs / "download_preview.csv")
+            config["download"]["start_date"] = "2026-01-01"
+            config["download"]["end_date"] = "2026-06-30"
+            config["download"]["utm_tiles"] = ["UTM34M", "UTM35M"]
+
+            raw_34_a = swot_name(tile="UTM34M", scene="001F")
+            raw_34_b = swot_name(tile="UTM34M", scene="002F")
+            raw_35 = swot_name(tile="UTM35M", scene="003F")
+            tif_34_a = root / "02_extracted_geotiffs" / swot_name(tile="UTM34M", scene="001F", suffix=".tif")
+            tif_35 = root / "02_extracted_geotiffs" / swot_name(tile="UTM35M", scene="003F", suffix=".tif")
+            mosaic_34 = root / "03_mosaics" / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_"
+                "20260102T000000_20260102T010000_PGD0_01.tif"
+            )
+            mosaic_35 = root / "03_mosaics" / (
+                "SWOT_L2_HR_Raster_100m_UTM35M_N_x_x_x_034_266_MOSA_"
+                "20260102T000000_20260102T010000_PGD0_01.tif"
+            )
+            for path in (tif_34_a, tif_35, mosaic_34, mosaic_35):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"12345")
+
+            write_csv(
+                logs / "download_preview.csv",
+                [
+                    {
+                        "file_name": raw_34_a,
+                        "utm_tile": "UTM34M",
+                        "start_time": "2026-01-02T00:00:00Z",
+                        "selected_for_download": "yes",
+                        "downloaded": "yes",
+                        "status": "SKIPPED_MANIFEST",
+                    },
+                    {
+                        "file_name": raw_34_b,
+                        "utm_tile": "UTM34M",
+                        "start_time": "2026-01-02T02:00:00Z",
+                        "selected_for_download": "yes",
+                        "downloaded": "yes",
+                        "status": "SKIPPED_MANIFEST",
+                    },
+                    {
+                        "file_name": raw_35,
+                        "utm_tile": "UTM35M",
+                        "start_time": "2026-01-02T00:00:00Z",
+                        "selected_for_download": "yes",
+                        "downloaded": "yes",
+                        "status": "SKIPPED_MANIFEST",
+                    },
+                ],
+            )
+            record_update_expected_rows(
+                config,
+                [
+                    {
+                        "file_name": raw_34_a,
+                        "utm_tile": "UTM34M",
+                        "start_time": "2026-01-02T00:00:00Z",
+                        "downloaded": "yes",
+                    },
+                    {
+                        "file_name": raw_34_b,
+                        "utm_tile": "UTM34M",
+                        "start_time": "2026-01-02T02:00:00Z",
+                        "downloaded": "yes",
+                    },
+                    {
+                        "file_name": raw_35,
+                        "utm_tile": "UTM35M",
+                        "start_time": "2026-01-02T00:00:00Z",
+                        "downloaded": "yes",
+                    },
+                ],
+                source="test",
+                campaign_tiles=["UTM34M", "UTM35M"],
+            )
+            write_csv(
+                logs / "extract_manifest.csv",
+                [
+                    {
+                        "record_id": "34a|original",
+                        "status": "written",
+                        "input_nc": str(root / "01_raw_downloads" / raw_34_a),
+                        "output_tif": str(tif_34_a),
+                        "utm_zone": "34",
+                        "mgrs_band": "M",
+                        "date": "2026-01-02",
+                    },
+                    {
+                        "record_id": "35|original",
+                        "status": "written",
+                        "input_nc": str(root / "01_raw_downloads" / raw_35),
+                        "output_tif": str(tif_35),
+                        "utm_zone": "35",
+                        "mgrs_band": "M",
+                        "date": "2026-01-02",
+                    },
+                ],
+            )
+            write_csv(
+                logs / "mosaic_manifest.csv",
+                [
+                    {
+                        "status": "MOSAIC_CREATED",
+                        "output_file": str(mosaic_34),
+                        "input_files": json.dumps([str(tif_34_a)]),
+                        "start_date": "2026-01-02",
+                        "coordinate_system": "UTM34M",
+                    },
+                    {
+                        "status": "MOSAIC_CREATED",
+                        "output_file": str(mosaic_35),
+                        "input_files": json.dumps([str(tif_35)]),
+                        "start_date": "2026-01-02",
+                        "coordinate_system": "UTM35M",
+                    },
+                ],
+            )
+            write_csv(
+                logs / "upload_report.csv",
+                [
+                    {
+                        "local_file": str(mosaic_34),
+                        "asset_id": "projects/example/assets/mosaic34",
+                        "final_status": "COMPLETED",
+                        "output_grid": "UTM34M",
+                        "source_utm_tiles": json.dumps(["UTM34M"]),
+                    },
+                    {
+                        "local_file": str(mosaic_35),
+                        "asset_id": "projects/example/assets/mosaic35",
+                        "final_status": "EE_VERIFIED_EXISTS",
+                        "output_grid": "UTM35M",
+                        "source_utm_tiles": json.dumps(["UTM35M"]),
+                    },
+                ],
+            )
+
+            insights = collect_project_insights(config)
+            rows = {row[0]: row for row in insights.update_coverage_tile_rows}
+
+            self.assertEqual(rows["UTM34M"][1:6], (2, 2, 1, 1, 1))
+            self.assertEqual(rows["UTM34M"][-1], "pending_extract")
+            self.assertEqual(rows["UTM35M"][1:6], (1, 1, 1, 1, 1))
+            self.assertEqual(rows["UTM35M"][-1], "complete")
+            self.assertEqual(len(insights.update_campaigns), 1)
+            self.assertIn("UTM35M", rows)
+
+    def test_update_campaigns_keep_multiple_date_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            config["download"]["start_date"] = "2026-01-01"
+            config["download"]["end_date"] = "2026-05-31"
+            first = swot_name(tile="UTM34M", scene="001F")
+            record_update_expected_rows(
+                config,
+                [{"file_name": first, "utm_tile": "UTM34M", "start_time": "2026-01-02T00:00:00Z"}],
+                source="test",
+                campaign_tiles=["UTM34M"],
+            )
+            config["download"]["start_date"] = "2026-06-01"
+            config["download"]["end_date"] = "2026-12-31"
+            second = swot_name(tile="UTM35M", scene="002F").replace("20260102", "20260602")
+            record_update_expected_rows(
+                config,
+                [{"file_name": second, "utm_tile": "UTM35M", "start_time": "2026-06-02T00:00:00Z"}],
+                source="test",
+                campaign_tiles=["UTM35M"],
+            )
+
+            insights = collect_project_insights(config)
+
+            self.assertEqual(len(insights.update_campaigns), 2)
+            self.assertEqual(len(insights.update_coverage_campaign_rows), 2)
+            campaign_tiles = {
+                campaign_id: {row[0] for row in rows}
+                for campaign_id, rows in insights.update_coverage_campaign_rows.items()
+            }
+            self.assertIn({"UTM34M"}, campaign_tiles.values())
+            self.assertIn({"UTM35M"}, campaign_tiles.values())
 
     def test_ee_inventory_recovers_filtered_upload_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

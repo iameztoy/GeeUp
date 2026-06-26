@@ -10,6 +10,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from swot_download_tool import DownloadConfig
+from swotflow_automation import (
+    AutomationConfig,
+    AutomationRunState,
+    AutomationStageResult,
+    AutomationTilePlan,
+    write_run_state,
+)
 from swotflow_gui import LauncherApp
 from swotflow_project import create_project, load_project_tile_profiles
 from utm_map_selector import DisplayTile, UTMDisplayGeometry
@@ -154,10 +161,15 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Automation Settings", collect_label_texts(automation_tab))
             self.assertIn("Automation UTM Tiles", collect_label_texts(automation_tab))
             self.assertIn("Automation Queue And Results", collect_label_texts(automation_tab))
+            self.assertIn("Authenticate Earthdata", collect_button_texts(automation_tab))
             self.assertIn("Copy Download Date Range", collect_button_texts(automation_tab))
             self.assertIn("Run Preflight", collect_button_texts(automation_tab))
             self.assertIn("Start Automation", collect_button_texts(automation_tab))
             self.assertIn("Stop After Current Stage", collect_button_texts(automation_tab))
+            self.assertIn(
+                "Start automatically after successful preflight",
+                collect_label_texts(automation_tab),
+            )
             self.assertGreaterEqual(len(collect_widgets(automation_tab, ttk.Progressbar)), 1)
             self.assertGreaterEqual(len(collect_widgets(automation_tab, ttk.Treeview)), 1)
             self.assertIn("Collection", collect_label_texts(download_tab))
@@ -322,6 +334,144 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("authentication", app.download_status_var.get().lower())
         finally:
             root.destroy()
+
+    def test_automation_start_requires_earthdata_auth_for_pending_downloads(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            app.download_authenticated = False
+            app.automation_preflight_state = SimpleNamespace(
+                preflight_ok=True,
+                tile_plans=[SimpleNamespace(pending_downloads=2)],
+            )
+            with mock.patch("swotflow_gui.messagebox.showwarning") as warning:
+                app.start_automation()
+
+            warning.assert_called_once()
+            self.assertIn("Authenticate Earthdata", app.automation_status_var.get())
+            self.assertFalse(app.automation_running)
+        finally:
+            root.destroy()
+
+    def test_successful_preflight_can_start_automation_automatically(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            app.automation_auto_start_after_preflight_var.set(True)
+            state = AutomationRunState(
+                run_id="run",
+                run_dir=Path("run"),
+                config=AutomationConfig(
+                    project_root=Path("."),
+                    base_config={},
+                    utm_tiles=["UTM34M"],
+                    start_date="2026-01-01",
+                    end_date="2026-01-31",
+                ),
+                preflight_ok=True,
+            )
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="new", message="pending")
+            ]
+            with mock.patch.object(app, "start_automation") as start:
+                with mock.patch.object(app.root, "after", side_effect=lambda _delay, callback: callback()):
+                    with mock.patch("swotflow_gui.messagebox.showinfo") as info:
+                        app.finish_automation_preflight(state)
+
+            start.assert_called_once()
+            info.assert_not_called()
+            self.assertIn("Starting automation automatically", app.automation_status_var.get())
+        finally:
+            root.destroy()
+
+    def test_automation_progress_reports_percentage_and_tile_position(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = AutomationConfig(
+                project_root=Path("."),
+                base_config={},
+                utm_tiles=["UTM34M", "UTM35M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=False,
+            )
+            state = AutomationRunState(
+                run_id="run",
+                run_dir=Path("run"),
+                config=config,
+                preflight_ok=True,
+                stage_results=[
+                    AutomationStageResult(
+                        run_id="run",
+                        tile="UTM34M",
+                        stage="download",
+                        status="success",
+                    )
+                ],
+            )
+            app.initialize_automation_progress_tracker(state)
+            app.automation_running = True
+
+            app.update_automation_progress("UTM34M", "duplicates", "success", "done")
+
+            self.assertAlmostEqual(app.automation_progress_var.get(), 2 / 12 * 100)
+            self.assertIn("16.7%", app.automation_progress_text_var.get())
+            self.assertIn("2/12 stages", app.automation_progress_text_var.get())
+            self.assertIn("tile 1/2", app.automation_progress_text_var.get())
+        finally:
+            root.destroy()
+
+    def test_open_project_loads_latest_automation_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project_root = Path(temp) / "Project"
+            config_data = self.sample_config(project_root)
+            project = create_project(project_root, "Project", config_data)
+            run_config = AutomationConfig(
+                project_root=project_root,
+                base_config=config_data,
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                run_id="run",
+                run_dir=project_root / "00_logs" / "automation_runs" / "run",
+            )
+            state = AutomationRunState(
+                run_id="run",
+                run_dir=run_config.run_dir,
+                config=run_config,
+                preflight_ok=True,
+            )
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="new", message="pending", pending_downloads=1)
+            ]
+            state.stage_results = [
+                AutomationStageResult(
+                    run_id="run",
+                    tile="UTM34M",
+                    stage="download",
+                    status="success",
+                    message="ok",
+                )
+            ]
+            write_run_state(state)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                app = LauncherApp(root)
+                app.apply_project(project)
+
+                self.assertIsNotNone(app.automation_preflight_state)
+                assert app.automation_preflight_state is not None
+                self.assertEqual(app.automation_preflight_state.run_id, "run")
+                self.assertEqual(app.automation_selected_tiles_var.get(), "UTM34M")
+                self.assertGreater(len(app.automation_tree.get_children()), 0)
+                self.assertIn("Loaded automation run run", app.automation_status_var.get())
+            finally:
+                root.destroy()
 
     def test_open_utm_map_selector_passes_manifest_coverage(self) -> None:
         root = tk.Tk()

@@ -379,7 +379,7 @@ What to check:
 Symptoms:
 
 - the dialog closes but no matching task is detected
-- the report stays at `SUBMITTED` or `UNKNOWN_AFTER_CLICK`
+- the report stays at `SUBMITTED_PENDING_VERIFICATION`, `SUBMITTED`, or `UNKNOWN_AFTER_CLICK`
 
 What it usually means:
 
@@ -392,6 +392,21 @@ What to do:
 2. Compare the task text with the asset name and file name.
 3. Update the task row selector or matching logic in `ee_ui_uploader.py`.
 4. Check the saved HTML dump in the configured artifact folder. In project mode this is `<project_root>/00_logs/upload_artifacts/`.
+
+Current uploads wait for the dialog to close, not for a per-file Tasks-panel
+lookup. A progressing browser transfer may remain visible with a percentage;
+progress changes extend the wait. Once the dialog closes, the row becomes
+`SUBMITTED_PENDING_VERIFICATION` and the next file starts. Tasks are inspected
+at the batch boundary. If the dialog remains open without progress, SWOTFlow
+retries the file and closes the failed dialog before continuing. Run `Sync EE
+Assets`; if an unverified asset is absent, the next real upload or Automation
+preflight plans that mosaic again. The mosaic is not eligible for cleanup until
+Earth Engine verification succeeds.
+
+In Automation, one or more `ERROR` or `UNKNOWN_AFTER_CLICK` files produce an
+upload-stage warning rather than stopping the remaining tile queue. Review
+Statistics > Uploaded > QA > Upload Failures / Warnings and Ready Mosaics Not
+Uploaded/Verified to identify the exact files that need another attempt.
 
 ## Browser Session Ended During Upload
 
@@ -426,6 +441,74 @@ What to do:
 2. Watch the browser.
 3. Inspect the configured logs and artifact folders. In project mode these are `<project_root>/00_logs/` and `<project_root>/00_logs/upload_artifacts/`.
 4. Adjust selectors or naming rules based on the actual UI response.
+
+## Automation Stops Or Reports No Remaining Work
+
+Use `Stop After Current Stage` to stop safely between stages. The saved run keeps
+its completed stage records. After reopening the project:
+
+1. Open the same project.
+2. Authenticate Earthdata when the saved queue still has pending downloads.
+3. Use `Resume Run` when the project files, settings, dates, tiles, and records
+   have not changed. Do not run preflight first in this case.
+4. Run `Run Preflight`, then `Start Automation`, when uploads, cleanup, manual
+   processing, project paths, settings, dates, or tile selections changed while
+   Automation was stopped.
+
+`Stop After Current Stage` does not mean that the complete automation queue
+finished. It means only that the active download, extraction, mosaic, upload, or
+other stage finished before the run stopped. `Resume Run` skips stages already
+recorded as successful and continues with the first incomplete stage.
+
+When Automation has processed or skipped every required stage for every selected
+tile, the complete run is finished. Use a new preflight for another date window,
+new tiles, or another project update.
+
+### Automation Restart Scenarios
+
+**Stopped intentionally with `Stop After Current Stage`:**
+
+1. Reopen the same project.
+2. Authenticate Earthdata if pending downloads remain.
+3. Click `Resume Run`.
+
+The current stage was allowed to finish, and successful stages remain recorded.
+Do not run preflight first unless project inputs or settings changed.
+
+**The complete update campaign finished:**
+
+1. Review the saved campaign in Statistics > Status Map > `Update Coverage`.
+2. For the next update, set the new date range and selected tiles.
+3. Run `Run Preflight`.
+4. Click `Start Automation`, or enable automatic start after preflight.
+
+Do not use `Resume Run` for a completed queue. A new date window creates a
+separate persistent update campaign.
+
+**Power loss, system crash, or unexpected shutdown:**
+
+1. Reopen the same project.
+2. Authenticate Earthdata if pending downloads remain.
+3. Normally click `Resume Run`.
+
+The interrupted stage is retried, while successful stages, project manifests,
+SQLite records, and existing-file checks prevent unnecessary repeated work.
+
+If the interruption happened during upload, Earth Engine tasks may continue
+after SWOTFlow stops. Wait for those tasks to settle, then run a fresh
+preflight instead of immediately resuming. Upload-enabled preflight performs an
+automatic EE asset sync, verifies assets that reached the collection, and
+replans only missing uploads. Then click `Start Automation`.
+
+When `Include upload` is enabled, Automation preflight runs `Sync EE Assets`
+automatically before classifying tiles. If that sync fails, preflight is blocked;
+read `00_logs/automation_runs/<run_id>/preflight_ee_sync.log`, confirm Earth
+Engine Python authentication and the destination collection, then run preflight
+again.
+
+Enable `Start automatically after successful preflight` only when the queue
+should begin immediately. Leave it disabled when you want to inspect the
+preflight classifications and counts first.
 
 ## General Advice
 
