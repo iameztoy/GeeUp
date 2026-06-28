@@ -33,6 +33,7 @@ DATASET_BY_FILENAME = {
     "workflow_manifest.csv": "workflow_manifest",
     "update_campaigns.csv": "update_campaigns",
     "update_expected.csv": "update_expected",
+    "update_runs.csv": "update_runs",
 }
 
 KEY_FIELDS_BY_DATASET = {
@@ -48,6 +49,7 @@ KEY_FIELDS_BY_DATASET = {
     "workflow_manifest": ("stage", "record_id"),
     "update_campaigns": ("campaign_id",),
     "update_expected": ("record_id",),
+    "update_runs": ("run_id",),
 }
 
 STATUS_FIELDS_BY_DATASET = {
@@ -63,6 +65,7 @@ STATUS_FIELDS_BY_DATASET = {
     "workflow_manifest": "status",
     "update_campaigns": "status",
     "update_expected": "status",
+    "update_runs": "run_type",
 }
 
 

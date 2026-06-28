@@ -93,6 +93,9 @@ from swot_metadata import (
     DEFAULT_METADATA_EXTRA_PROPERTIES,
     ParsedMetadata,
     parse_swot_l2_hr_raster_metadata,
+    processing_level_from_filename,
+    processing_level_rank,
+    product_identity_key,
 )
 from project_database import (
     ProjectDatabase,
@@ -187,6 +190,10 @@ REPORT_COLUMNS = [
     "metadata_end_time",
     "metadata_properties",
     "metadata_status",
+    "product_identity",
+    "processing_level",
+    "best_processing_level",
+    "conflicting_asset_id",
 ]
 
 RESUME_SKIP_STATUSES = {
@@ -207,6 +214,9 @@ TERMINAL_STATUSES = {
     "SKIPPED_ALREADY_EXISTS",
     "PLANNED_DRY_RUN",
     "FILTERED_UTM_TILE",
+    "FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED",
+    "BLOCKED_PRODUCT_VERSION_CONFLICT",
+    "BLOCKED_DUPLICATE_PRODUCT_IDENTITY",
     "EE_VERIFIED_EXISTS",
 }
 
@@ -219,6 +229,11 @@ PRESERVE_ON_FILTER_STATUSES = RESUME_SKIP_STATUSES | {
     "FAILED",
     "ERROR",
     "UNKNOWN_AFTER_CLICK",
+}
+PRODUCT_IDENTITY_CONFLICT_STATUSES = {
+    "COMPLETED",
+    "SKIPPED_ALREADY_EXISTS",
+    "EE_VERIFIED_EXISTS",
 }
 
 UNKNOWN_AFTER_CLICK_STATUS = "UNKNOWN_AFTER_CLICK"
@@ -237,7 +252,13 @@ FILTER_STATUS_SELECTED_ALL = "selected_all"
 FILTER_STATUS_SELECTED_UTM = "selected_utm_match"
 FILTER_STATUS_FILTERED_UTM = "filtered_no_matching_utm"
 FILTER_STATUS_FILTERED_UNKNOWN = "filtered_no_utm_provenance"
+FILTER_STATUS_LOCAL_PRODUCT_SUPERSEDED = "filtered_local_product_version_superseded"
+FILTER_STATUS_PRODUCT_VERSION_CONFLICT = "blocked_product_version_conflict"
+FILTER_STATUS_DUPLICATE_PRODUCT_IDENTITY = "blocked_duplicate_product_identity"
 FILTERED_UTM_STATUS = "FILTERED_UTM_TILE"
+FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS = "FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED"
+BLOCKED_PRODUCT_VERSION_CONFLICT_STATUS = "BLOCKED_PRODUCT_VERSION_CONFLICT"
+BLOCKED_DUPLICATE_PRODUCT_IDENTITY_STATUS = "BLOCKED_DUPLICATE_PRODUCT_IDENTITY"
 EE_VERIFIED_EXISTS_STATUS = "EE_VERIFIED_EXISTS"
 UTM_TILE_RE = re.compile(r"^UTM(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])$")
 FATAL_BROWSER_SESSION_MESSAGE = (
@@ -444,6 +465,10 @@ class UploadItem:
     ee_asset_exists: bool = False
     ee_verified_at: str = ""
     verification_source: str = ""
+    product_identity: str = ""
+    processing_level: str = ""
+    best_processing_level: str = ""
+    conflicting_asset_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -1098,6 +1123,66 @@ class EarthEngineUIUploader:
             return 2
         return 0
 
+    def attach_product_identity_metadata(self, item: UploadItem) -> None:
+        """Attach HR Raster product identity/version metadata to one upload item."""
+        source = str(item.local_file or item.asset_name)
+        item.product_identity = product_identity_key(source)
+        item.processing_level = processing_level_from_filename(source) or "UNKNOWN"
+        item.best_processing_level = item.processing_level
+
+    def upload_item_product_rank(self, item: UploadItem) -> tuple[int, int, int, int, int, str]:
+        """Return a deterministic preference key for local same-identity candidates."""
+        return (*processing_level_rank(item.local_file), item.local_file.name.lower())
+
+    def existing_product_identity_index(self) -> Dict[str, Dict[str, str]]:
+        """Index already uploaded/verified assets by HR Raster product identity."""
+        index: Dict[str, Dict[str, str]] = {}
+        for row in self.report.rows.values():
+            status = str(row.get("final_status", "") or "").upper()
+            if status not in PRODUCT_IDENTITY_CONFLICT_STATUSES:
+                continue
+            asset_id = str(row.get("asset_id", "") or "").strip()
+            identity = (
+                str(row.get("product_identity", "") or "").strip()
+                or product_identity_key(row.get("local_file", ""))
+                or product_identity_key(asset_id)
+            )
+            if not identity:
+                continue
+            index.setdefault(
+                identity,
+                {
+                    "asset_id": asset_id,
+                    "processing_level": str(row.get("processing_level", "") or processing_level_from_filename(asset_id) or "UNKNOWN"),
+                    "source": "upload_report",
+                },
+            )
+        if self.ee_inventory_synced:
+            for asset_id in sorted(self.ee_existing_asset_ids):
+                identity = product_identity_key(asset_id)
+                if not identity:
+                    continue
+                index.setdefault(
+                    identity,
+                    {
+                        "asset_id": asset_id,
+                        "processing_level": processing_level_from_filename(asset_id) or "UNKNOWN",
+                        "source": "ee.data.listAssets",
+                    },
+                )
+        return index
+
+    def best_local_product_candidates(self, items: Sequence[UploadItem]) -> Dict[str, UploadItem]:
+        """Return the highest-ranked upload-selected local candidate per product identity."""
+        best: Dict[str, UploadItem] = {}
+        for item in items:
+            if not item.upload_selected or not item.product_identity:
+                continue
+            current = best.get(item.product_identity)
+            if current is None or self.upload_item_product_rank(item) > self.upload_item_product_rank(current):
+                best[item.product_identity] = item
+        return best
+
     def build_upload_plan(self) -> List[UploadItem]:
         """Scan the input folder and build the list of uploads."""
         self.sync_earth_engine_inventory()
@@ -1111,24 +1196,32 @@ class EarthEngineUIUploader:
             self.config.input_folder,
         )
 
-        planned: List[UploadItem] = []
-        report_rows: List[Dict[str, str]] = []
-        seen_asset_ids: Dict[str, Path] = {}
         source_tile_lookup = self.load_mosaic_source_tile_lookup()
-        filtered_count = 0
-        ee_verified_count = 0
-
+        items: List[UploadItem] = []
         for file_path in files:
             asset_name = self.build_asset_name(file_path.stem)
-            asset_id = f"{self.config.destination_parent}/{asset_name}"
             item = UploadItem(
                 local_file=file_path,
                 asset_name=asset_name,
-                asset_id=asset_id,
+                asset_id=f"{self.config.destination_parent}/{asset_name}",
             )
             self.apply_upload_filter_metadata(item, source_tile_lookup)
-            existing_status = self.report.get_status(asset_id)
-            if self.ee_inventory_synced and asset_id in self.ee_existing_asset_ids:
+            self.attach_product_identity_metadata(item)
+            items.append(item)
+
+        best_local_by_identity = self.best_local_product_candidates(items)
+        existing_identity_index = self.existing_product_identity_index()
+        planned: List[UploadItem] = []
+        report_rows: List[Dict[str, str]] = []
+        seen_asset_ids: Dict[str, Path] = {}
+        filtered_count = 0
+        ee_verified_count = 0
+        local_superseded_count = 0
+        product_conflict_count = 0
+
+        for item in items:
+            existing_status = self.report.get_status(item.asset_id)
+            if self.ee_inventory_synced and item.asset_id in self.ee_existing_asset_ids:
                 item.ee_asset_exists = True
                 item.ee_verified_at = now_iso()
                 item.verification_source = "ee.data.listAssets"
@@ -1142,19 +1235,19 @@ class EarthEngineUIUploader:
                         error_message="Asset exists in the target Earth Engine collection.",
                     )
                 )
-                self.resume_skipped_assets.append(asset_id)
-                self.logger.info("Earth Engine verified skip: %s", asset_id)
+                self.resume_skipped_assets.append(item.asset_id)
+                self.logger.info("Earth Engine verified skip: %s", item.asset_id)
                 continue
             if self.should_resume_skip_existing_status(existing_status):
-                self.resume_skipped_assets.append(asset_id)
-                self.logger.info("Resume skip: %s (%s)", asset_id, existing_status)
+                self.resume_skipped_assets.append(item.asset_id)
+                self.logger.info("Resume skip: %s (%s)", item.asset_id, existing_status)
                 continue
             if not item.upload_selected:
                 filtered_count += 1
                 if existing_status in PRESERVE_ON_FILTER_STATUSES:
                     self.logger.info(
                         "Preserving existing upload status for non-selected asset: %s (%s)",
-                        asset_id,
+                        item.asset_id,
                         existing_status,
                     )
                     continue
@@ -1168,15 +1261,55 @@ class EarthEngineUIUploader:
                     )
                 )
                 continue
-            if asset_id in seen_asset_ids:
-                previous = seen_asset_ids[asset_id]
+            best_local = best_local_by_identity.get(item.product_identity)
+            if best_local is not None and best_local is not item:
+                local_superseded_count += 1
+                item.upload_selected = False
+                item.upload_filter_status = FILTER_STATUS_LOCAL_PRODUCT_SUPERSEDED
+                item.best_processing_level = best_local.processing_level
+                report_rows.append(
+                    self.make_report_row(
+                        item=item,
+                        submit_time="",
+                        detected_task_name="",
+                        final_status=FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS,
+                        error_message=f"Superseded by higher-ranked local candidate: {best_local.local_file.name}",
+                    )
+                )
+                continue
+            existing_identity = existing_identity_index.get(item.product_identity)
+            if (
+                existing_identity
+                and existing_identity.get("asset_id")
+                and existing_identity["asset_id"] != item.asset_id
+            ):
+                product_conflict_count += 1
+                item.upload_selected = False
+                item.upload_filter_status = FILTER_STATUS_PRODUCT_VERSION_CONFLICT
+                item.conflicting_asset_id = existing_identity["asset_id"]
+                item.best_processing_level = existing_identity.get("processing_level", item.processing_level)
+                report_rows.append(
+                    self.make_report_row(
+                        item=item,
+                        submit_time="",
+                        detected_task_name="",
+                        final_status=BLOCKED_PRODUCT_VERSION_CONFLICT_STATUS,
+                        error_message=(
+                            "Same HR Raster product identity already exists in Earth Engine/report as "
+                            f"{item.conflicting_asset_id}. Replacement must be handled explicitly."
+                        ),
+                    )
+                )
+                continue
+            if item.asset_id in seen_asset_ids:
+                previous = seen_asset_ids[item.asset_id]
                 raise ValueError(
                     "Two files resolve to the same Earth Engine asset ID after naming rules were applied:\n"
                     f"  - {previous}\n"
-                    f"  - {file_path}\n"
-                    f"Duplicate asset ID: {asset_id}"
+                    f"  - {item.local_file}\n"
+                    f"Duplicate asset ID: {item.asset_id}"
                 )
-            seen_asset_ids[asset_id] = file_path
+            seen_asset_ids[item.asset_id] = item.local_file
             planned.append(item)
 
         for batch_index, batch in enumerate(chunked(planned, self.config.upload.batch_size), start=1):
@@ -1194,11 +1327,13 @@ class EarthEngineUIUploader:
                         )
                     )
         self.logger.info(
-            "Prepared %s upload(s). Resume skipped %s asset(s). Filtered %s file(s) by upload scope. EE-verified skipped %s asset(s).",
+            "Prepared %s upload(s). Resume skipped %s asset(s). Filtered %s file(s) by upload scope. EE-verified skipped %s asset(s). Local superseded %s. Product conflicts blocked %s.",
             len(planned),
             len(self.resume_skipped_assets),
             filtered_count,
             ee_verified_count,
+            local_superseded_count,
+            product_conflict_count,
         )
         if report_rows:
             self.logger.info(
