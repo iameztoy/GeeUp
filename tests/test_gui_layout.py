@@ -496,6 +496,49 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_automation_progress_counts_preflight_complete_tiles(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = AutomationConfig(
+                project_root=Path("."),
+                base_config={},
+                utm_tiles=["UTM34M", "UTM35M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=True,
+            )
+            state = AutomationRunState(
+                run_id="run",
+                run_dir=Path("run"),
+                config=config,
+                preflight_ok=True,
+            )
+            state.tile_plans = [
+                AutomationTilePlan(
+                    tile="UTM34M",
+                    classification="already complete",
+                    message="done",
+                    pending_downloads=0,
+                ),
+                AutomationTilePlan(
+                    tile="UTM35M",
+                    classification="needs update",
+                    message="pending",
+                    pending_downloads=1,
+                ),
+            ]
+
+            app.initialize_automation_progress_tracker(state)
+            app.set_automation_progress_text("loaded")
+
+            self.assertAlmostEqual(app.automation_progress_var.get(), 50.0)
+            self.assertIn("9/18 stages", app.automation_progress_text_var.get())
+            self.assertIn("1/2 tiles complete", app.automation_progress_text_var.get())
+        finally:
+            root.destroy()
+
     def test_open_project_loads_latest_automation_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project_root = Path(temp) / "Project"
