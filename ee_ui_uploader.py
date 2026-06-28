@@ -229,6 +229,9 @@ PRESERVE_ON_FILTER_STATUSES = RESUME_SKIP_STATUSES | {
     "FAILED",
     "ERROR",
     "UNKNOWN_AFTER_CLICK",
+    "FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED",
+    "BLOCKED_PRODUCT_VERSION_CONFLICT",
+    "BLOCKED_DUPLICATE_PRODUCT_IDENTITY",
 }
 PRODUCT_IDENTITY_CONFLICT_STATUSES = {
     "COMPLETED",
@@ -1285,15 +1288,25 @@ class EarthEngineUIUploader:
             ):
                 product_conflict_count += 1
                 item.upload_selected = False
-                item.upload_filter_status = FILTER_STATUS_PRODUCT_VERSION_CONFLICT
                 item.conflicting_asset_id = existing_identity["asset_id"]
                 item.best_processing_level = existing_identity.get("processing_level", item.processing_level)
+                same_level = item.best_processing_level == item.processing_level
+                item.upload_filter_status = (
+                    FILTER_STATUS_DUPLICATE_PRODUCT_IDENTITY
+                    if same_level
+                    else FILTER_STATUS_PRODUCT_VERSION_CONFLICT
+                )
+                final_status = (
+                    BLOCKED_DUPLICATE_PRODUCT_IDENTITY_STATUS
+                    if same_level
+                    else BLOCKED_PRODUCT_VERSION_CONFLICT_STATUS
+                )
                 report_rows.append(
                     self.make_report_row(
                         item=item,
                         submit_time="",
                         detected_task_name="",
-                        final_status=BLOCKED_PRODUCT_VERSION_CONFLICT_STATUS,
+                        final_status=final_status,
                         error_message=(
                             "Same HR Raster product identity already exists in Earth Engine/report as "
                             f"{item.conflicting_asset_id}. Replacement must be handled explicitly."
@@ -3612,6 +3625,10 @@ class EarthEngineUIUploader:
             "metadata_end_time": metadata.end_time,
             "metadata_properties": json.dumps(metadata.properties, sort_keys=True),
             "metadata_status": metadata.status,
+            "product_identity": item.product_identity,
+            "processing_level": item.processing_level,
+            "best_processing_level": item.best_processing_level,
+            "conflicting_asset_id": item.conflicting_asset_id,
         }
 
 

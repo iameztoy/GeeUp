@@ -407,6 +407,37 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertIn({"UTM34M"}, campaign_tiles.values())
             self.assertIn({"UTM35M"}, campaign_tiles.values())
 
+    def test_update_runs_classify_new_tiles_and_mixed_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            config["download"]["start_date"] = "2026-01-01"
+            config["download"]["end_date"] = "2026-05-31"
+            record_update_expected_rows(
+                config,
+                [{"file_name": swot_name(tile="UTM34M", scene="001F"), "utm_tile": "UTM34M"}],
+                source="first",
+                campaign_tiles=["UTM34M"],
+            )
+            config["download"]["start_date"] = "2026-01-01"
+            config["download"]["end_date"] = "2026-06-28"
+            record_update_expected_rows(
+                config,
+                [
+                    {"file_name": swot_name(tile="UTM34M", scene="001F"), "utm_tile": "UTM34M"},
+                    {"file_name": swot_name(tile="UTM35M", scene="002F"), "utm_tile": "UTM35M"},
+                ],
+                source="second",
+                campaign_tiles=["UTM34M", "UTM35M"],
+            )
+
+            insights = collect_project_insights(config)
+            run_types = {row["source"]: row["run_type"] for row in insights.update_runs}
+
+            self.assertEqual(run_types["first"], "new_tile_coverage")
+            self.assertEqual(run_types["second"], "mixed_update")
+            self.assertTrue((root / "00_logs" / "update_runs.csv").exists())
+
     def test_ee_inventory_recovers_filtered_upload_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -751,6 +782,91 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertEqual(loaded_insights.upload_status_counts, insights.upload_status_counts)
             self.assertEqual(loaded_insights.upload_qa_tile_rows, insights.upload_qa_tile_rows)
             self.assertEqual(loaded_insights.mosaic_lineage_rows, insights.mosaic_lineage_rows)
+
+    def test_product_version_audit_detects_project_level_upgrades(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            logs = root / "00_logs"
+            old_raw = root / "01_raw_downloads" / swot_name(crid="PID0", counter="01")
+            old_tif = root / "02_extracted_geotiffs" / swot_name(crid="PID0", counter="01", suffix=".tif")
+            old_mosaic = root / "03_mosaics" / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_"
+                "20260102T000000_20260102T010000_PID0_01.tif"
+            )
+            new_raw = swot_name(crid="PGD0", counter="01")
+            write_csv(
+                logs / "download_preview.csv",
+                [
+                    {
+                        "status": "MATCHED",
+                        "file_name": new_raw,
+                        "utm_tile": "UTM34M",
+                        "duplicate_filter_status": "selected_single_version",
+                    }
+                ],
+            )
+            write_csv(
+                logs / "download_manifest.csv",
+                [
+                    {
+                        "granule_id": "old",
+                        "file_name": old_raw.name,
+                        "local_path": str(old_raw),
+                        "utm_tile": "UTM34M",
+                        "downloaded": "yes",
+                        "last_status": "DOWNLOADED",
+                    }
+                ],
+            )
+            write_csv(
+                logs / "extract_manifest.csv",
+                [
+                    {
+                        "input_nc": str(old_raw),
+                        "output_tif": str(old_tif),
+                        "utm_zone": "34",
+                        "mgrs_band": "M",
+                        "status": "written",
+                    }
+                ],
+            )
+            write_csv(
+                logs / "mosaic_manifest.csv",
+                [
+                    {
+                        "status": "MOSAIC_CREATED",
+                        "output_file": str(old_mosaic),
+                        "input_files": json.dumps([str(old_tif)]),
+                        "output_exists": "yes",
+                    }
+                ],
+            )
+            write_csv(
+                logs / "upload_report.csv",
+                [
+                    {
+                        "local_file": str(old_mosaic),
+                        "asset_id": f"projects/example/assets/{old_mosaic.stem}",
+                        "final_status": "EE_VERIFIED_EXISTS",
+                    }
+                ],
+            )
+
+            insights = collect_project_insights(config)
+            issue_types = {row["issue_type"] for row in insights.product_version_audit_rows}
+            snapshot_path = write_project_insights_snapshot(config, insights)
+            loaded = load_project_insights_snapshot(config)
+
+            self.assertIn("higher_version_available_after_download", issue_types)
+            self.assertIn("mosaic_from_superseded_source", issue_types)
+            self.assertTrue((snapshot_path.parent / "project_statistics_product_version_audit.csv").exists())
+            self.assertIsNotNone(loaded)
+            loaded_insights, _generated_at = loaded
+            self.assertEqual(
+                loaded_insights.product_version_audit_rows,
+                insights.product_version_audit_rows[:1000],
+            )
 
 
 if __name__ == "__main__":

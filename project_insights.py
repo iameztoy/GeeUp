@@ -767,6 +767,11 @@ def product_audit_issue(
             "upload_conflict_replacement_needed",
             "Do not upload automatically. Design an explicit EE asset replacement workflow first.",
         )
+    if status == "BLOCKED_DUPLICATE_PRODUCT_IDENTITY":
+        return (
+            "upload_conflict_replacement_needed",
+            "Same HR Raster product identity already exists under a different asset name; review before upload.",
+        )
     if status == FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS:
         return (
             "local_candidate_superseded",
@@ -1804,7 +1809,10 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
                 submitted_tiles = ["UNKNOWN"]
             for tile in submitted_tiles:
                 submitted_tile_counter[tile] += 1
-        if status not in UPLOAD_CLEANUP_STATUSES and status != "FILTERED_UTM_TILE":
+        if status not in UPLOAD_CLEANUP_STATUSES and status not in {
+            "FILTERED_UTM_TILE",
+            FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS,
+        }:
             error_text = str(row.get("error_message", "") or "").strip()
             if not error_text:
                 error_text = str(row.get("upload_filter_status", "") or "").strip()

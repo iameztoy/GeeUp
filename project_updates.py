@@ -146,7 +146,8 @@ def classify_update_run(
 
 def update_run_id(source: str, timestamp: str, campaign_id: str) -> str:
     safe_time = timestamp.replace(":", "").replace("-", "").replace("+", "_")
-    digest = hashlib.sha256(f"{source}|{timestamp}|{campaign_id}".encode("utf-8")).hexdigest()[:8]
+    nonce = datetime.now().strftime("%f")
+    digest = hashlib.sha256(f"{source}|{timestamp}|{campaign_id}|{nonce}".encode("utf-8")).hexdigest()[:8]
     return f"{safe_time}_{digest}"
 
 

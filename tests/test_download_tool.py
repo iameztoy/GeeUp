@@ -21,6 +21,7 @@ from swot_download_tool import (
     run_download,
     write_download_report,
 )
+from swot_metadata import product_identity_key, processing_level_rank
 
 
 def granule_name(
@@ -194,6 +195,17 @@ class FakeGranuleQuery:
                     matches.append(granule)
                     break
         return matches
+
+
+class SwotMetadataIdentityTests(unittest.TestCase):
+    def test_product_identity_ignores_only_crid_and_product_counter(self) -> None:
+        older = granule_name(crid="PID0", counter="01")
+        newer = granule_name(crid="PGD0", counter="02")
+        different_scene = granule_name(scene="002F", crid="PGD0", counter="02")
+
+        self.assertEqual(product_identity_key(older), product_identity_key(newer))
+        self.assertNotEqual(product_identity_key(older), product_identity_key(different_scene))
+        self.assertGreater(processing_level_rank(newer), processing_level_rank(older))
 
 
 class FakePagedEarthaccess(FakeEarthaccess):
