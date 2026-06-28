@@ -265,6 +265,7 @@ class TilePipelineStatus:
     downloaded: int = 0
     extracted: int = 0
     mosaic_sources: int = 0
+    submitted: int = 0
     uploaded: int = 0
     missing_upload: int = 0
     status: str = "none"
@@ -338,14 +339,23 @@ def pipeline_status_from_qa_row(row: Sequence[object]) -> TilePipelineStatus:
         normalized = normalize_utm_tiles([token])[0]
     except ValueError:
         normalized = token.strip().upper()
-    downloaded, extracted, mosaic_sources, uploaded, missing_upload = [
-        int(value) for value in row[1:6]
-    ]
+    downloaded = int(row[1])
+    extracted = int(row[2])
+    mosaic_sources = int(row[3])
+    if len(row) >= 7:
+        submitted = int(row[4])
+        uploaded = int(row[5])
+        missing_upload = int(row[6])
+    else:
+        submitted = 0
+        uploaded = int(row[4])
+        missing_upload = int(row[5])
     return TilePipelineStatus(
         token=normalized,
         downloaded=downloaded,
         extracted=extracted,
         mosaic_sources=mosaic_sources,
+        submitted=submitted,
         uploaded=uploaded,
         missing_upload=missing_upload,
         status=pipeline_status_key(
@@ -826,7 +836,8 @@ class UTMPipelineStatusMap(ttk.Frame):
         self.status_var.set(
             f"{token}: {status.label}. "
             f"Downloaded {status.downloaded}; extracted {status.extracted}; "
-            f"mosaic sources {status.mosaic_sources}; uploaded/verified {status.uploaded}; "
+            f"mosaic sources {status.mosaic_sources}; sent to upload {status.submitted}; "
+            f"uploaded/verified {status.uploaded}; "
             f"missing upload {status.missing_upload}."
         )
         missing_rows = self.missing_upload_rows_by_tile.get(token, [])

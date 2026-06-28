@@ -12,6 +12,7 @@ from swotflow_automation import (
     AutomationTilePlan,
     PROJECT_ROOT,
     build_tile_config_dict,
+    cleanup_stage,
     execute_download_result,
     execute_command_result,
     load_latest_automation_run_state,
@@ -20,6 +21,9 @@ from swotflow_automation import (
     write_run_state,
     write_tile_config,
 )
+from swot_download_tool import DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS
+from project_updates import record_update_expected_rows
+from power_management import active_hours_leave_overnight_unprotected, hour_inside_active_hours
 
 
 def base_config(root: Path) -> dict:
@@ -117,6 +121,10 @@ class AutomationTests(unittest.TestCase):
                 tile_config["mosaic"]["manifest_csv"],
                 config["mosaic"]["manifest_csv"],
             )
+            self.assertEqual(
+                tile_config["download"]["search_request_timeout_seconds"],
+                DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS,
+            )
             self.assertIn("automation_runs", tile_config["download"]["report_csv"])
 
     def test_preflight_uses_manifest_and_project_counts_to_classify_tiles(self) -> None:
@@ -154,7 +162,7 @@ class AutomationTests(unittest.TestCase):
             )
             with mock.patch(
                 "swotflow_automation.tile_counts_from_insights",
-                return_value={"UTM34M": (10, 10, 4, 4, 0)},
+                return_value={"UTM34M": (10, 10, 4, 0, 4, 0)},
             ):
                 state = preflight_automation(automation_config, preview_builder=preview_builder)
 
@@ -168,6 +176,115 @@ class AutomationTests(unittest.TestCase):
             self.assertEqual(pending["UTM35M"], 1)
             self.assertEqual(estimated_mosaics["UTM34M"], 1)
             self.assertEqual(estimated_mosaics["UTM35M"], 1)
+
+    def test_preflight_includes_windows_reboot_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            automation_config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                min_free_space_gb=0,
+            )
+            preview_builder = mock.Mock(
+                return_value=SimpleNamespace(
+                    granules=[],
+                    selected_granules=[],
+                    excluded_granules=[],
+                )
+            )
+
+            with mock.patch(
+                "swotflow_automation.windows_automation_reboot_warnings",
+                return_value=["Windows Update reports a pending reboot."],
+            ):
+                state = preflight_automation(automation_config, preview_builder=preview_builder)
+
+            self.assertTrue(state.preflight_ok)
+            self.assertIn("Windows Update reports a pending reboot.", state.warnings)
+
+    def test_preflight_reuses_cached_update_expected_rows_without_cmr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = base_config(root)
+            tile = "UTM34M"
+            granule = fake_granule(tile)
+            record_update_expected_rows(
+                config,
+                [
+                    {
+                        "file_name": granule.file_name,
+                        "granule_id": granule.identity,
+                        "utm_tile": tile,
+                        "start_time": "2026-01-02T00:00:00",
+                        "end_time": "2026-01-02T01:00:00",
+                        "size_mb": "",
+                        "selected_for_download": "yes",
+                        "status": "MATCHED",
+                    }
+                ],
+                source="test",
+                campaign_tiles=[tile],
+            )
+            automation_config = AutomationConfig(
+                project_root=root,
+                base_config=config,
+                utm_tiles=[tile],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                min_free_space_gb=0,
+            )
+            preview_builder = mock.Mock(side_effect=AssertionError("CMR should not be queried"))
+
+            with mock.patch(
+                "swotflow_automation.windows_automation_reboot_warnings",
+                return_value=[],
+            ):
+                state = preflight_automation(automation_config, preview_builder=preview_builder)
+
+            preview_builder.assert_not_called()
+            self.assertTrue(state.preflight_ok)
+            self.assertEqual(state.tile_plans[0].matched_granules, 1)
+            self.assertEqual(state.tile_plans[0].pending_downloads, 1)
+            self.assertIn("cached expected granules", state.tile_plans[0].message)
+
+    def test_retryable_cmr_preflight_failure_warns_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            automation_config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                min_free_space_gb=0,
+            )
+
+            def preview_builder(_download_config):
+                raise TimeoutError(
+                    "CMR request failed or timed out after 60 seconds: "
+                    "Read timed out."
+                )
+
+            with mock.patch(
+                "swotflow_automation.windows_automation_reboot_warnings",
+                return_value=[],
+            ):
+                state = preflight_automation(automation_config, preview_builder=preview_builder)
+
+            self.assertTrue(state.preflight_ok)
+            self.assertEqual(state.errors, [])
+            self.assertIn("CMR search timed out", state.warnings[0])
+            self.assertEqual(state.tile_plans[0].classification, "cmr retry later")
+
+    def test_active_hours_helpers_detect_overnight_risk(self) -> None:
+        self.assertTrue(hour_inside_active_hours(10, 7, 20))
+        self.assertFalse(hour_inside_active_hours(22, 7, 20))
+        self.assertTrue(hour_inside_active_hours(2, 20, 7))
+        self.assertTrue(active_hours_leave_overnight_unprotected(7, 20))
+        self.assertFalse(active_hours_leave_overnight_unprotected(20, 7))
 
     def test_upload_enabled_preflight_syncs_ee_before_classification(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -291,13 +408,13 @@ class AutomationTests(unittest.TestCase):
             cleaned = [row.stage for row in complete_rows if row.status == "success"]
             executed = [row.stage for row in result.stage_results if row.tile == "UTM35M"]
             self.assertTrue(skipped)
-            self.assertEqual(cleaned, ["raw_cleanup", "extracted_cleanup"])
+            self.assertEqual(cleaned, [])
             self.assertEqual(
                 executed,
                 ["download", "duplicates", "extract", "raw_cleanup", "mosaic", "extracted_cleanup"],
             )
 
-    def test_run_automation_cleans_complete_uploaded_tile_mosaics(self) -> None:
+    def test_run_automation_does_not_rerun_cleanup_for_complete_uploaded_tiles(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = AutomationConfig(
@@ -327,17 +444,218 @@ class AutomationTests(unittest.TestCase):
 
             with mock.patch("swotflow_automation.execute_download_result") as download:
                 with mock.patch("swotflow_automation.execute_command_result") as command:
-                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result) as cleanup:
                         result = run_automation(config, preflight_state=state)
 
             download.assert_not_called()
             command.assert_not_called()
+            cleanup.assert_not_called()
             cleaned = [
                 row.stage
                 for row in result.stage_results
                 if row.tile == "UTM34M" and row.status == "success"
             ]
-            self.assertEqual(cleaned, ["raw_cleanup", "extracted_cleanup", "mosaic_cleanup"])
+            skipped = [
+                row.stage
+                for row in result.stage_results
+                if row.tile == "UTM34M" and row.status == "skipped"
+            ]
+            self.assertEqual(cleaned, [])
+            self.assertIn("mosaic_cleanup", skipped)
+
+    def test_retryable_cmr_download_failure_continues_even_when_fail_fast(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M", "UTM35M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                min_free_space_gb=0,
+                continue_on_tile_failure=False,
+            )
+            run_dir = root / "00_logs" / "automation_runs" / "run"
+            state = AutomationRunState(run_id="run", run_dir=run_dir, config=config, preflight_ok=True)
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="needs update", message="new", pending_downloads=1),
+                AutomationTilePlan(tile="UTM35M", classification="needs update", message="new", pending_downloads=1),
+            ]
+
+            def download_result(state_arg, tile, tile_config_path, **_kwargs):
+                status = "failed" if tile == "UTM34M" else "success"
+                message = (
+                    "Download failed: CMR search failed for selected UTM tile(s). "
+                    "CMR request failed or timed out after 60 seconds."
+                    if tile == "UTM34M"
+                    else "download ok"
+                )
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage="download",
+                    status=status,
+                    message=message,
+                )
+
+            def command_result(state_arg, tile, stage, tile_config_path, gdal_python, **_kwargs):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="ok",
+                )
+
+            def cleanup_result(state_arg, tile_config, tile, stage):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="cleanup ok",
+                )
+
+            with mock.patch("swotflow_automation.execute_download_result", side_effect=download_result):
+                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+                        result = run_automation(config, preflight_state=state)
+
+            self.assertIn(
+                ("UTM34M", "download", "failed"),
+                [(row.tile, row.stage, row.status) for row in result.stage_results],
+            )
+            self.assertIn(
+                ("UTM35M", "download", "success"),
+                [(row.tile, row.stage, row.status) for row in result.stage_results],
+            )
+
+    def test_run_automation_uses_keep_awake_guard_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                min_free_space_gb=0,
+                prevent_system_sleep=True,
+            )
+            run_dir = root / "00_logs" / "automation_runs" / "run"
+            state = AutomationRunState(run_id="run", run_dir=run_dir, config=config, preflight_ok=True)
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="already complete", message="done"),
+            ]
+
+            with mock.patch("swotflow_automation.keep_system_awake") as keep_awake:
+                keep_awake.return_value.__enter__.return_value = None
+                keep_awake.return_value.__exit__.return_value = None
+                run_automation(config, preflight_state=state)
+
+            keep_awake.assert_called_once_with(enabled=True, keep_display_awake=False)
+
+    def test_retryable_cmr_download_failure_is_retried_after_main_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M", "UTM35M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                min_free_space_gb=0,
+                deferred_download_retry_passes=1,
+            )
+            run_dir = root / "00_logs" / "automation_runs" / "run"
+            state = AutomationRunState(run_id="run", run_dir=run_dir, config=config, preflight_ok=True)
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="needs update", message="new", pending_downloads=1),
+                AutomationTilePlan(tile="UTM35M", classification="needs update", message="new", pending_downloads=1),
+            ]
+            attempts: dict[str, int] = {}
+
+            def download_result(state_arg, tile, tile_config_path, **_kwargs):
+                attempts[tile] = attempts.get(tile, 0) + 1
+                failed_first_try = tile == "UTM34M" and attempts[tile] == 1
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage="download",
+                    status="failed" if failed_first_try else "success",
+                    message=(
+                        "Download failed: CMR search failed for selected UTM tile(s). "
+                        "CMR request failed or timed out after 60 seconds."
+                        if failed_first_try
+                        else "download ok"
+                    ),
+                )
+
+            def command_result(state_arg, tile, stage, tile_config_path, gdal_python, **_kwargs):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="ok",
+                )
+
+            def cleanup_result(state_arg, tile_config, tile, stage):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="cleanup ok",
+                )
+
+            with mock.patch("swotflow_automation.execute_download_result", side_effect=download_result):
+                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+                        result = run_automation(config, preflight_state=state)
+
+            tile_stage_statuses = [
+                (row.tile, row.stage, row.status)
+                for row in result.stage_results
+                if row.stage == "download"
+            ]
+            self.assertEqual(attempts["UTM34M"], 2)
+            self.assertEqual(attempts["UTM35M"], 1)
+            self.assertEqual(
+                tile_stage_statuses,
+                [
+                    ("UTM34M", "download", "failed"),
+                    ("UTM35M", "download", "success"),
+                    ("UTM34M", "download", "success"),
+                ],
+            )
+
+    def test_mosaic_cleanup_sweep_removes_verified_candidates_from_previous_tiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            old_tile_mosaic = root / "03_mosaics" / "SWOT_L2_HR_Raster_100m_UTM29Q_MOSA.tif"
+            current_tile_raw = root / "01_raw_downloads" / "SWOT_L2_HR_Raster_100m_UTM30P.nc"
+            old_tile_mosaic.parent.mkdir(parents=True)
+            current_tile_raw.parent.mkdir(parents=True)
+            old_tile_mosaic.write_bytes(b"mosaic")
+            current_tile_raw.write_bytes(b"raw")
+
+            candidates = [
+                SimpleNamespace(stage="mosaic", path=old_tile_mosaic, size_bytes=6),
+                SimpleNamespace(stage="raw", path=current_tile_raw, size_bytes=3),
+            ]
+
+            def fake_delete(selected):
+                selected = list(selected)
+                return len(selected), sum(item.size_bytes for item in selected), []
+
+            with mock.patch("swotflow_automation.plan_cleanup_candidates", return_value=candidates):
+                with mock.patch("swotflow_automation.delete_cleanup_candidates", side_effect=fake_delete):
+                    deleted, bytes_deleted, errors = cleanup_stage({}, "UTM30P", "mosaic")
+
+            self.assertEqual(deleted, 1)
+            self.assertEqual(bytes_deleted, 6)
+            self.assertEqual(errors, [])
 
     def test_execute_download_result_runs_in_process_and_forwards_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

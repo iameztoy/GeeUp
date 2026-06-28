@@ -139,6 +139,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "retry_wait_seconds": 3.0,
         "submission_confirmation_timeout_seconds": 30,
         "submission_transfer_timeout_minutes": 30,
+        "completion_mode": "wait_for_ee",
         "fail_fast": False,
     },
     "metadata": {
@@ -226,6 +227,12 @@ PLANNED_UPLOAD_STATUS = "PLANNED_UPLOAD"
 UPLOAD_SCOPE_ALL = "all"
 UPLOAD_SCOPE_SELECTED_UTM = "selected_utm"
 VALID_UPLOAD_SCOPES = {UPLOAD_SCOPE_ALL, UPLOAD_SCOPE_SELECTED_UTM}
+UPLOAD_COMPLETION_WAIT_FOR_EE = "wait_for_ee"
+UPLOAD_COMPLETION_SUBMIT_AND_CONTINUE = "submit_and_continue"
+VALID_UPLOAD_COMPLETION_MODES = {
+    UPLOAD_COMPLETION_WAIT_FOR_EE,
+    UPLOAD_COMPLETION_SUBMIT_AND_CONTINUE,
+}
 FILTER_STATUS_SELECTED_ALL = "selected_all"
 FILTER_STATUS_SELECTED_UTM = "selected_utm_match"
 FILTER_STATUS_FILTERED_UTM = "filtered_no_matching_utm"
@@ -236,6 +243,12 @@ UTM_TILE_RE = re.compile(r"^UTM(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])$")
 FATAL_BROWSER_SESSION_MESSAGE = (
     "Browser/WebDriver session ended. Stop the run and restart Chrome before continuing."
 )
+
+
+def is_asset_already_exists_message(text: str) -> bool:
+    """Return True for Earth Engine messages that mean the destination asset exists."""
+    lower = str(text or "").lower()
+    return "already exists" in lower or "cannot overwrite asset" in lower
 
 
 class AlreadyExistsError(Exception):
@@ -372,6 +385,7 @@ class UploadConfig:
     retry_wait_seconds: float = 3.0
     submission_confirmation_timeout_seconds: int = 30
     submission_transfer_timeout_minutes: int = 30
+    completion_mode: str = UPLOAD_COMPLETION_WAIT_FOR_EE
     fail_fast: bool = False
 
 
@@ -712,6 +726,11 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
     upload_scope = str(upload_data.get("scope", UPLOAD_SCOPE_ALL)).strip().lower()
     if upload_scope not in VALID_UPLOAD_SCOPES:
         upload_scope = UPLOAD_SCOPE_ALL
+    completion_mode = str(
+        upload_data.get("completion_mode", UPLOAD_COMPLETION_WAIT_FOR_EE)
+    ).strip().lower()
+    if completion_mode not in VALID_UPLOAD_COMPLETION_MODES:
+        completion_mode = UPLOAD_COMPLETION_WAIT_FOR_EE
 
     config = AppConfig(
         earth_engine_url=str(data.get("earth_engine_url", DEFAULT_CONFIG["earth_engine_url"])),
@@ -757,6 +776,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
                 1,
                 int(upload_data.get("submission_transfer_timeout_minutes", 30)),
             ),
+            completion_mode=completion_mode,
             fail_fast=bool(upload_data.get("fail_fast", False)),
         ),
         metadata=MetadataConfig(
@@ -813,6 +833,10 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError(f"upload.scope must be one of: {', '.join(sorted(VALID_UPLOAD_SCOPES))}.")
     if config.upload.scope == UPLOAD_SCOPE_SELECTED_UTM and not config.upload.utm_tiles:
         raise ValueError("upload.utm_tiles must contain at least one tile when upload.scope is selected_utm.")
+    if config.upload.completion_mode not in VALID_UPLOAD_COMPLETION_MODES:
+        raise ValueError(
+            f"upload.completion_mode must be one of: {', '.join(sorted(VALID_UPLOAD_COMPLETION_MODES))}."
+        )
     if config.chrome.connection_mode not in {"attach", "webdriver"}:
         raise ValueError("chrome.connection_mode must be either 'attach' or 'webdriver'.")
     if config.chrome.remote_debugging_port < 1:
@@ -1039,7 +1063,10 @@ class EarthEngineUIUploader:
             self.open_earth_engine()
             self.ensure_logged_in()
             self.process_batches(planned_items)
-            self.wait_for_all_tracked_tasks()
+            if self.config.upload.completion_mode == UPLOAD_COMPLETION_WAIT_FOR_EE:
+                self.wait_for_all_tracked_tasks()
+            else:
+                self.reconcile_submit_and_continue_uploads()
         except FatalBrowserSessionError as exc:
             self.logger.error("%s", exc)
             return 1
@@ -1748,7 +1775,56 @@ class EarthEngineUIUploader:
                 self.submit_with_retries(item)
                 if self.config.upload.fail_fast and self.report.get_status(item.asset_id) in {"FAILED", "ERROR"}:
                     raise RuntimeError(f"Fail-fast stopping after a failure on {item.asset_id}")
-            self.wait_for_batch_gate(batch)
+            if self.config.upload.completion_mode == UPLOAD_COMPLETION_WAIT_FOR_EE:
+                self.wait_for_batch_gate(batch)
+            else:
+                self.reconcile_batch_without_waiting(batch)
+
+    def reconcile_batch_without_waiting(self, batch: Sequence[UploadItem]) -> None:
+        """Update visible task statuses after a batch without waiting for EE completion."""
+        try:
+            rows = self.collect_task_rows()
+        except Exception as exc:  # noqa: BLE001 - reconciliation is best-effort in throughput mode.
+            self.logger.warning("Could not read EE Tasks after batch submission: %s", exc)
+            return
+        self.update_report_from_tasks(batch, rows)
+        active = [
+            item.asset_id
+            for item in batch
+            if self.report.get_status(item.asset_id) in ACTIVE_STATUSES
+            or self.report.get_status(item.asset_id) == SUBMITTED_PENDING_VERIFICATION_STATUS
+        ]
+        self.logger.info(
+            "Submit-and-continue mode: %s batch upload(s) remain pending verification; continuing.",
+            len(active),
+        )
+
+    def reconcile_submit_and_continue_uploads(self) -> None:
+        """Run one final non-blocking task/inventory reconciliation for throughput uploads."""
+        try:
+            rows = self.collect_task_rows()
+            self.update_report_from_tasks(self.tracked_items.values(), rows)
+        except Exception as exc:  # noqa: BLE001 - final inventory sync is the important fallback.
+            self.logger.warning("Could not read EE Tasks during final non-blocking reconciliation: %s", exc)
+
+        pending = {
+            asset_id
+            for asset_id in self.tracked_items
+            if self.report.get_status(asset_id) in ACTIVE_STATUSES
+            or self.report.get_status(asset_id) == SUBMITTED_PENDING_VERIFICATION_STATUS
+        }
+        verified = self.verify_tracked_assets_with_inventory(pending)
+        pending_after = {
+            asset_id
+            for asset_id in self.tracked_items
+            if self.report.get_status(asset_id) in ACTIVE_STATUSES
+            or self.report.get_status(asset_id) == SUBMITTED_PENDING_VERIFICATION_STATUS
+        }
+        self.logger.info(
+            "Submit-and-continue mode: verified %s pending upload(s) with EE inventory; %s remain pending verification.",
+            verified,
+            len(pending_after),
+        )
 
     def submit_with_retries(self, item: UploadItem) -> None:
         """Submit one upload with retry handling for transient UI failures."""
@@ -1987,7 +2063,7 @@ class EarthEngineUIUploader:
 
             error_message = self.read_dialog_error_message()
             if error_message:
-                if "already exists" in error_message.lower():
+                if is_asset_already_exists_message(error_message):
                     raise AlreadyExistsError(error_message)
                 raise RetryableUIError(error_message)
 
@@ -1999,7 +2075,7 @@ class EarthEngineUIUploader:
 
         error_message = self.read_dialog_error_message()
         if error_message:
-            if "already exists" in error_message.lower():
+            if is_asset_already_exists_message(error_message):
                 raise AlreadyExistsError(error_message)
             raise RetryableUIError(error_message)
 
@@ -2009,7 +2085,7 @@ class EarthEngineUIUploader:
         except TimeoutException as exc:
             error_message = self.read_dialog_error_message()
             if error_message:
-                if "already exists" in error_message.lower():
+                if is_asset_already_exists_message(error_message):
                     raise AlreadyExistsError(error_message) from exc
                 raise RetryableUIError(error_message) from exc
             raise UnknownAfterClickError(
@@ -2077,7 +2153,7 @@ class EarthEngineUIUploader:
         while self.is_current_upload_dialog_open():
             error_message = self.read_dialog_error_message()
             if error_message:
-                if "already exists" in error_message.lower():
+                if is_asset_already_exists_message(error_message):
                     raise AlreadyExistsError(error_message)
                 raise RetryableUIError(error_message)
 
@@ -2981,7 +3057,7 @@ class EarthEngineUIUploader:
     def parse_task_row(self, text: str) -> TaskRow:
         """Normalize one task row into a status bucket."""
         lower = text.lower()
-        if "already exists" in lower:
+        if is_asset_already_exists_message(lower):
             status = "SKIPPED_ALREADY_EXISTS"
         elif any(keyword in lower for keyword in ee_selectors.FAILURE_TASK_KEYWORDS):
             status = "FAILED"

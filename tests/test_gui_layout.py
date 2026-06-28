@@ -161,6 +161,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Automation Settings", collect_label_texts(automation_tab))
             self.assertIn("Automation UTM Tiles", collect_label_texts(automation_tab))
             self.assertIn("Automation Queue And Results", collect_label_texts(automation_tab))
+            self.assertIn("Upload completion mode", collect_label_texts(automation_tab))
             self.assertIn("Authenticate Earthdata", collect_button_texts(automation_tab))
             self.assertIn("Copy Download Date Range", collect_button_texts(automation_tab))
             self.assertIn("Run Preflight", collect_button_texts(automation_tab))
@@ -168,6 +169,10 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Stop After Current Stage", collect_button_texts(automation_tab))
             self.assertIn(
                 "Start automatically after successful preflight",
+                collect_label_texts(automation_tab),
+            )
+            self.assertIn(
+                "Prevent computer sleep while automation runs",
                 collect_label_texts(automation_tab),
             )
             self.assertGreaterEqual(len(collect_widgets(automation_tab, ttk.Progressbar)), 1)
@@ -386,6 +391,39 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_auto_start_still_runs_with_windows_reboot_warning(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            app.automation_auto_start_after_preflight_var.set(True)
+            state = AutomationRunState(
+                run_id="run",
+                run_dir=Path("run"),
+                config=AutomationConfig(
+                    project_root=Path("."),
+                    base_config={},
+                    utm_tiles=["UTM34M"],
+                    start_date="2026-01-01",
+                    end_date="2026-01-31",
+                ),
+                preflight_ok=True,
+                warnings=["Windows Update reports a pending reboot."],
+            )
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="new", message="pending")
+            ]
+            with mock.patch.object(app, "start_automation") as start:
+                with mock.patch.object(app.root, "after", side_effect=lambda _delay, callback: callback()):
+                    with mock.patch("swotflow_gui.messagebox.showinfo") as info:
+                        app.finish_automation_preflight(state)
+
+            start.assert_called_once()
+            info.assert_not_called()
+            self.assertIn("reboot/update warning", app.automation_status_var.get())
+        finally:
+            root.destroy()
+
     def test_automation_progress_reports_percentage_and_tile_position(self) -> None:
         root = tk.Tk()
         root.withdraw()
@@ -421,7 +459,83 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertAlmostEqual(app.automation_progress_var.get(), 2 / 12 * 100)
             self.assertIn("16.7%", app.automation_progress_text_var.get())
             self.assertIn("2/12 stages", app.automation_progress_text_var.get())
-            self.assertIn("tile 1/2", app.automation_progress_text_var.get())
+            self.assertIn("0/2 tiles complete", app.automation_progress_text_var.get())
+            self.assertIn("current tile 1/2", app.automation_progress_text_var.get())
+
+            for stage in app.automation_progress_stages:
+                app.automation_progress_completed_keys.add(("UTM34M", stage))
+            app.set_automation_progress_text("after first tile")
+            self.assertIn("1/2 tiles complete", app.automation_progress_text_var.get())
+
+            long_message = (
+                "Extracting SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_044_070_"
+                "20260105T211603_20260105T211628_PID0_01_really_long_file_name.tif"
+            )
+            compact = app.compact_live_status_message(long_message, limit=80)
+            self.assertLessEqual(len(compact), 80)
+            self.assertIn("...", compact)
+
+            cmr_message = (
+                "Download failed: CMR search failed for selected UTM tile(s). "
+                "HTTPSConnectionPool(host='cmr.earthdata.nasa.gov', port=443): "
+                "Read timed out after 60 seconds. Log: D:/SWOT/very/long/download.log"
+            )
+            self.assertEqual(
+                app.compact_automation_tree_message(cmr_message),
+                "CMR search timed out. Usually temporary; automation will continue/retry. See tile log.",
+            )
+            plan = AutomationTilePlan(
+                tile="UTM34M",
+                classification="cmr retry later",
+                message="CMR search unavailable during preflight.",
+            )
+            self.assertEqual(
+                app.compact_automation_plan_counts(plan),
+                "CMR counts pending; download will retry",
+            )
+        finally:
+            root.destroy()
+
+    def test_automation_progress_counts_preflight_complete_tiles(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = AutomationConfig(
+                project_root=Path("."),
+                base_config={},
+                utm_tiles=["UTM34M", "UTM35M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=True,
+            )
+            state = AutomationRunState(
+                run_id="run",
+                run_dir=Path("run"),
+                config=config,
+                preflight_ok=True,
+            )
+            state.tile_plans = [
+                AutomationTilePlan(
+                    tile="UTM34M",
+                    classification="already complete",
+                    message="done",
+                    pending_downloads=0,
+                ),
+                AutomationTilePlan(
+                    tile="UTM35M",
+                    classification="needs update",
+                    message="pending",
+                    pending_downloads=1,
+                ),
+            ]
+
+            app.initialize_automation_progress_tracker(state)
+            app.set_automation_progress_text("loaded")
+
+            self.assertAlmostEqual(app.automation_progress_var.get(), 50.0)
+            self.assertIn("9/18 stages", app.automation_progress_text_var.get())
+            self.assertIn("1/2 tiles complete", app.automation_progress_text_var.get())
         finally:
             root.destroy()
 
@@ -644,11 +758,13 @@ class GuiLayoutTests(unittest.TestCase):
         try:
             app = LauncherApp(root)
             app.upload_scope_var.set("Selected UTM/source tiles only")
+            app.upload_completion_mode_var.set("Submit and continue; verify later")
             app.upload_selected_tiles_var.set("UTM34M, UTM35M")
 
             config = app.build_config()
 
             self.assertEqual(config["upload"]["scope"], "selected_utm")
+            self.assertEqual(config["upload"]["completion_mode"], "submit_and_continue")
             self.assertEqual(config["upload"]["utm_tiles"], ["UTM34M", "UTM35M"])
             self.assertTrue(config["upload"]["ee_sync_before_upload"])
             self.assertTrue(config["artifacts"]["ee_asset_inventory_csv"].endswith("ee_asset_inventory.csv"))
@@ -835,7 +951,7 @@ class GuiLayoutTests(unittest.TestCase):
                 uploaded_processing_level_counts=[],
                 uploaded_grid_counts=[],
                 upload_error_counts=[],
-                upload_qa_tile_rows=[("UTM34M", 2, 2, 2, 2, 0)],
+                upload_qa_tile_rows=[("UTM34M", 2, 2, 2, 0, 2, 0)],
                 ready_not_uploaded_rows=[],
                 cleanup_candidates=[],
             )
