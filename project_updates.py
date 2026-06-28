@@ -38,6 +38,13 @@ def update_paths(config: Any) -> tuple[Path, Path]:
     return logs / "update_campaigns.csv", logs / "update_expected.csv"
 
 
+def update_runs_path(config: Any) -> Path:
+    mapped = config_mapping(config)
+    processing = mapped.get("processing", {})
+    logs = Path(str(processing.get("logs", "") or "00_logs"))
+    return logs / "update_runs.csv"
+
+
 def campaign_fields(config: Any) -> dict[str, str]:
     download = config_mapping(config).get("download", {})
     if not isinstance(download, Mapping):
@@ -85,6 +92,65 @@ def expected_rows(config: Any) -> list[dict[str, str]]:
     return read_project_rows(expected_path, "update_expected")
 
 
+def run_rows(config: Any) -> list[dict[str, str]]:
+    return read_project_rows(update_runs_path(config), "update_runs")
+
+
+def _date_text(value: Any) -> str:
+    return str(value or "").strip()[:10]
+
+
+def _latest_end_date(campaigns: Iterable[Mapping[str, Any]], selected_tiles: set[str]) -> str:
+    end_dates: list[str] = []
+    for campaign in campaigns:
+        try:
+            tiles = normalized_tiles(json.loads(str(campaign.get("tiles", "") or "[]")))
+        except (json.JSONDecodeError, TypeError):
+            tiles = []
+        if selected_tiles and not (set(tiles) & selected_tiles):
+            continue
+        end_date = _date_text(campaign.get("end_date", ""))
+        if end_date:
+            end_dates.append(end_date)
+    return max(end_dates, default="")
+
+
+def classify_update_run(
+    *,
+    selected_tiles: Sequence[str],
+    existing_campaigns: Sequence[Mapping[str, Any]],
+    end_date: str,
+) -> tuple[str, list[str], list[str], str]:
+    """Classify one requested update run against prior project campaigns."""
+    selected = set(normalized_tiles(selected_tiles))
+    previous_tiles: set[str] = set()
+    for campaign in existing_campaigns:
+        try:
+            previous_tiles.update(normalized_tiles(json.loads(str(campaign.get("tiles", "") or "[]"))))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    new_tiles = sorted(selected - previous_tiles)
+    existing_tiles = sorted(selected & previous_tiles)
+    previous_end = _latest_end_date(existing_campaigns, selected)
+    date_extended = bool(previous_end and _date_text(end_date) > previous_end)
+    if new_tiles and date_extended:
+        run_type = "mixed_update"
+    elif new_tiles:
+        run_type = "new_tile_coverage"
+    elif date_extended:
+        run_type = "date_extension"
+    else:
+        run_type = "overlap_refresh"
+    return run_type, new_tiles, existing_tiles, previous_end
+
+
+def update_run_id(source: str, timestamp: str, campaign_id: str) -> str:
+    safe_time = timestamp.replace(":", "").replace("-", "").replace("+", "_")
+    nonce = datetime.now().strftime("%f")
+    digest = hashlib.sha256(f"{source}|{timestamp}|{campaign_id}|{nonce}".encode("utf-8")).hexdigest()[:8]
+    return f"{safe_time}_{digest}"
+
+
 def record_update_expected_rows(
     config: Any,
     rows: Sequence[Mapping[str, Any]],
@@ -102,6 +168,7 @@ def record_update_expected_rows(
         str(row.get("campaign_id", "") or ""): row
         for row in read_project_rows(campaigns_path, "update_campaigns")
     }
+    prior_campaign_rows = list(existing_campaigns.values())
     existing = existing_campaigns.get(campaign_id, {})
     existing_tiles: list[str] = []
     try:
@@ -171,6 +238,38 @@ def record_update_expected_rows(
         campaigns_path,
         [campaign_row],
         dataset="update_campaigns",
+        export_csv=True,
+    )
+    run_type, new_tiles, existing_tiles, previous_end = classify_update_run(
+        selected_tiles=tiles,
+        existing_campaigns=prior_campaign_rows,
+        end_date=fields["end_date"],
+    )
+    upsert_project_rows(
+        update_runs_path(config),
+        [
+            {
+                "run_id": update_run_id(source, timestamp, campaign_id),
+                "campaign_id": campaign_id,
+                "status": "RECORDED",
+                "source": source,
+                "run_type": run_type,
+                **fields,
+                "tiles": json.dumps(tiles),
+                "tile_count": str(len(tiles)),
+                "new_tiles": json.dumps(new_tiles),
+                "new_tile_count": str(len(new_tiles)),
+                "existing_tiles": json.dumps(existing_tiles),
+                "existing_tile_count": str(len(existing_tiles)),
+                "tiles_changed": "yes" if new_tiles else "no",
+                "date_extended": "yes" if run_type in {"date_extension", "mixed_update"} else "no",
+                "previous_end_date": previous_end,
+                "expected_granules": str(expected_count),
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            }
+        ],
+        dataset="update_runs",
         export_csv=True,
     )
     return campaign_id

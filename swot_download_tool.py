@@ -17,7 +17,7 @@ import yaml
 
 from project_database import read_project_rows, upsert_project_rows
 from project_updates import record_update_preview
-from swot_metadata import parse_swot_l2_hr_raster_metadata, swot_product_rank
+from swot_metadata import parse_swot_l2_hr_raster_metadata, product_identity_parts, swot_product_rank
 from workflow_manifest import upsert_workflow_manifest, workflow_manifest_path
 
 
@@ -915,19 +915,7 @@ def normalize_granule(granule: Any) -> DownloadGranule:
 
 def product_duplicate_key(granule: DownloadGranule) -> Optional[Tuple[str, ...]]:
     """Return a stable key for files that differ only by product version."""
-    metadata = parse_swot_l2_hr_raster_metadata(granule.file_name)
-    if metadata is None:
-        return None
-    fields = metadata.fields
-    return (
-        fields.get("descriptor", ""),
-        fields.get("cycle_id", ""),
-        fields.get("pass_id", ""),
-        fields.get("scene_id", ""),
-        fields.get("range_beginning", ""),
-        fields.get("range_ending", ""),
-        fields.get("filename_suffix", ""),
-    )
+    return product_identity_parts(granule.file_name)
 
 
 def product_preference_key(granule: DownloadGranule) -> Tuple[int, int, int, int, int, str]:

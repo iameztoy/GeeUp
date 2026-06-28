@@ -20,7 +20,14 @@ from project_database import (
 )
 from project_updates import campaign_rows as read_update_campaigns
 from project_updates import expected_rows as read_update_expected
-from swot_metadata import SWOT_L2_HR_RASTER_PATTERN, swot_product_rank
+from project_updates import run_rows as read_update_runs
+from swot_metadata import (
+    SWOT_L2_HR_RASTER_PATTERN,
+    processing_level_from_filename,
+    processing_level_label as metadata_processing_level_label,
+    product_identity_key,
+    swot_product_rank,
+)
 
 
 COMPLETED_EXTRACT_STATUSES = {
@@ -53,6 +60,8 @@ UPLOAD_SENT_STATUSES = {
     "COMPLETED",
     "FAILED",
 }
+BLOCKED_PRODUCT_VERSION_CONFLICT_STATUS = "BLOCKED_PRODUCT_VERSION_CONFLICT"
+FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS = "FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED"
 EE_VERIFIED_STATUS = "EE_VERIFIED_EXISTS"
 UTM_TILE_TOKEN_RE = re.compile(r"^UTM(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])$")
 LINEAGE_SNAPSHOT_LIMIT = 1000
@@ -105,6 +114,7 @@ class ProjectInsights:
     upload_qa_tile_rows: List[tuple[str, int, int, int, int, int, int]]
     update_coverage_tile_rows: List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]]
     update_campaigns: List[tuple[str, str, str, str, str, int, int]]
+    update_runs: List[Dict[str, str]]
     update_coverage_campaign_rows: Dict[
         str,
         List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]],
@@ -113,6 +123,7 @@ class ProjectInsights:
     ready_not_uploaded_rows: List[tuple[str, str, str, str]]
     mosaic_exclusion_rows: List[tuple[str, str, str, str, str]]
     mosaic_lineage_rows: List[Dict[str, str]]
+    product_version_audit_rows: List[Dict[str, str]]
     cleanup_candidates: List[CleanupCandidate]
 
 
@@ -287,24 +298,12 @@ def source_file_key(value: str | Path) -> str:
 
 def processing_level_label(crid: str, product_counter: str | int | None) -> str:
     """Return a future-proof CRID/product-counter processing-level label."""
-    crid_text = str(crid or "").strip().upper()
-    counter_text = str(product_counter or "").strip()
-    if crid_text and counter_text:
-        return f"{crid_text}_{counter_text}"
-    if crid_text:
-        return crid_text
-    return "UNKNOWN"
+    return metadata_processing_level_label(crid, product_counter)
 
 
 def parsed_processing_level(file_name: str | Path) -> str:
     """Return the processing level parsed from a SWOT filename."""
-    fields = cached_swot_filename_fields(str(file_name))
-    if fields is None:
-        return ""
-    return processing_level_label(
-        fields.get("crid", ""),
-        fields.get("product_counter", ""),
-    )
+    return processing_level_from_filename(file_name)
 
 
 def row_processing_level(
@@ -724,6 +723,197 @@ def output_exists_for_upload(row: Mapping[str, str]) -> bool:
         return output.exists() and output.is_file()
     except OSError:
         return False
+
+
+def product_identity_from_row(row: Mapping[str, str], file_keys: Sequence[str]) -> str:
+    """Return the first parseable HR Raster product identity from a row."""
+    explicit = str(row.get("product_identity", "") or "").strip()
+    if explicit:
+        return explicit
+    for key in file_keys:
+        identity = product_identity_key(row.get(key, ""))
+        if identity:
+            return identity
+    return ""
+
+
+def best_product_level_by_identity(rows: Sequence[Mapping[str, str]]) -> Dict[str, str]:
+    """Return the best processing-level label observed for every product identity."""
+    best: Dict[str, tuple[tuple[int, int, int, int, int], str]] = {}
+    for row in rows:
+        identity = str(row.get("product_identity", "") or "").strip()
+        level = str(row.get("record_processing_level", "") or "").strip() or "UNKNOWN"
+        if not identity or level == "UNKNOWN" or "_" not in level:
+            continue
+        crid, counter = level.rsplit("_", 1)
+        rank = swot_product_rank(crid, counter)
+        current = best.get(identity)
+        if current is None or rank > current[0]:
+            best[identity] = (rank, level)
+    return {identity: level for identity, (_rank, level) in best.items()}
+
+
+def product_audit_issue(
+    row: Mapping[str, str],
+    best_level: str,
+) -> tuple[str, str]:
+    """Return audit issue type and recommendation for one product-version row."""
+    status = str(row.get("status", "") or "").upper()
+    duplicate_status = str(row.get("duplicate_filter_status", "") or "").lower()
+    stage = str(row.get("stage", "") or "").lower()
+    level = str(row.get("record_processing_level", "") or "UNKNOWN")
+    if status == BLOCKED_PRODUCT_VERSION_CONFLICT_STATUS:
+        return (
+            "upload_conflict_replacement_needed",
+            "Do not upload automatically. Design an explicit EE asset replacement workflow first.",
+        )
+    if status == "BLOCKED_DUPLICATE_PRODUCT_IDENTITY":
+        return (
+            "upload_conflict_replacement_needed",
+            "Same HR Raster product identity already exists under a different asset name; review before upload.",
+        )
+    if status == FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS:
+        return (
+            "local_candidate_superseded",
+            "Upload only the highest-ranked local product candidate for this identity.",
+        )
+    if status == "EXCLUDED_OLDER_VERSION" or duplicate_status == "excluded_older_version":
+        return (
+            "remote_excluded_older_version",
+            "No action needed unless all product versions were intentionally requested.",
+        )
+    if best_level and level != best_level and level != "UNKNOWN":
+        if stage in {"download", "extract"} and status not in {"", "MATCHED"}:
+            return (
+                "higher_version_available_after_download",
+                "A higher processing level is present in project records; reprocess intentionally if replacement is desired.",
+            )
+        if stage == "mosaic_source":
+            return (
+                "mosaic_from_superseded_source",
+                "Review this mosaic if a replacement product should supersede the older source.",
+            )
+        return (
+            "superseded_by_project_best",
+            "Prefer the best processing level for new downstream products.",
+        )
+    return ("ok_best_current", "No product-version action needed.")
+
+
+def build_product_version_audit_rows(
+    *,
+    download_preview_rows: Sequence[Mapping[str, str]],
+    download_rows: Sequence[Mapping[str, str]],
+    extract_rows: Sequence[Mapping[str, str]],
+    mosaic_rows: Sequence[Mapping[str, str]],
+    upload_rows: Sequence[Mapping[str, str]],
+) -> List[Dict[str, str]]:
+    """Build a project-wide product-version audit from existing records."""
+    rows: List[Dict[str, str]] = []
+
+    def add_row(
+        *,
+        stage: str,
+        status: str,
+        file_name: str = "",
+        mosaic_output: str = "",
+        ee_asset_id: str = "",
+        utm_tile: str = "",
+        grid: str = "",
+        duplicate_filter_status: str = "",
+    ) -> None:
+        source_name = file_name or mosaic_output or ee_asset_id
+        identity = product_identity_key(source_name)
+        if not identity:
+            return
+        fields = cached_swot_filename_fields(source_name) or {}
+        level = parsed_processing_level(source_name) or "UNKNOWN"
+        rows.append(
+            {
+                "product_identity": identity,
+                "date": date_from_text(source_name),
+                "utm_tile": normalize_utm_tile_token(utm_tile) or file_utm_tile(source_name),
+                "grid": str(grid or fields.get("coordinate_system", "") or "").upper(),
+                "best_processing_level_seen": "",
+                "record_processing_level": level,
+                "stage": stage,
+                "status": str(status or ""),
+                "file_name": str(file_name or ""),
+                "mosaic_output": str(mosaic_output or ""),
+                "ee_asset_id": str(ee_asset_id or ""),
+                "duplicate_filter_status": duplicate_filter_status,
+                "issue_type": "",
+                "recommendation": "",
+            }
+        )
+
+    for row in download_preview_rows:
+        add_row(
+            stage="remote",
+            status=str(row.get("status", "") or row.get("last_status", "") or "MATCHED"),
+            file_name=str(row.get("file_name", "") or ""),
+            utm_tile=str(row.get("utm_tile", "") or ""),
+            duplicate_filter_status=str(row.get("duplicate_filter_status", "") or ""),
+        )
+    for row in download_rows:
+        add_row(
+            stage="download",
+            status=str(row.get("last_status", "") or ""),
+            file_name=str(row.get("local_path", "") or row.get("file_name", "") or ""),
+            utm_tile=str(row.get("utm_tile", "") or ""),
+            duplicate_filter_status=str(row.get("duplicate_filter_status", "") or ""),
+        )
+    for row in extract_rows:
+        add_row(
+            stage="extract",
+            status=str(row.get("status", "") or ""),
+            file_name=str(row.get("input_nc", "") or row.get("output_tif", "") or ""),
+            utm_tile=f"UTM{row.get('utm_zone', '')}{row.get('mgrs_band', '')}",
+        )
+    for row in mosaic_rows:
+        output = str(row.get("output_file", "") or "")
+        add_row(
+            stage="mosaic",
+            status=str(row.get("status", "") or ""),
+            file_name=output,
+            mosaic_output=output,
+            grid=mosaic_output_grid(row),
+        )
+        for source in parse_path_list(row.get("input_files", "")):
+            add_row(
+                stage="mosaic_source",
+                status=str(row.get("status", "") or ""),
+                file_name=source,
+                mosaic_output=output,
+                grid=mosaic_output_grid(row),
+            )
+    for row in upload_rows:
+        add_row(
+            stage="upload",
+            status=str(row.get("final_status", "") or ""),
+            file_name=str(row.get("local_file", "") or row.get("asset_id", "") or ""),
+            mosaic_output=str(row.get("local_file", "") or ""),
+            ee_asset_id=str(row.get("asset_id", "") or ""),
+            grid=str(row.get("output_grid", "") or ""),
+        )
+
+    best_by_identity = best_product_level_by_identity(rows)
+    for row in rows:
+        best_level = best_by_identity.get(row["product_identity"], row["record_processing_level"])
+        issue, recommendation = product_audit_issue(row, best_level)
+        row["best_processing_level_seen"] = best_level
+        row["issue_type"] = issue
+        row["recommendation"] = recommendation
+    rows.sort(
+        key=lambda row: (
+            row.get("utm_tile", ""),
+            row.get("date", ""),
+            row.get("product_identity", ""),
+            row.get("stage", ""),
+            row.get("file_name", ""),
+        )
+    )
+    return rows
 
 
 def mosaic_level_lookup(rows: Iterable[Mapping[str, str]]) -> Dict[str, List[tuple[str, str]]]:
@@ -1554,6 +1744,13 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         extract_error_rows,
         mosaic_rows,
     )
+    product_version_audit_rows = build_product_version_audit_rows(
+        download_preview_rows=download_preview_rows,
+        download_rows=download_rows,
+        extract_rows=extract_rows,
+        mosaic_rows=mosaic_rows,
+        upload_rows=upload_rows,
+    )
     downloaded_rows = [row for row in download_rows if row.get("downloaded", "").lower() == "yes"]
     raw_existing_download_rows = [row for row in download_rows if row.get("raw_exists", "").lower() == "yes"]
     excluded_download_rows = [
@@ -1612,7 +1809,10 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
                 submitted_tiles = ["UNKNOWN"]
             for tile in submitted_tiles:
                 submitted_tile_counter[tile] += 1
-        if status not in UPLOAD_CLEANUP_STATUSES and status != "FILTERED_UTM_TILE":
+        if status not in UPLOAD_CLEANUP_STATUSES and status not in {
+            "FILTERED_UTM_TILE",
+            FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS,
+        }:
             error_text = str(row.get("error_message", "") or "").strip()
             if not error_text:
                 error_text = str(row.get("upload_filter_status", "") or "").strip()
@@ -1787,6 +1987,14 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Unique mosaic source UTM tiles observed"] = str(len(mosaic_source_tile_counter))
     metrics["Mosaic source files excluded"] = str(len(mosaic_exclusion_rows))
     metrics["Mosaic lineage rows"] = str(len(mosaic_lineage_rows))
+    metrics["Product version audit rows"] = str(len(product_version_audit_rows))
+    metrics["Product version replacement-needed rows"] = str(
+        sum(
+            1
+            for row in product_version_audit_rows
+            if row.get("issue_type") == "upload_conflict_replacement_needed"
+        )
+    )
     lineage_status_counter = Counter(row.get("lineage_status", "unknown") for row in mosaic_lineage_rows)
     metrics["Lineage used in mosaic"] = str(lineage_status_counter.get("used_in_mosaic", 0))
     metrics["Lineage extracted not mosaicked"] = str(lineage_status_counter.get("extracted_not_mosaicked", 0))
@@ -1883,6 +2091,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         mosaic_rows=mosaic_rows,
         upload_rows=upload_rows,
     )
+    update_run_rows = read_update_runs(config)
     update_coverage_rows = update_coverage_campaign_rows.get(active_update_campaign_id, [])
     update_status_counter = Counter(row[-1] for row in update_coverage_rows)
     if update_coverage_rows:
@@ -1920,11 +2129,13 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         upload_qa_tile_rows=upload_qa_rows,
         update_coverage_tile_rows=update_coverage_rows,
         update_campaigns=update_campaign_summaries,
+        update_runs=update_run_rows,
         update_coverage_campaign_rows=update_coverage_campaign_rows,
         active_update_campaign_id=active_update_campaign_id,
         ready_not_uploaded_rows=ready_not_uploaded,
         mosaic_exclusion_rows=mosaic_exclusion_rows,
         mosaic_lineage_rows=mosaic_lineage_rows,
+        product_version_audit_rows=product_version_audit_rows,
         cleanup_candidates=cleanup_candidates,
     )
 
@@ -2108,6 +2319,10 @@ def project_insights_snapshot(insights: ProjectInsights) -> Dict[str, Any]:
                 tile_count,
             ) in insights.update_campaigns
         ],
+        "update_runs": [
+            {str(key): str(value) for key, value in row.items()}
+            for row in insights.update_runs
+        ],
         "update_coverage_campaign_rows": {
             campaign_id: [
                 {
@@ -2150,6 +2365,8 @@ def project_insights_snapshot(insights: ProjectInsights) -> Dict[str, Any]:
         ],
         "mosaic_lineage_rows": insights.mosaic_lineage_rows[:LINEAGE_SNAPSHOT_LIMIT],
         "mosaic_lineage_row_count": len(insights.mosaic_lineage_rows),
+        "product_version_audit_rows": insights.product_version_audit_rows[:LINEAGE_SNAPSHOT_LIMIT],
+        "product_version_audit_row_count": len(insights.product_version_audit_rows),
     }
 
 
@@ -2284,6 +2501,33 @@ def write_project_insights_snapshot(config: Mapping[str, Any], insights: Project
         ],
         snapshot["update_campaigns"],
     )
+    write_csv_rows(
+        folder / "project_statistics_update_runs.csv",
+        [
+            "run_id",
+            "campaign_id",
+            "status",
+            "source",
+            "run_type",
+            "collection_short_name",
+            "product_version_filter",
+            "start_date",
+            "end_date",
+            "tile_count",
+            "new_tile_count",
+            "existing_tile_count",
+            "tiles_changed",
+            "date_extended",
+            "previous_end_date",
+            "expected_granules",
+            "created_at",
+            "updated_at",
+            "tiles",
+            "new_tiles",
+            "existing_tiles",
+        ],
+        snapshot["update_runs"],
+    )
     campaign_coverage_rows = [
         {"campaign_id": campaign_id, **row}
         for campaign_id, rows in snapshot["update_coverage_campaign_rows"].items()
@@ -2340,6 +2584,26 @@ def write_project_insights_snapshot(config: Mapping[str, Any], insights: Project
             "message",
         ],
         insights.mosaic_lineage_rows,
+    )
+    write_csv_rows(
+        folder / "project_statistics_product_version_audit.csv",
+        [
+            "product_identity",
+            "date",
+            "utm_tile",
+            "grid",
+            "best_processing_level_seen",
+            "record_processing_level",
+            "stage",
+            "status",
+            "duplicate_filter_status",
+            "file_name",
+            "mosaic_output",
+            "ee_asset_id",
+            "issue_type",
+            "recommendation",
+        ],
+        insights.product_version_audit_rows,
     )
     return snapshot_path
 
@@ -2479,6 +2743,11 @@ def load_project_insights_snapshot(
             )
             for row in snapshot.get("update_campaigns", [])
         ],
+        update_runs=[
+            {str(key): str(value) for key, value in row.items()}
+            for row in snapshot.get("update_runs", [])
+            if isinstance(row, Mapping)
+        ],
         update_coverage_campaign_rows={
             str(campaign_id): [
                 (
@@ -2524,6 +2793,11 @@ def load_project_insights_snapshot(
         mosaic_lineage_rows=[
             {str(key): str(value) for key, value in row.items()}
             for row in snapshot.get("mosaic_lineage_rows", [])
+            if isinstance(row, Mapping)
+        ],
+        product_version_audit_rows=[
+            {str(key): str(value) for key, value in row.items()}
+            for row in snapshot.get("product_version_audit_rows", [])
             if isinstance(row, Mapping)
         ],
         cleanup_candidates=[],

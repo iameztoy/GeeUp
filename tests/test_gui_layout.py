@@ -229,6 +229,8 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertGreaterEqual(len(collect_widgets(statistics_tab, ttk.Treeview)), 3)
             self.assertGreaterEqual(len(collect_widgets(cleanup_tab, ttk.Treeview)), 1)
             self.assertIn("Processing Levels Across Stages", collect_label_texts(statistics_tab))
+            self.assertIn("Product Version Audit", collect_label_texts(statistics_tab))
+            self.assertIn("Recorded Update Runs", collect_label_texts(statistics_tab))
             self.assertIn("Upload Status Counts", collect_label_texts(statistics_tab))
             self.assertIn("Pipeline Completeness By UTM Tile", collect_label_texts(statistics_tab))
             self.assertIn("UTM Pipeline Status Map", collect_label_texts(statistics_tab))

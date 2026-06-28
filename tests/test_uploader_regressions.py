@@ -8,7 +8,9 @@ from unittest import mock
 from selenium.common.exceptions import InvalidSessionIdException, TimeoutException, WebDriverException
 
 from ee_ui_uploader import (
+    BLOCKED_PRODUCT_VERSION_CONFLICT_STATUS,
     EE_VERIFIED_EXISTS_STATUS,
+    FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS,
     FILTERED_UTM_STATUS,
     RESUME_SKIP_STATUSES,
     SUBMITTED_PENDING_VERIFICATION_STATUS,
@@ -410,6 +412,70 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             self.assertEqual([item.local_file.name for item in plan], [output.name])
             self.assertEqual(plan[0].output_grid, "LAEA")
             self.assertEqual(plan[0].source_utm_tiles, ["UTM34M"])
+
+    def test_upload_plan_keeps_highest_ranked_local_product_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "inputs"
+            folder.mkdir(parents=True, exist_ok=True)
+            older = folder / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PID0_01.tif"
+            )
+            newer = folder / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PGD0_01.tif"
+            )
+            older.write_bytes(b"old")
+            newer.write_bytes(b"new")
+            config = self.uploader_config(root, scope="all", ee_sync=False)
+
+            plan = self.uploader(config).build_upload_plan()
+            rows = self.read_report_rows(config.artifacts.report_csv)
+
+            self.assertEqual([item.local_file.name for item in plan], [newer.name])
+            self.assertEqual(rows[0]["final_status"], FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS)
+            self.assertEqual(rows[0]["upload_selected"], "no")
+            self.assertEqual(rows[0]["best_processing_level"], "PGD0_01")
+
+    def test_upload_plan_blocks_same_identity_existing_ee_asset_with_new_level(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "inputs"
+            logs = root / "logs"
+            folder.mkdir(parents=True, exist_ok=True)
+            logs.mkdir(parents=True, exist_ok=True)
+            old_stem = (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PID0_01"
+            )
+            newer = folder / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PGD0_01.tif"
+            )
+            newer.write_bytes(b"new")
+            config = self.uploader_config(root, scope="all", ee_sync=False)
+            with config.artifacts.report_csv.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["local_file", "asset_id", "final_status"])
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "local_file": "",
+                        "asset_id": f"projects/example/assets/collection/{old_stem}",
+                        "final_status": EE_VERIFIED_EXISTS_STATUS,
+                    }
+                )
+
+            plan = self.uploader(config).build_upload_plan()
+            rows = {
+                row["asset_id"]: row
+                for row in self.read_report_rows(config.artifacts.report_csv)
+            }
+            blocked = rows[f"projects/example/assets/collection/{newer.stem}"]
+
+            self.assertEqual(plan, [])
+            self.assertEqual(blocked["final_status"], BLOCKED_PRODUCT_VERSION_CONFLICT_STATUS)
+            self.assertEqual(blocked["conflicting_asset_id"], f"projects/example/assets/collection/{old_stem}")
 
     def test_ee_inventory_pagination_marks_existing_assets_verified(self) -> None:
         class FakeData:

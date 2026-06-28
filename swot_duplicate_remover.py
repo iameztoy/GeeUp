@@ -16,6 +16,7 @@ import yaml
 from swot_metadata import (
     ParsedMetadata,
     parse_swot_l2_hr_raster_metadata,
+    product_identity_parts,
     swot_product_rank,
 )
 from swot_download_tool import normalize_utm_tiles
@@ -235,18 +236,14 @@ def swot_granule_key(candidate: CandidateFile) -> Optional[Tuple[str, ...]]:
     """Return a duplicate key that ignores only CRID and product counter."""
     if candidate.metadata is None:
         return None
-    fields = candidate.metadata.fields
+    parts = product_identity_parts(candidate.path)
+    if parts is None:
+        return None
     return (
         "swot",
         candidate.relative_parent.as_posix(),
         candidate.extension.lower(),
-        fields["descriptor"],
-        fields["cycle_id"],
-        fields["pass_id"],
-        fields["scene_id"],
-        fields["range_beginning"],
-        fields["range_ending"],
-        fields.get("filename_suffix", ""),
+        *parts,
     )
 
 

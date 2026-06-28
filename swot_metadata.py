@@ -135,3 +135,55 @@ def product_counter_rank(product_counter: str | int | None) -> int:
 def swot_product_rank(crid: str, product_counter: str | int | None) -> Tuple[int, int, int, int, int]:
     """Rank a SWOT product version using CRID first and counter last."""
     return (*crid_rank(crid), product_counter_rank(product_counter))
+
+
+def processing_level_label(crid: str, product_counter: str | int | None) -> str:
+    """Return a future-proof CRID/product-counter processing-level label."""
+    crid_text = str(crid or "").strip().upper()
+    counter_text = str(product_counter or "").strip()
+    if crid_text and counter_text:
+        return f"{crid_text}_{counter_text}"
+    if crid_text:
+        return crid_text
+    return "UNKNOWN"
+
+
+def processing_level_rank(file_name: str | Path) -> Tuple[int, int, int, int, int]:
+    """Return the ranked processing level parsed from a SWOT HR Raster filename."""
+    metadata = parse_swot_l2_hr_raster_metadata(file_name)
+    if metadata is None:
+        return swot_product_rank("", "")
+    fields = metadata.fields
+    return swot_product_rank(fields.get("crid", ""), fields.get("product_counter", ""))
+
+
+def processing_level_from_filename(file_name: str | Path) -> str:
+    """Return the CRID/product-counter label parsed from a SWOT HR Raster filename."""
+    metadata = parse_swot_l2_hr_raster_metadata(file_name)
+    if metadata is None:
+        return ""
+    fields = metadata.fields
+    return processing_level_label(fields.get("crid", ""), fields.get("product_counter", ""))
+
+
+def product_identity_parts(file_name: str | Path) -> Optional[Tuple[str, ...]]:
+    """Return HR Raster identity fields while ignoring only CRID/product counter."""
+    metadata = parse_swot_l2_hr_raster_metadata(file_name)
+    if metadata is None:
+        return None
+    fields = metadata.fields
+    return (
+        fields.get("descriptor", ""),
+        fields.get("cycle_id", ""),
+        fields.get("pass_id", ""),
+        fields.get("scene_id", ""),
+        fields.get("range_beginning", ""),
+        fields.get("range_ending", ""),
+        fields.get("filename_suffix", ""),
+    )
+
+
+def product_identity_key(file_name: str | Path) -> str:
+    """Return a stable string key for same-observation HR Raster products."""
+    parts = product_identity_parts(file_name)
+    return "" if parts is None else "|".join(parts)

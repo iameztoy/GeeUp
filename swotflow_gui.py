@@ -2048,12 +2048,14 @@ class LauncherApp:
         overview = ttk.Frame(inner, padding=8)
         tiles = ttk.Frame(inner, padding=8)
         levels = ttk.Frame(inner, padding=8)
+        updates = ttk.Frame(inner, padding=8)
         mosaics = ttk.Frame(inner, padding=8)
         lineage = ttk.Frame(inner, padding=8)
         uploaded = ttk.Frame(inner, padding=8)
         status_map = ttk.Frame(inner, padding=8)
         inner.add(overview, text="Overview")
         inner.add(status_map, text="Status Map")
+        inner.add(updates, text="Update Runs")
         inner.add(tiles, text="Tiles And Dates")
         inner.add(levels, text="Processing Levels")
         inner.add(mosaics, text="Mosaics")
@@ -2110,6 +2112,48 @@ class LauncherApp:
         self.stats_status_map = UTMPipelineStatusMap(status_map)
         self.stats_status_map.grid(row=0, column=0, sticky="nsew")
 
+        updates.columnconfigure(0, weight=1)
+        updates.rowconfigure(0, weight=1)
+        update_run_frame = ttk.LabelFrame(updates, text="Recorded Update Runs", padding=8)
+        update_run_frame.grid(row=0, column=0, sticky="nsew")
+        update_run_frame.columnconfigure(0, weight=1)
+        update_run_frame.rowconfigure(0, weight=1)
+        self.stats_update_runs_tree = ttk.Treeview(
+            update_run_frame,
+            columns=(
+                "run_type",
+                "start_date",
+                "end_date",
+                "tile_count",
+                "new_tile_count",
+                "expected_granules",
+                "source",
+                "campaign_id",
+                "run_id",
+            ),
+            show="headings",
+            height=18,
+        )
+        update_run_headings = {
+            "run_type": "Run type",
+            "start_date": "Start",
+            "end_date": "End",
+            "tile_count": "Tiles",
+            "new_tile_count": "New tiles",
+            "expected_granules": "Expected",
+            "source": "Source",
+            "campaign_id": "Campaign",
+            "run_id": "Run",
+        }
+        for column, heading in update_run_headings.items():
+            self.stats_update_runs_tree.heading(column, text=heading)
+            self.stats_update_runs_tree.column(
+                column,
+                width=150 if column in {"source", "campaign_id", "run_id"} else 95,
+                anchor="w" if column in {"run_type", "source", "campaign_id", "run_id"} else "e",
+            )
+        self.stats_update_runs_tree.grid(row=0, column=0, sticky="nsew")
+
         tiles.columnconfigure(0, weight=1)
         tiles.columnconfigure(1, weight=1)
         tiles.rowconfigure(0, weight=1)
@@ -2148,6 +2192,7 @@ class LauncherApp:
         levels.columnconfigure(0, weight=1)
         levels.columnconfigure(1, weight=1)
         levels.rowconfigure(0, weight=1)
+        levels.rowconfigure(1, weight=1)
         level_summary_frame = ttk.LabelFrame(
             levels,
             text="Processing Levels Across Stages",
@@ -2214,6 +2259,39 @@ class LauncherApp:
             anchor = "w" if column in {"tile", "level"} else "e"
             self.stats_processing_level_tile_tree.column(column, width=width, anchor=anchor)
         self.stats_processing_level_tile_tree.grid(row=0, column=0, sticky="nsew")
+
+        product_audit_frame = ttk.LabelFrame(
+            levels,
+            text="Product Version Audit",
+            padding=8,
+        )
+        product_audit_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        product_audit_frame.columnconfigure(0, weight=1)
+        product_audit_frame.rowconfigure(0, weight=1)
+        self.stats_product_version_audit_tree = ttk.Treeview(
+            product_audit_frame,
+            columns=("issue_type", "tile", "date", "record_level", "best_level", "stage", "status", "file"),
+            show="headings",
+            height=10,
+        )
+        audit_headings = {
+            "issue_type": "Issue",
+            "tile": "Tile",
+            "date": "Date",
+            "record_level": "Record level",
+            "best_level": "Best level",
+            "stage": "Stage",
+            "status": "Status",
+            "file": "File / asset",
+        }
+        for column, heading in audit_headings.items():
+            self.stats_product_version_audit_tree.heading(column, text=heading)
+            self.stats_product_version_audit_tree.column(
+                column,
+                width=220 if column in {"issue_type", "file"} else 100,
+                anchor="w",
+            )
+        self.stats_product_version_audit_tree.grid(row=0, column=0, sticky="nsew")
 
         mosaics.columnconfigure(0, weight=1)
         mosaics.columnconfigure(1, weight=1)
@@ -6014,6 +6092,8 @@ class LauncherApp:
             self.stats_date_tree,
             self.stats_processing_level_tree,
             self.stats_processing_level_tile_tree,
+            self.stats_product_version_audit_tree,
+            self.stats_update_runs_tree,
             self.stats_mosaic_output_grid_tree,
             self.stats_mosaic_source_tile_tree,
             self.stats_mosaic_exclusions_tree,
@@ -6131,6 +6211,41 @@ class LauncherApp:
                     str(downloaded),
                     str(extracted),
                     str(mosaic_sources),
+                ),
+            )
+
+        self.clear_treeview(self.stats_update_runs_tree)
+        for row in getattr(insights, "update_runs", []):
+            self.stats_update_runs_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("run_type", ""),
+                    row.get("start_date", ""),
+                    row.get("end_date", ""),
+                    row.get("tile_count", ""),
+                    row.get("new_tile_count", ""),
+                    row.get("expected_granules", ""),
+                    row.get("source", ""),
+                    row.get("campaign_id", ""),
+                    row.get("run_id", ""),
+                ),
+            )
+
+        self.clear_treeview(self.stats_product_version_audit_tree)
+        for row in getattr(insights, "product_version_audit_rows", [])[:1000]:
+            self.stats_product_version_audit_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("issue_type", ""),
+                    row.get("utm_tile", ""),
+                    row.get("date", ""),
+                    row.get("record_processing_level", ""),
+                    row.get("best_processing_level_seen", ""),
+                    row.get("stage", ""),
+                    row.get("status", ""),
+                    row.get("file_name", "") or row.get("ee_asset_id", ""),
                 ),
             )
 
