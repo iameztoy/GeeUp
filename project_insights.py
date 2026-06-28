@@ -45,6 +45,14 @@ UPLOAD_CLEANUP_STATUSES = {
     "SKIPPED_ALREADY_EXISTS",
     "EE_VERIFIED_EXISTS",
 }
+UPLOAD_SENT_STATUSES = {
+    "SUBMITTED",
+    "SUBMITTED_PENDING_VERIFICATION",
+    "READY",
+    "RUNNING",
+    "COMPLETED",
+    "FAILED",
+}
 EE_VERIFIED_STATUS = "EE_VERIFIED_EXISTS"
 UTM_TILE_TOKEN_RE = re.compile(r"^UTM(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])$")
 LINEAGE_SNAPSHOT_LIMIT = 1000
@@ -94,7 +102,7 @@ class ProjectInsights:
     uploaded_processing_level_counts: List[tuple[str, int]]
     uploaded_grid_counts: List[tuple[str, int]]
     upload_error_counts: List[tuple[str, str, int]]
-    upload_qa_tile_rows: List[tuple[str, int, int, int, int, int]]
+    upload_qa_tile_rows: List[tuple[str, int, int, int, int, int, int]]
     update_coverage_tile_rows: List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]]
     update_campaigns: List[tuple[str, str, str, str, str, int, int]]
     update_coverage_campaign_rows: Dict[
@@ -692,6 +700,19 @@ def upload_row_source_tiles(
         return sorted(set(manifest_tiles))
     tile = file_utm_tile(local_file)
     return [tile] if tile else []
+
+
+def upload_row_was_sent(row: Mapping[str, str]) -> bool:
+    """Return True when an upload report row represents a submitted EE upload task."""
+    status = str(row.get("final_status", "") or "").upper()
+    if status in UPLOAD_SENT_STATUSES:
+        return True
+    if status == EE_VERIFIED_STATUS:
+        return bool(
+            str(row.get("submit_time", "") or "").strip()
+            or str(row.get("detected_task_name", "") or "").strip()
+        )
+    return False
 
 
 def output_exists_for_upload(row: Mapping[str, str]) -> bool:
@@ -1556,6 +1577,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         if row.get("final_status", "").upper()
         in {"SUBMITTED", "SUBMITTED_PENDING_VERIFICATION"}
     ]
+    sent_upload_rows = [row for row in upload_rows if upload_row_was_sent(row)]
     filtered_upload_rows = [
         row
         for row in upload_rows
@@ -1567,6 +1589,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         for row in upload_rows
     )
     uploaded_tile_counter: Counter[str] = Counter()
+    sent_tile_counter: Counter[str] = Counter()
     submitted_tile_counter: Counter[str] = Counter()
     uploaded_date_counter: Counter[str] = Counter()
     uploaded_level_counter: Counter[str] = Counter()
@@ -1576,6 +1599,12 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
 
     mosaic_tiles_by_output = mosaic_source_tile_lookup(complete_mosaic_rows)
     for row in upload_rows:
+        if upload_row_was_sent(row):
+            sent_tiles = upload_row_source_tiles(row, mosaic_tiles_by_output)
+            if not sent_tiles:
+                sent_tiles = ["UNKNOWN"]
+            for tile in sent_tiles:
+                sent_tile_counter[tile] += 1
         status = str(row.get("final_status", "") or "UNKNOWN").upper()
         if status in {"SUBMITTED", "SUBMITTED_PENDING_VERIFICATION"}:
             submitted_tiles = upload_row_source_tiles(row, mosaic_tiles_by_output)
@@ -1770,6 +1799,8 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Effective upload rows after EE inventory merge"] = str(len(upload_rows))
     metrics["Uploaded/already-existing assets recorded"] = str(len(uploaded_rows))
     metrics["EE-verified existing assets recorded"] = str(len(ee_verified_upload_rows))
+    metrics["Upload rows sent to Earth Engine"] = str(len(sent_upload_rows))
+    metrics["Source UTM tiles sent to upload"] = compact_count_keys(sent_tile_counter)
     metrics["Submitted uploads awaiting EE verification"] = str(len(submitted_upload_rows))
     metrics["Unique submitted source UTM tiles awaiting verification"] = str(len([tile for tile in submitted_tile_counter if tile != "UNKNOWN"]))
     metrics["Submitted source UTM tiles awaiting verification"] = compact_count_keys(submitted_tile_counter)
@@ -1826,6 +1857,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         | set(extracted_tile_stage_counter)
         | set(mosaic_source_tile_counter)
         | set(uploaded_tile_counter)
+        | set(sent_tile_counter)
     )
     upload_qa_rows = [
         (
@@ -1833,6 +1865,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
             downloaded_tile_stage_counter.get(tile, 0),
             extracted_tile_stage_counter.get(tile, 0),
             mosaic_source_tile_counter.get(tile, 0),
+            sent_tile_counter.get(tile, 0),
             uploaded_tile_counter.get(tile, 0),
             max(0, mosaic_source_tile_counter.get(tile, 0) - uploaded_tile_counter.get(tile, 0)),
         )
@@ -2011,10 +2044,19 @@ def project_insights_snapshot(insights: ProjectInsights) -> Dict[str, Any]:
                 "downloaded": downloaded,
                 "extracted": extracted,
                 "mosaic_sources": mosaic_sources,
+                "submitted": submitted,
                 "uploaded": uploaded,
                 "missing_upload": missing_upload,
             }
-            for tile, downloaded, extracted, mosaic_sources, uploaded, missing_upload in insights.upload_qa_tile_rows
+            for (
+                tile,
+                downloaded,
+                extracted,
+                mosaic_sources,
+                submitted,
+                uploaded,
+                missing_upload,
+            ) in insights.upload_qa_tile_rows
         ],
         "update_coverage_tile_rows": [
             {
@@ -2200,7 +2242,15 @@ def write_project_insights_snapshot(config: Mapping[str, Any], insights: Project
     )
     write_csv_rows(
         folder / "project_statistics_upload_qa_by_tile.csv",
-        ["tile", "downloaded", "extracted", "mosaic_sources", "uploaded", "missing_upload"],
+        [
+            "tile",
+            "downloaded",
+            "extracted",
+            "mosaic_sources",
+            "submitted",
+            "uploaded",
+            "missing_upload",
+        ],
         snapshot["upload_qa_tile_rows"],
     )
     write_csv_rows(
@@ -2394,6 +2444,7 @@ def load_project_insights_snapshot(
                 _int_value(row.get("downloaded")),
                 _int_value(row.get("extracted")),
                 _int_value(row.get("mosaic_sources")),
+                _int_value(row.get("submitted")),
                 _int_value(row.get("uploaded")),
                 _int_value(row.get("missing_upload")),
             )

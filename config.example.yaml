@@ -77,6 +77,11 @@ download:
   # the old one-file-at-a-time behavior; 25 is a conservative large-run default.
   batch_size: 25
 
+  # Safety timeout for each CMR metadata page request. In Automation, a tile
+  # whose remote search stalls can fail cleanly and be retried later instead of
+  # blocking the whole queue indefinitely.
+  search_request_timeout_seconds: 60
+
 duplicates:
   # First pipeline step: manually downloaded SWOT NetCDF files go here.
   input_folder: "C:/path/to/SWOT_Processing/01_raw_downloads"
@@ -258,6 +263,9 @@ upload:
   submission_confirmation_timeout_seconds: 30
   # Hard ceiling for an actively progressing browser-side file transfer.
   submission_transfer_timeout_minutes: 30
+  # wait_for_ee waits for submitted Earth Engine tasks before continuing.
+  # submit_and_continue moves on after browser submission and verifies/cleans later.
+  completion_mode: wait_for_ee
 
   # If true, stop the whole run after the first failed upload.
   fail_fast: false
@@ -336,6 +344,14 @@ automation:
   cleanup_enabled: true
   min_free_space_gb: 50
   continue_on_tile_failure: true
+  # Retry CMR/download-search timeout failures after the first tile pass. This
+  # helps unattended runs recover when CMR or the local network is temporarily
+  # slow while the computer is idle.
+  deferred_download_retry_passes: 1
+  # Windows only: ask the OS not to enter automatic sleep while Automation is
+  # running. This does not prevent manual shutdown, forced restart, power loss,
+  # or all vendor/network-adapter power-saving behavior.
+  prevent_system_sleep: true
   # Begin the workflow immediately when preflight succeeds. Leave false when
   # you want to review the queue before starting.
   auto_start_after_preflight: false

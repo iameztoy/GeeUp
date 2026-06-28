@@ -33,6 +33,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
         scope: str = "all",
         tiles: list[str] | None = None,
         ee_sync: bool = False,
+        completion_mode: str = "wait_for_ee",
     ):
         input_folder = root / "inputs"
         input_folder.mkdir(parents=True, exist_ok=True)
@@ -47,6 +48,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                     "ee_sync_before_upload": ee_sync,
                     "batch_size": 10,
                     "max_active_ingestions": 0,
+                    "completion_mode": completion_mode,
                 },
                 "execution": {
                     "resume": True,
@@ -105,6 +107,18 @@ class UploaderDialogRegressionTests(unittest.TestCase):
         )
 
         self.assertIn("already exists", message)
+
+    def test_cannot_overwrite_task_is_treated_as_existing_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            uploader = self.uploader(self.uploader_config(Path(temp)))
+
+            row = uploader.parse_task_row(
+                "Asset name: projects/example/assets/collection/image\n"
+                "Phase: Failed\n"
+                "Error: Cannot overwrite asset 'projects/example/assets/collection/image'."
+            )
+
+            self.assertEqual(row.normalized_status, "SKIPPED_ALREADY_EXISTS")
 
     def test_resume_skips_submitted_but_not_error_or_unknown_after_click(self) -> None:
         self.assertIn("SUBMITTED", RESUME_SKIP_STATUSES)
@@ -669,6 +683,35 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             self.assertEqual(rows[0]["ee_asset_exists"], "yes")
             self.assertEqual(rows[0]["verification_source"], "ee.data.listAssets")
             sleep.assert_not_called()
+
+    def test_submit_and_continue_mode_does_not_wait_for_batch_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.uploader_config(
+                root,
+                completion_mode="submit_and_continue",
+            )
+            uploader = self.uploader(config)
+            path = config.input_folder / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PGC0_01.tif"
+            )
+            path.write_bytes(b"1")
+            item = UploadItem(
+                local_file=path,
+                asset_name=path.stem,
+                asset_id=f"{config.destination_parent}/{path.stem}",
+                batch_number=1,
+            )
+
+            with mock.patch.object(uploader, "submit_with_retries") as submit:
+                with mock.patch.object(uploader, "wait_for_batch_gate") as wait_gate:
+                    with mock.patch.object(uploader, "reconcile_batch_without_waiting") as reconcile:
+                        uploader.process_batches([item])
+
+            submit.assert_called_once_with(item)
+            wait_gate.assert_not_called()
+            reconcile.assert_called_once()
 
 
 if __name__ == "__main__":

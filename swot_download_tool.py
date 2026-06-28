@@ -59,6 +59,7 @@ EXCLUDED_OLDER_VERSION_STATUS = "EXCLUDED_OLDER_VERSION"
 MGRS_LATITUDE_BANDS = "CDEFGHJKLMNPQRSTUVWX"
 UTM_TILE_RE = re.compile(r"^UTM(?P<zone>0[1-9]|[1-5]\d|60)(?P<band>[C-HJ-NP-X])$")
 CMR_PAGE_SIZE = 2000
+DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS = 60
 _AUTHENTICATED = False
 
 warnings.filterwarnings(
@@ -87,6 +88,7 @@ class DownloadConfig:
     threads: int = 6
     batch_size: int = 25
     product_version_filter: str = DEFAULT_PRODUCT_VERSION_FILTER
+    search_request_timeout_seconds: int = DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS
     base_dir: Path = Path.cwd()
 
 
@@ -355,6 +357,16 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> DownloadConfig:
         product_version_filter=normalize_product_version_filter(
             download_data.get("product_version_filter", DEFAULT_PRODUCT_VERSION_FILTER)
         ),
+        search_request_timeout_seconds=max(
+            5,
+            int(
+                download_data.get(
+                    "search_request_timeout_seconds",
+                    DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS,
+                )
+                or DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS
+            ),
+        ),
         base_dir=base_dir,
     )
     validate_config(config)
@@ -493,17 +505,16 @@ def run_search_paged(
     granule_name: str | Sequence[str],
     count: int,
     progress_callback: Optional[ProgressCallback] = None,
+    timeout_seconds: int = DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS,
 ) -> List[Any]:
     """Call CMR page-by-page so large searches can report progress."""
     if not hasattr(earthaccess, "granule_query"):
         raise RuntimeError("earthaccess.granule_query is not available.")
 
     granule_query = build_earthaccess_granule_query(earthaccess, query, granule_name)
-    total_hits = int(granule_query.hits())
-    limit = total_hits if count == -1 else min(total_hits, count)
-    if progress_callback is not None:
-        progress_callback(0, limit, f"Step 1/4: CMR found {total_hits} matching granule(s)")
-    if limit <= 0:
+    limit: Optional[int] = None if count == -1 else max(0, count)
+    total_hits: Optional[int] = None
+    if limit == 0:
         return []
 
     url = granule_query._build_url()
@@ -511,9 +522,19 @@ def run_search_paged(
     session = granule_query.session
     results: List[Any] = []
 
-    while len(results) < limit:
-        page_size = min(CMR_PAGE_SIZE, limit - len(results))
-        response = session.get(url, headers=headers, params={"page_size": page_size})
+    while limit is None or len(results) < limit:
+        page_size = CMR_PAGE_SIZE if limit is None else min(CMR_PAGE_SIZE, limit - len(results))
+        try:
+            response = session.get(
+                url,
+                headers=headers,
+                params={"page_size": page_size},
+                timeout=timeout_seconds,
+            )
+        except TypeError:
+            response = session.get(url, headers=headers, params={"page_size": page_size})
+        except Exception as exc:
+            raise RuntimeError(f"CMR request failed or timed out after {timeout_seconds} seconds: {exc}") from exc
         try:
             response.raise_for_status()
         except Exception as exc:
@@ -523,26 +544,60 @@ def run_search_paged(
             raise RuntimeError(response_text) from exc
 
         document = response.json()
+        if total_hits is None:
+            total_hits = cmr_hits_from_document(document)
+            if total_hits is not None:
+                limit = total_hits if count == -1 else min(total_hits, count)
+                if progress_callback is not None:
+                    progress_callback(0, limit, f"Step 1/4: CMR found {total_hits} matching granule(s)")
+                if limit <= 0:
+                    return []
+            elif progress_callback is not None:
+                progress_callback(0, 0, "Step 1/4: CMR metadata search started")
+
         latest = list(document.get("items", []) or [])
         if not latest:
             break
         results.extend(wrap_cmr_page_items(earthaccess, latest))
         if progress_callback is not None:
+            progress_total = limit if limit is not None else len(results)
             progress_callback(
-                min(len(results), limit),
-                limit,
-                f"Step 1/4: CMR metadata retrieved for {min(len(results), limit)}/{limit} granule(s)",
+                min(len(results), progress_total),
+                progress_total,
+                (
+                    "Step 1/4: CMR metadata retrieved for "
+                    f"{min(len(results), progress_total)}/{progress_total} granule(s)"
+                ),
             )
 
         search_after = response.headers.get("cmr-search-after")
         if search_after:
             headers["cmr-search-after"] = search_after
-        elif len(latest) >= page_size and len(results) < limit:
+        elif len(latest) >= page_size and (limit is None or len(results) < limit):
             break
         if len(latest) < page_size:
             break
 
-    return results[:limit]
+    return results[:limit] if limit is not None else results
+
+
+def cmr_hits_from_document(document: Mapping[str, Any]) -> Optional[int]:
+    """Read the total CMR hit count from a CMR JSON response when available."""
+    raw_hits = mapping_value(document, "hits")
+    if raw_hits is None:
+        raw_hits = mapping_value(mapping_value(document, "meta") or {}, "hits")
+    try:
+        return int(raw_hits) if raw_hits is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def short_error_message(exc: BaseException, limit: int = 500) -> str:
+    """Return a compact error string suitable for progress labels and logs."""
+    text = str(exc).replace("\r", " ").replace("\n", " ").strip()
+    if not text:
+        text = exc.__class__.__name__
+    return text[:limit]
 
 
 def granule_identity(granule: Any) -> str:
@@ -585,21 +640,55 @@ def search_matching_granules(
     if progress_callback is not None:
         progress_callback(0, 0, "Step 1/4: searching CMR for matching SWOT granules")
 
-    try:
-        granules = run_search_paged(
-            earthaccess,
-            query,
-            query.granule_patterns,
-            count,
-            progress_callback=progress_callback,
-        )
-    except Exception:
+    supports_paged_search = hasattr(earthaccess, "granule_query")
+    if not supports_paged_search:
         try:
-            if progress_callback is not None:
-                progress_callback(0, 0, "Step 1/4: CMR paged search unavailable; using earthaccess search_data")
             granules = run_search(earthaccess, query, query.granule_patterns, count)
         except Exception:
             granules = []
+            for index, pattern in enumerate(query.granule_patterns, start=1):
+                if config.max_granules is not None and len(granules) >= config.max_granules:
+                    break
+                if progress_callback is not None:
+                    progress_callback(
+                        index - 1,
+                        len(query.granule_patterns),
+                        f"Step 1/4: searching {pattern}",
+                    )
+                remaining = (
+                    config.max_granules - len(granules)
+                    if config.max_granules is not None
+                    else -1
+                )
+                granules.extend(run_search(earthaccess, query, pattern, remaining))
+                if progress_callback is not None:
+                    progress_callback(
+                        index,
+                        len(query.granule_patterns),
+                        f"Step 1/4: finished CMR search for {pattern}",
+                    )
+    else:
+        try:
+            granules = run_search_paged(
+                earthaccess,
+                query,
+                query.granule_patterns,
+                count,
+                progress_callback=progress_callback,
+                timeout_seconds=config.search_request_timeout_seconds,
+            )
+        except Exception as first_exc:
+            if progress_callback is not None:
+                progress_callback(
+                    0,
+                    len(query.granule_patterns),
+                    (
+                        "Step 1/4: combined CMR search failed; retrying each UTM tile "
+                        f"separately ({short_error_message(first_exc)})"
+                    ),
+                )
+            granules = []
+            errors: List[str] = []
             for index, pattern in enumerate(query.granule_patterns, start=1):
                 if config.max_granules is not None and len(granules) >= config.max_granules:
                     break
@@ -622,16 +711,35 @@ def search_matching_granules(
                             pattern,
                             remaining,
                             progress_callback=progress_callback,
+                            timeout_seconds=config.search_request_timeout_seconds,
                         )
                     )
-                except Exception:
-                    granules.extend(run_search(earthaccess, query, pattern, remaining))
+                except Exception as exc:
+                    message = short_error_message(exc)
+                    errors.append(f"{pattern}: {message}")
+                    if progress_callback is not None:
+                        progress_callback(
+                            index,
+                            len(query.granule_patterns),
+                            f"Step 1/4: failed CMR search for {pattern}: {message}",
+                        )
+                    continue
                 if progress_callback is not None:
                     progress_callback(
                         index,
                         len(query.granule_patterns),
                         f"Step 1/4: finished CMR search for {pattern}",
                     )
+            if errors and not granules:
+                raise RuntimeError(
+                    "CMR search failed for selected UTM tile(s). "
+                    + " | ".join(errors[:5])
+                    + (
+                        f" | {len(errors) - 5} more tile search error(s)."
+                        if len(errors) > 5
+                        else ""
+                    )
+                ) from first_exc
 
     unique = dedupe_granules(granules)
     if config.max_granules is not None:

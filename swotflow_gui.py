@@ -66,6 +66,13 @@ UPLOAD_SCOPE_LABELS = {
 UPLOAD_SCOPE_LABEL_BY_VALUE = {
     value: label for label, value in UPLOAD_SCOPE_LABELS.items()
 }
+UPLOAD_COMPLETION_LABELS = {
+    "Wait for EE verification before next tile": "wait_for_ee",
+    "Submit and continue; verify later": "submit_and_continue",
+}
+UPLOAD_COMPLETION_LABEL_BY_VALUE = {
+    value: label for label, value in UPLOAD_COMPLETION_LABELS.items()
+}
 UPLOAD_SUCCESS_STATUSES = {
     "COMPLETED",
     "SKIPPED_ALREADY_EXISTS",
@@ -337,6 +344,9 @@ class LauncherApp:
         self.automation_continue_on_failure_var = tk.BooleanVar(
             value=bool(automation_data.get("continue_on_tile_failure", True))
         )
+        self.automation_prevent_sleep_var = tk.BooleanVar(
+            value=bool(automation_data.get("prevent_system_sleep", True))
+        )
         self.automation_auto_start_after_preflight_var = tk.BooleanVar(
             value=bool(automation_data.get("auto_start_after_preflight", False))
         )
@@ -412,6 +422,15 @@ class LauncherApp:
             value=UPLOAD_SCOPE_LABEL_BY_VALUE.get(
                 upload_scope,
                 "All files in origin folder",
+            )
+        )
+        upload_completion_mode = str(
+            upload_data.get("completion_mode", "wait_for_ee")
+        ).strip()
+        self.upload_completion_mode_var = tk.StringVar(
+            value=UPLOAD_COMPLETION_LABEL_BY_VALUE.get(
+                upload_completion_mode,
+                "Wait for EE verification before next tile",
             )
         )
         try:
@@ -986,25 +1005,48 @@ class LauncherApp:
             text="Continue with next tile after failure",
             variable=self.automation_continue_on_failure_var,
         ).grid(row=1, column=3, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            settings,
+            text="Prevent computer sleep while automation runs",
+            variable=self.automation_prevent_sleep_var,
+        ).grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(settings, text="Upload completion mode").grid(
+            row=2,
+            column=0,
+            sticky="w",
+            pady=(8, 0),
+        )
+        ttk.Combobox(
+            settings,
+            textvariable=self.upload_completion_mode_var,
+            values=list(UPLOAD_COMPLETION_LABELS),
+            state="readonly",
+            width=38,
+        ).grid(row=2, column=1, columnspan=3, sticky="w", padx=(8, 14), pady=(8, 0))
+        ttk.Label(
+            settings,
+            text="Used only when Include upload is enabled.",
+            foreground="#555555",
+        ).grid(row=2, column=4, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Button(
             settings,
             text="Authenticate Earthdata",
             command=self.authenticate_download,
-        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Label(
             settings,
             textvariable=self.download_auth_status_var,
             foreground="#184a8b",
             wraplength=760,
             justify="left",
-        ).grid(row=2, column=1, columnspan=7, sticky="w", padx=(8, 0), pady=(8, 0))
+        ).grid(row=3, column=1, columnspan=7, sticky="w", padx=(8, 0), pady=(8, 0))
         ttk.Label(
             settings,
             textvariable=self.automation_date_status_var,
             foreground="#184a8b",
             wraplength=980,
             justify="left",
-        ).grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
+        ).grid(row=4, column=0, columnspan=8, sticky="w", pady=(8, 0))
 
         tiles = ttk.LabelFrame(parent, text="Automation UTM Tiles", padding=10)
         tiles.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
@@ -1087,11 +1129,12 @@ class LauncherApp:
             actions,
             textvariable=self.automation_progress_text_var,
             foreground="#184a8b",
+            width=120,
         ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
         ttk.Label(
             actions,
             textvariable=self.automation_status_var,
-            wraplength=980,
+            width=120,
             justify="left",
         ).grid(row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
@@ -1118,7 +1161,12 @@ class LauncherApp:
         self.automation_tree.grid(row=0, column=0, sticky="nsew")
         queue_scroll = ttk.Scrollbar(queue, orient="vertical", command=self.automation_tree.yview)
         queue_scroll.grid(row=0, column=1, sticky="ns")
-        self.automation_tree.configure(yscrollcommand=queue_scroll.set)
+        queue_xscroll = ttk.Scrollbar(queue, orient="horizontal", command=self.automation_tree.xview)
+        queue_xscroll.grid(row=1, column=0, sticky="ew")
+        self.automation_tree.configure(
+            yscrollcommand=queue_scroll.set,
+            xscrollcommand=queue_xscroll.set,
+        )
         self.refresh_automation_tile_list()
         self.update_automation_date_status()
 
@@ -1791,6 +1839,23 @@ class LauncherApp:
             self.max_active_var,
             "Use 0 if you want the next batch to wait until the previous batch is fully finished",
         )
+        ttk.Label(form, text="Upload completion mode").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Combobox(
+            form,
+            textvariable=self.upload_completion_mode_var,
+            values=list(UPLOAD_COMPLETION_LABELS),
+            state="readonly",
+        ).grid(row=row, column=1, sticky="ew", pady=4)
+        ttk.Label(
+            form,
+            text=(
+                "Conservative waits for EE task verification; throughput submits files, "
+                "keeps unverified mosaics, and lets later EE sync/cleanup finish them."
+            ),
+            foreground="#555555",
+            wraplength=650,
+        ).grid(row=row + 1, column=1, sticky="w", pady=(0, 4))
+        row += 2
         row = self.add_entry_row(
             form,
             row,
@@ -2368,7 +2433,15 @@ class LauncherApp:
         qa_tile_frame.rowconfigure(0, weight=1)
         self.stats_upload_qa_tile_tree = ttk.Treeview(
             qa_tile_frame,
-            columns=("tile", "downloaded", "extracted", "mosaic_sources", "uploaded", "missing_upload"),
+            columns=(
+                "tile",
+                "downloaded",
+                "extracted",
+                "mosaic_sources",
+                "submitted",
+                "uploaded",
+                "missing_upload",
+            ),
             show="headings",
             height=9,
         )
@@ -2377,6 +2450,7 @@ class LauncherApp:
             "downloaded": "Downloaded",
             "extracted": "Extracted",
             "mosaic_sources": "Mosaic src",
+            "submitted": "Sent to upload",
             "uploaded": "Uploaded/verified",
             "missing_upload": "Missing upload",
         }
@@ -3097,6 +3171,9 @@ class LauncherApp:
         self.automation_continue_on_failure_var.set(
             bool(automation_data.get("continue_on_tile_failure", True))
         )
+        self.automation_prevent_sleep_var.set(
+            bool(automation_data.get("prevent_system_sleep", True))
+        )
         self.automation_auto_start_after_preflight_var.set(
             bool(automation_data.get("auto_start_after_preflight", False))
         )
@@ -3144,6 +3221,12 @@ class LauncherApp:
             UPLOAD_SCOPE_LABEL_BY_VALUE.get(
                 str(upload_data.get("scope", "all")).strip(),
                 "All files in origin folder",
+            )
+        )
+        self.upload_completion_mode_var.set(
+            UPLOAD_COMPLETION_LABEL_BY_VALUE.get(
+                str(upload_data.get("completion_mode", "wait_for_ee")).strip(),
+                "Wait for EE verification before next tile",
             )
         )
         try:
@@ -3370,6 +3453,13 @@ class LauncherApp:
     def selected_upload_scope(self) -> str:
         """Return the config value for the selected Upload scope."""
         return UPLOAD_SCOPE_LABELS.get(self.upload_scope_var.get(), "all")
+
+    def selected_upload_completion_mode(self) -> str:
+        """Return the config value for the selected Upload completion mode."""
+        return UPLOAD_COMPLETION_LABELS.get(
+            self.upload_completion_mode_var.get(),
+            "wait_for_ee",
+        )
 
     def upload_report_successful_local_files_from_report(
         self,
@@ -4304,6 +4394,12 @@ class LauncherApp:
                 "Please choose a valid Upload scope.",
             )
             return False
+        if self.upload_completion_mode_var.get() not in UPLOAD_COMPLETION_LABELS:
+            messagebox.showerror(
+                "Invalid upload completion mode",
+                "Please choose a valid Upload completion mode.",
+            )
+            return False
         try:
             upload_tiles = self.current_upload_tiles()
         except ValueError as exc:
@@ -4579,6 +4675,7 @@ class LauncherApp:
                 "retry_wait_seconds": retry_wait,
                 "submission_confirmation_timeout_seconds": 30,
                 "submission_transfer_timeout_minutes": 30,
+                "completion_mode": self.selected_upload_completion_mode(),
                 "fail_fast": self.fail_fast_var.get(),
             },
             "execution": {
@@ -4645,6 +4742,7 @@ class LauncherApp:
                     50.0,
                 ),
                 "continue_on_tile_failure": self.automation_continue_on_failure_var.get(),
+                "prevent_system_sleep": self.automation_prevent_sleep_var.get(),
                 "auto_start_after_preflight": self.automation_auto_start_after_preflight_var.get(),
             },
         }
@@ -4739,6 +4837,7 @@ class LauncherApp:
                 50.0,
             ),
             continue_on_tile_failure=self.automation_continue_on_failure_var.get(),
+            prevent_system_sleep=self.automation_prevent_sleep_var.get(),
         )
 
     def run_automation_preflight(self) -> None:
@@ -4770,7 +4869,7 @@ class LauncherApp:
         self.automation_progress_var.set(0.0)
         self.automation_progress_text_var.set("Progress: running preflight")
         self.automation_status_var.set(
-            "Automation preflight started. Searching CMR and reading project manifests..."
+            "Automation preflight started. Reading project manifests and using cached CMR previews where available..."
         )
         thread = threading.Thread(
             target=self.run_automation_preflight_process,
@@ -4823,9 +4922,14 @@ class LauncherApp:
                 f"Preflight ready for {len(state.tile_plans)} tile(s).{warning_text} Run folder: {state.run_dir}"
             )
             if self.automation_auto_start_after_preflight_var.get():
+                reboot_note = (
+                    " Windows reboot/update warning recorded; starting because auto-start is enabled."
+                    if self.has_automation_reboot_warning(state)
+                    else ""
+                )
                 self.automation_status_var.set(
                     f"Preflight ready for {len(state.tile_plans)} tile(s).{warning_text} "
-                    "Starting automation automatically..."
+                    f"Starting automation automatically...{reboot_note}"
                 )
                 self.root.after(0, self.start_automation)
                 return
@@ -4834,6 +4938,7 @@ class LauncherApp:
                 (
                     f"Preflight passed for {len(state.tile_plans)} tile(s).\n"
                     f"Warnings: {len(state.warnings)}\n"
+                    f"{self.format_automation_warnings(state)}"
                     f"Run folder:\n{state.run_dir}"
                 ),
             )
@@ -4845,8 +4950,27 @@ class LauncherApp:
         )
         messagebox.showwarning(
             "Automation preflight blocked",
-            "\n".join(state.errors[:8]) or "Preflight did not pass.",
+            (
+                "\n".join(state.errors[:8]) or "Preflight did not pass."
+            )
+            + self.format_automation_warnings(state),
         )
+
+    def has_automation_reboot_warning(self, state: AutomationRunState) -> bool:
+        """Return True when preflight warnings indicate Windows reboot/update risk."""
+        for warning in state.warnings:
+            text = str(warning).lower()
+            if "windows" in text and any(term in text for term in ("reboot", "restart", "active hours")):
+                return True
+        return False
+
+    def format_automation_warnings(self, state: AutomationRunState) -> str:
+        """Return preflight warnings as a readable message block."""
+        if not state.warnings:
+            return ""
+        lines = "\n".join(f"- {warning}" for warning in state.warnings[:8])
+        suffix = f"\n- ... +{len(state.warnings) - 8} more warning(s)" if len(state.warnings) > 8 else ""
+        return f"\nWarning details:\n{lines}{suffix}\n\n"
 
     def populate_automation_tree(self, state: AutomationRunState) -> None:
         """Display automation preflight and run rows."""
@@ -4854,30 +4978,83 @@ class LauncherApp:
             return
         self.clear_treeview(self.automation_tree)
         for plan in state.tile_plans:
-            counts = (
-                f"request: matched {plan.matched_granules}, selected {plan.selected_granules}, "
-                f"pending downloads {plan.pending_downloads}, "
-                f"est. mosaics {plan.estimated_mosaic_groups}, "
-                f"recorded mosaics {plan.recorded_mosaic_groups}, "
-                f"pending mosaics {plan.pending_mosaic_groups}; "
-                f"project totals: downloaded {plan.downloaded}, extracted {plan.extracted}, "
-                f"mosaic sources {plan.mosaic_sources}, uploaded/verified {plan.uploaded}, "
-                f"missing upload {plan.missing_upload}"
-            )
             self.automation_tree.insert(
                 "",
                 tk.END,
-                values=(plan.tile, plan.classification, "preflight", counts, plan.message),
+                values=(
+                    plan.tile,
+                    plan.classification,
+                    "preflight",
+                    self.compact_automation_plan_counts(plan),
+                    self.compact_automation_tree_message(plan.message),
+                ),
             )
         for result in state.stage_results:
-            counts = ""
-            if result.deleted_files or result.deleted_bytes:
-                counts = f"deleted {result.deleted_files}, {result.deleted_bytes} bytes"
+            counts = self.compact_automation_result_counts(result)
             self.automation_tree.insert(
                 "",
                 tk.END,
-                values=(result.tile, result.stage, result.status, counts, result.message[:300]),
+                values=(
+                    result.tile,
+                    result.stage,
+                    result.status,
+                    counts,
+                    self.compact_automation_result_message(result),
+                ),
             )
+
+    def compact_automation_plan_counts(self, plan: AutomationTilePlan) -> str:
+        """Return compact preflight counts for the Automation queue."""
+        if plan.classification == "cmr retry later":
+            return "CMR counts pending; download will retry"
+        if plan.classification == "blocked" and not any(
+            (
+                plan.matched_granules,
+                plan.selected_granules,
+                plan.pending_downloads,
+                plan.downloaded,
+                plan.extracted,
+                plan.mosaic_sources,
+                plan.submitted,
+                plan.uploaded,
+                plan.missing_upload,
+            )
+        ):
+            return "No counts available"
+        return (
+            f"remote {plan.matched_granules}; selected {plan.selected_granules}; "
+            f"pending DL {plan.pending_downloads}; "
+            f"mosaics est/ok/pending {plan.estimated_mosaic_groups}/"
+            f"{plan.recorded_mosaic_groups}/{plan.pending_mosaic_groups}; "
+            f"project D/E/M/Sent/V/Miss {plan.downloaded}/{plan.extracted}/"
+            f"{plan.mosaic_sources}/{plan.submitted}/{plan.uploaded}/{plan.missing_upload}"
+        )
+
+    def compact_automation_result_counts(self, result: AutomationStageResult) -> str:
+        """Return compact execution counts for the Automation queue."""
+        if result.deleted_files or result.deleted_bytes:
+            return f"deleted {result.deleted_files}; bytes {result.deleted_bytes}"
+        if result.return_code:
+            return f"return code {result.return_code}"
+        return ""
+
+    def compact_automation_tree_message(self, message: str, limit: int = 150) -> str:
+        """Return a concise queue message while keeping full detail in logs."""
+        text = str(message or "").replace("\r", " ").replace("\n", " ").strip()
+        text = " ".join(text.split())
+        lower = text.lower()
+        if "cmr" in lower and ("timed out" in lower or "search failed" in lower or "read timed out" in lower):
+            return "CMR search timed out. Usually temporary; automation will continue/retry. See tile log."
+        if len(text) <= limit:
+            return text
+        return self.compact_live_status_message(text, limit=limit)
+
+    def compact_automation_result_message(self, result: AutomationStageResult) -> str:
+        """Return a concise stage-result message for the Automation queue."""
+        message = self.compact_automation_tree_message(result.message)
+        if result.log_path and "see tile log" not in message.lower() and result.status.lower() in {"failed", "warning"}:
+            return f"{message} Log: {Path(result.log_path).name}"
+        return message
 
     def apply_automation_run_state(
         self,
@@ -4899,6 +5076,7 @@ class LauncherApp:
         self.automation_cleanup_enabled_var.set(bool(config.cleanup_enabled))
         self.automation_min_free_space_var.set(str(config.min_free_space_gb))
         self.automation_continue_on_failure_var.set(bool(config.continue_on_tile_failure))
+        self.automation_prevent_sleep_var.set(bool(config.prevent_system_sleep))
         self.automation_preflight_state = state
         self.refresh_automation_tile_list()
         self.update_automation_date_status()
@@ -5045,7 +5223,17 @@ class LauncherApp:
             )
         else:
             self.automation_progress_text_var.set(f"Progress: {tile} / {stage} / {status}")
-        self.automation_status_var.set(str(message).strip()[:500])
+        self.automation_status_var.set(self.compact_live_status_message(message))
+
+    def compact_live_status_message(self, message: str, limit: int = 120) -> str:
+        """Return a one-line status message so long filenames do not resize the GUI."""
+        text = str(message or "").replace("\r", " ").replace("\n", " ").strip()
+        text = " ".join(text.split())
+        if len(text) <= limit:
+            return text
+        keep_start = max(20, limit // 2 - 4)
+        keep_end = max(20, limit - keep_start - 5)
+        return f"{text[:keep_start].rstrip()} ... {text[-keep_end:].lstrip()}"
 
     def automation_stage_names(self, include_upload: bool) -> list[str]:
         """Return stage units included in one automation run."""
@@ -5056,7 +5244,7 @@ class LauncherApp:
         ]
 
     def initialize_automation_progress_tracker(self, state: AutomationRunState) -> None:
-        """Initialize aggregate progress from persisted unique tile/stage results."""
+        """Initialize aggregate progress from persisted results and preflight-complete tiles."""
         self.automation_progress_tiles = list(state.config.utm_tiles)
         self.automation_progress_stages = self.automation_stage_names(state.config.include_upload)
         valid_tiles = set(self.automation_progress_tiles)
@@ -5069,6 +5257,13 @@ class LauncherApp:
             and result.stage in valid_stages
             and str(result.status or "").lower() in terminal_statuses
         }
+        for plan in state.tile_plans:
+            if plan.tile not in valid_tiles:
+                continue
+            if plan.classification == "already complete" and plan.pending_downloads == 0:
+                self.automation_progress_completed_keys.update(
+                    (plan.tile, stage) for stage in self.automation_progress_stages
+                )
         self.automation_progress_total_units = (
             len(self.automation_progress_tiles) * len(self.automation_progress_stages)
         )
@@ -5088,15 +5283,33 @@ class LauncherApp:
             index = self.automation_progress_tiles.index(tile) + 1
         except ValueError:
             return ""
-        return f"tile {index}/{len(self.automation_progress_tiles)} | "
+        return f"current tile {index}/{len(self.automation_progress_tiles)} | "
+
+    def completed_automation_tile_count(self) -> int:
+        """Return how many automation tiles have all configured stages complete."""
+        if not self.automation_progress_tiles or not self.automation_progress_stages:
+            return 0
+        return sum(
+            all(
+                (tile, stage) in self.automation_progress_completed_keys
+                for stage in self.automation_progress_stages
+            )
+            for tile in self.automation_progress_tiles
+        )
 
     def set_automation_progress_text(self, detail: str) -> None:
-        """Render percentage, stage-unit count, and current activity."""
+        """Render percentage, stage-unit count, tile count, and current activity."""
         percentage = self.update_automation_progress_percentage()
         total = self.automation_progress_total_units
         completed = min(total, len(self.automation_progress_completed_keys))
+        tile_total = len(self.automation_progress_tiles)
+        tile_detail = ""
+        if tile_total:
+            tile_detail = (
+                f"; {self.completed_automation_tile_count()}/{tile_total} tiles complete"
+            )
         self.automation_progress_text_var.set(
-            f"Progress: {percentage:.1f}% ({completed}/{total} stages) | {detail}"
+            f"Progress: {percentage:.1f}% ({completed}/{total} stages{tile_detail}) | {detail}"
         )
 
     def stop_automation_after_current_stage(self) -> None:
@@ -5987,7 +6200,15 @@ class LauncherApp:
             self.stats_uploaded_level_tree.insert("", tk.END, values=(level, str(count)))
 
         self.clear_treeview(self.stats_upload_qa_tile_tree)
-        for tile, downloaded, extracted, mosaic_sources, uploaded, missing_upload in insights.upload_qa_tile_rows:
+        for (
+            tile,
+            downloaded,
+            extracted,
+            mosaic_sources,
+            submitted,
+            uploaded,
+            missing_upload,
+        ) in insights.upload_qa_tile_rows:
             self.stats_upload_qa_tile_tree.insert(
                 "",
                 tk.END,
@@ -5996,6 +6217,7 @@ class LauncherApp:
                     str(downloaded),
                     str(extracted),
                     str(mosaic_sources),
+                    str(submitted),
                     str(uploaded),
                     str(missing_upload),
                 ),

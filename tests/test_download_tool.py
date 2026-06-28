@@ -103,8 +103,14 @@ class FakeEarthaccess:
 
 
 class FakeCMRResponse:
-    def __init__(self, items: list[FakeGranule], next_offset: int | None = None) -> None:
+    def __init__(
+        self,
+        items: list[FakeGranule],
+        next_offset: int | None = None,
+        total_hits: int | None = None,
+    ) -> None:
         self._items = items
+        self._total_hits = total_hits
         self.headers = {}
         if next_offset is not None:
             self.headers["cmr-search-after"] = str(next_offset)
@@ -112,8 +118,11 @@ class FakeCMRResponse:
     def raise_for_status(self) -> None:
         return None
 
-    def json(self) -> dict[str, list[FakeGranule]]:
-        return {"items": self._items}
+    def json(self) -> dict[str, object]:
+        document: dict[str, object] = {"items": self._items}
+        if self._total_hits is not None:
+            document["hits"] = self._total_hits
+        return document
 
 
 class FakeCMRSession:
@@ -126,6 +135,7 @@ class FakeCMRSession:
         url: str,
         headers: dict[str, str] | None = None,
         params: dict[str, int] | None = None,
+        timeout: int | None = None,
     ):
         headers = headers or {}
         params = params or {}
@@ -138,6 +148,7 @@ class FakeCMRSession:
         return FakeCMRResponse(
             page,
             next_offset if next_offset < len(matches) else None,
+            total_hits=len(matches),
         )
 
 
@@ -147,6 +158,7 @@ class FakeGranuleQuery:
         self.headers: dict[str, str] = {}
         self.session = FakeCMRSession(self)
         self.patterns: list[str] = []
+        self.hit_calls = 0
 
     def short_name(self, value: str):
         return self
@@ -168,6 +180,7 @@ class FakeGranuleQuery:
         return self
 
     def hits(self) -> int:
+        self.hit_calls += 1
         return len(self.matches())
 
     def _build_url(self) -> str:
@@ -192,6 +205,38 @@ class FakePagedEarthaccess(FakeEarthaccess):
         query = FakeGranuleQuery(self.results)
         self.queries.append(query)
         return query
+
+
+class FailingCMRSession(FakeCMRSession):
+    def get(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        params: dict[str, int] | None = None,
+        timeout: int | None = None,
+    ):
+        raise TimeoutError("CMR page request stalled")
+
+
+class FailingGranuleQuery(FakeGranuleQuery):
+    def __init__(self, results: list[FakeGranule]) -> None:
+        super().__init__(results)
+        self.session = FailingCMRSession(self)
+
+
+class FailingPagedEarthaccess(FakePagedEarthaccess):
+    def __init__(self, results: list[FakeGranule]) -> None:
+        super().__init__(results)
+        self.search_data_calls = 0
+
+    def granule_query(self):
+        query = FailingGranuleQuery(self.results)
+        self.queries.append(query)
+        return query
+
+    def search_data(self, **kwargs):
+        self.search_data_calls += 1
+        raise AssertionError("search_data fallback should not be used when paged CMR is available")
 
 
 class DownloadToolTests(unittest.TestCase):
@@ -302,6 +347,7 @@ class DownloadToolTests(unittest.TestCase):
             )
 
             self.assertEqual(len(preview.granules), 2005)
+            self.assertEqual(earthaccess.queries[0].hit_calls, 0)
             self.assertGreaterEqual(len(earthaccess.queries[0].session.page_calls), 2)
             self.assertIn((0, 2005, "Step 1/4: CMR found 2005 matching granule(s)"), progress)
             self.assertIn(
@@ -312,6 +358,35 @@ class DownloadToolTests(unittest.TestCase):
                 (2005, 2005, "Step 1/4: CMR metadata retrieved for 2005/2005 granule(s)"),
                 progress,
             )
+
+    def test_paged_cmr_failure_raises_without_unbounded_search_data_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            results = [FakeGranule(granule_name(utm="UTM30R"), concept_id="G1")]
+            earthaccess = FailingPagedEarthaccess(results)
+            config = DownloadConfig(
+                collection_short_name="SWOT_L2_HR_Raster_100m_D",
+                output_folder=root / "raw",
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                utm_tiles=["UTM30R"],
+                report_csv=root / "report.csv",
+                manifest_csv=root / "manifest.csv",
+                search_request_timeout_seconds=5,
+            )
+            progress: list[tuple[int, int, str]] = []
+
+            with self.assertRaisesRegex(RuntimeError, "CMR search failed"):
+                build_download_preview(
+                    config,
+                    earthaccess_module=earthaccess,
+                    progress_callback=lambda current, total, message: progress.append(
+                        (current, total, message)
+                    ),
+                )
+
+            self.assertEqual(earthaccess.search_data_calls, 0)
+            self.assertTrue(any("failed CMR search for SWOT_L2_HR_Raster_100m_UTM30R" in row[2] for row in progress))
 
     def test_preview_filters_to_best_product_version_but_reports_excluded_rows(self) -> None:
         old_name = granule_name(utm="UTM30R", crid="PID0", counter="01")

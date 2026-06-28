@@ -16,6 +16,55 @@ A one-time delay of a few seconds can happen on HDD projects while Windows warms
 
 If project opening repeatedly takes more than 10-15 seconds, check that no old uploader, ChromeDriver, or Python process is still running for the same project. After the window opens, use `Sync EE Assets` or `Refresh Statistics` only when you need a fresh verification pass.
 
+## Automation Appears Stuck While Searching CMR
+
+Symptoms:
+
+- Automation shows a tile in `download / running`
+- the stage log repeats `searching CMR` or `searching SWOT_L2_HR_Raster_100m_UTM...`
+- no new NetCDF files appear in `01_raw_downloads`
+
+What it usually means:
+
+- SWOTFlow is still asking NASA CMR for metadata, before file transfer starts
+- CMR or Earthdata is slow, temporarily unavailable, or the request is very large
+
+What SWOTFlow does:
+
+- each CMR metadata page request is bounded by `download.search_request_timeout_seconds`
+- if a tile search cannot complete, the download stage records the CMR error and remains resumable
+- Automation can continue to later tiles and then retry deferred CMR/download-search failures after the first tile pass
+
+What to do:
+
+1. Let the current bounded search finish or fail.
+2. If the run was started with an older version that did not have the timeout, close SWOTFlow and reopen the same project.
+3. Authenticate Earthdata again if downloads remain.
+4. Run preflight if project records changed, then start or resume the automation run.
+5. If the same tile keeps failing after the deferred retry pass, retry later; the problem may be on the CMR/Earthdata side or in local power/network state rather than in local processing.
+
+## Automation Stops When The Computer Is Idle
+
+For overnight Automation runs, keep `Prevent computer sleep while automation runs`
+enabled in the Automation tab. On Windows, SWOTFlow uses the native execution
+state API to request that the computer stays awake while Automation is active.
+
+This does not prevent:
+
+- manual shutdown or sleep
+- power loss
+- forced Windows Update restarts
+- every vendor-specific Wi-Fi/Ethernet power-saving mode
+
+For long unattended runs, also set Windows sleep to `Never` while plugged in,
+disable network-adapter power saving if needed, and avoid scheduled restart
+windows during upload-heavy runs.
+
+Automation preflight also checks common Windows pending-reboot markers and
+Windows Update active hours. If it warns about a pending reboot or overnight
+restart risk, restart/update the machine, pause updates, or adjust active hours
+before starting a long run.
+
 ## How To Stop a Running Upload
 
 What to do:
@@ -402,6 +451,14 @@ retries the file and closes the failed dialog before continuing. Run `Sync EE
 Assets`; if an unverified asset is absent, the next real upload or Automation
 preflight plans that mosaic again. The mosaic is not eligible for cleanup until
 Earth Engine verification succeeds.
+
+If a few Earth Engine ingestion tasks take many minutes and block Automation
+from moving to the next tile, switch Upload tab > `Upload completion mode` to
+`Submit and continue; verify later`. That mode submits the files, runs a
+non-blocking task/inventory check, keeps unverified mosaics on disk, and lets
+later Automation EE sync or Cleanup remove only assets that are verified.
+Automation mosaic cleanup is global for verified mosaics, so later tiles can
+remove earlier-tile mosaics after a later EE sync confirms those assets.
 
 In Automation, one or more `ERROR` or `UNKNOWN_AFTER_CLICK` files produce an
 upload-stage warning rather than stopping the remaining tile queue. Review

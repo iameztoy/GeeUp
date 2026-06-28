@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 import yaml
 
 from gdal_runtime import build_gdal_runtime_env
+from power_management import keep_system_awake, windows_automation_reboot_warnings
 from project_database import read_project_rows
 from project_insights import (
     CleanupCandidate,
@@ -29,8 +30,14 @@ from project_insights import (
     plan_cleanup_candidates,
 )
 from project_updates import record_update_preview
+from project_updates import expected_rows as read_update_expected_rows
+from project_updates import update_campaign_id
 from swot_download_tool import (
+    DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS,
     DownloadConfig,
+    DownloadGranule,
+    DownloadPreview,
+    build_download_query,
     build_download_preview,
     existing_download_path,
     load_config_file as load_download_config_file,
@@ -62,6 +69,21 @@ AUTOMATION_RUN_COLUMNS = [
     "deleted_files",
     "deleted_bytes",
 ]
+RETRYABLE_DOWNLOAD_FAILURE_MARKERS = (
+    "cmr search failed",
+    "cmr request failed",
+    "read timed out",
+    "internal error",
+    "temporarily unavailable",
+)
+
+
+def is_retryable_download_message(message: str) -> bool:
+    """Return True when a download/search message looks like a transient remote failure."""
+    text = str(message or "").lower()
+    return any(marker in text for marker in RETRYABLE_DOWNLOAD_FAILURE_MARKERS)
+
+
 AUTOMATION_STAGES = [
     "download",
     "duplicates",
@@ -91,6 +113,9 @@ class AutomationConfig:
     cleanup_enabled: bool = True
     min_free_space_gb: float = 50.0
     continue_on_tile_failure: bool = True
+    deferred_download_retry_passes: int = 1
+    prevent_system_sleep: bool = True
+    prevent_display_sleep: bool = False
     run_id: str = ""
     run_dir: Optional[Path] = None
 
@@ -112,6 +137,7 @@ class AutomationTilePlan:
     downloaded: int = 0
     extracted: int = 0
     mosaic_sources: int = 0
+    submitted: int = 0
     uploaded: int = 0
     missing_upload: int = 0
 
@@ -204,6 +230,9 @@ def normalize_automation_config(config: AutomationConfig) -> AutomationConfig:
         cleanup_enabled=bool(config.cleanup_enabled),
         min_free_space_gb=float(config.min_free_space_gb),
         continue_on_tile_failure=bool(config.continue_on_tile_failure),
+        deferred_download_retry_passes=max(0, int(config.deferred_download_retry_passes)),
+        prevent_system_sleep=bool(config.prevent_system_sleep),
+        prevent_display_sleep=bool(config.prevent_display_sleep),
         run_id=config.run_id,
         run_dir=Path(config.run_dir) if config.run_dir is not None else None,
     )
@@ -274,6 +303,7 @@ def build_tile_config_dict(
             "skip_manifest_existing": True,
         }
     )
+    download.setdefault("search_request_timeout_seconds", DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS)
     config["download"] = download
 
     duplicates = dict(config.get("duplicates", {}))
@@ -387,7 +417,7 @@ def download_config_for_tile(
     return load_download_config_file(temp_config)
 
 
-def tile_counts_from_insights(config: Mapping[str, Any]) -> Dict[str, tuple[int, int, int, int, int]]:
+def tile_counts_from_insights(config: Mapping[str, Any]) -> Dict[str, tuple[int, int, int, int, int, int]]:
     """Return per-tile pipeline counts from ProjectInsights."""
     insights = collect_project_insights(config)
     return {
@@ -395,10 +425,19 @@ def tile_counts_from_insights(config: Mapping[str, Any]) -> Dict[str, tuple[int,
             int(downloaded),
             int(extracted),
             int(mosaic_sources),
+            int(submitted),
             int(uploaded),
             int(missing_upload),
         )
-        for tile, downloaded, extracted, mosaic_sources, uploaded, missing_upload in insights.upload_qa_tile_rows
+        for (
+            tile,
+            downloaded,
+            extracted,
+            mosaic_sources,
+            submitted,
+            uploaded,
+            missing_upload,
+        ) in insights.upload_qa_tile_rows
     }
 
 
@@ -470,6 +509,47 @@ def completed_mosaic_output_names(config: Mapping[str, Any]) -> set[str]:
     return output_names
 
 
+def cached_update_preview(download_config: DownloadConfig) -> DownloadPreview | None:
+    """Return a preview from stored update expected rows for this exact campaign/tile."""
+    campaign_id = update_campaign_id(download_config)
+    tiles = set(download_config.utm_tiles)
+    granules: list[DownloadGranule] = []
+    for row in read_update_expected_rows(download_config):
+        if str(row.get("campaign_id", "") or "") != campaign_id:
+            continue
+        file_name = str(row.get("file_name", "") or "").strip()
+        if not file_name:
+            continue
+        tile = str(row.get("utm_tile", "") or "").strip().upper()
+        if tiles and tile not in tiles:
+            continue
+        size_mb = None
+        size_text = str(row.get("size_mb", "") or "").strip()
+        if size_text:
+            try:
+                size_mb = float(size_text)
+            except ValueError:
+                size_mb = None
+        granules.append(
+            DownloadGranule(
+                identity=str(row.get("granule_id", "") or file_name),
+                file_name=file_name,
+                utm_tile=tile,
+                start_time=str(row.get("start_time", "") or ""),
+                end_time=str(row.get("end_time", "") or ""),
+                size_mb=size_mb,
+                selected_for_download=True,
+                duplicate_filter_status="selected_cached",
+            )
+        )
+    if not granules:
+        return None
+    return DownloadPreview(
+        query=build_download_query(download_config),
+        granules=sorted(granules, key=lambda granule: granule.file_name.lower()),
+    )
+
+
 def classify_tile(
     *,
     pending_downloads: int,
@@ -505,6 +585,8 @@ def preflight_automation(
     gdal_python = Path(str(base_config.get("gdal", {}).get("python", ""))) if isinstance(base_config.get("gdal", {}), Mapping) else Path("")
     if not str(gdal_python) or not gdal_python.exists():
         state.errors.append(f"Configured GDAL Python does not exist: {gdal_python}")
+
+    state.warnings.extend(windows_automation_reboot_warnings())
 
     try:
         usage = shutil.disk_usage(normalized.project_root)
@@ -554,7 +636,7 @@ def preflight_automation(
                     tile,
                     "preflight",
                     "running",
-                    f"Searching CMR and classifying {tile}...",
+                    f"Checking cached preview/CMR and classifying {tile}...",
                 )
             download_config = download_config_for_tile(
                 base_config,
@@ -564,13 +646,17 @@ def preflight_automation(
                 end_date=normalized.end_date,
                 include_upload=normalized.include_upload,
             )
-            preview = preview_builder(download_config)
-            record_update_preview(
-                download_config,
-                preview,
-                source=f"automation_preflight:{state.run_id}",
-                campaign_tiles=normalized.utm_tiles,
-            )
+            preview = cached_update_preview(download_config)
+            preview_source = "cached_update_expected"
+            if preview is None:
+                preview = preview_builder(download_config)
+                preview_source = f"automation_preflight:{state.run_id}"
+                record_update_preview(
+                    download_config,
+                    preview,
+                    source=preview_source,
+                    campaign_tiles=normalized.utm_tiles,
+                )
             pending = 0
             for granule in preview.selected_granules:
                 if manifest_has_downloaded(manifest, granule):
@@ -581,9 +667,9 @@ def preflight_automation(
             estimated_mosaic_names = estimate_mosaic_output_names(preview.selected_granules)
             recorded_mosaics = len(estimated_mosaic_names & recorded_mosaic_names)
             pending_mosaics = max(0, len(estimated_mosaic_names) - recorded_mosaics)
-            downloaded, extracted, mosaic_sources, uploaded, missing_upload = counts_by_tile.get(
+            downloaded, extracted, mosaic_sources, submitted, uploaded, missing_upload = counts_by_tile.get(
                 tile,
-                (0, 0, 0, 0, 0),
+                (0, 0, 0, 0, 0, 0),
             )
             classification, message = classify_tile(
                 pending_downloads=pending,
@@ -593,6 +679,8 @@ def preflight_automation(
                 uploaded=uploaded,
                 missing_upload=missing_upload,
             )
+            if preview_source == "cached_update_expected":
+                message = f"{message} Used cached expected granules for this date window."
             state.tile_plans.append(
                 AutomationTilePlan(
                     tile=tile,
@@ -608,6 +696,7 @@ def preflight_automation(
                     downloaded=downloaded,
                     extracted=extracted,
                     mosaic_sources=mosaic_sources,
+                    submitted=submitted,
                     uploaded=uploaded,
                     missing_upload=missing_upload,
                 )
@@ -615,12 +704,33 @@ def preflight_automation(
             if progress_callback is not None:
                 progress_callback(tile, "preflight", "success", f"{tile}: {classification}. {message}")
         except Exception as exc:
-            state.errors.append(f"{tile}: preflight failed: {exc}")
+            error_message = str(exc)
+            if is_retryable_download_message(error_message):
+                state.warnings.append(
+                    f"{tile}: CMR search timed out or failed during preflight. "
+                    "Automation will try again during the download stage."
+                )
+                state.tile_plans.append(
+                    AutomationTilePlan(
+                        tile=tile,
+                        classification="cmr retry later",
+                        message="CMR search unavailable during preflight; download stage will retry.",
+                    )
+                )
+                if progress_callback is not None:
+                    progress_callback(
+                        tile,
+                        "preflight",
+                        "warning",
+                        "CMR search unavailable during preflight; download stage will retry.",
+                    )
+                continue
+            state.errors.append(f"{tile}: preflight failed: {error_message}")
             state.tile_plans.append(
                 AutomationTilePlan(
                     tile=tile,
                     classification="blocked",
-                    message=str(exc),
+                    message=error_message,
                 )
             )
 
@@ -821,6 +931,13 @@ def execute_download_result(
         with log_path.open("a", encoding="utf-8", newline="") as log_handle:
             log_handle.write(f"ERROR: {exc}\n")
             log_handle.write(traceback.format_exc())
+        if is_retryable_download_message(str(exc)):
+            message = (
+                "CMR search failed or timed out. This is usually temporary; "
+                f"automation can continue with later tiles and retry this tile. Log: {log_path}"
+            )
+        else:
+            message = f"Download failed: {exc}. Log: {log_path}"
         return AutomationStageResult(
             run_id=state.run_id,
             tile=tile,
@@ -829,7 +946,7 @@ def execute_download_result(
             start_time=started,
             end_time=now_text(),
             return_code=1,
-            message=f"Download failed: {exc}. Log: {log_path}",
+            message=message,
             config_path=str(tile_config_path),
             log_path=str(log_path),
         )
@@ -845,12 +962,21 @@ def cleanup_stage(
     tile: str,
     stage: str,
 ) -> tuple[int, int, list[str]]:
-    """Delete safe cleanup candidates for one stage/tile only."""
-    candidates = [
-        candidate
-        for candidate in plan_cleanup_candidates(config)
-        if candidate.stage == stage and path_mentions_tile(candidate.path, tile)
-    ]
+    """Delete safe cleanup candidates for one automation cleanup stage.
+
+    Raw and extracted cleanup stay tile-scoped because later stages may still
+    need neighboring files. Mosaic cleanup is intentionally global: a later
+    Earth Engine sync can verify assets from earlier tiles after their own
+    cleanup stage has passed, so each upload-enabled cleanup sweep removes all
+    currently verified mosaics.
+    """
+    candidates = []
+    for candidate in plan_cleanup_candidates(config):
+        if candidate.stage != stage:
+            continue
+        if stage != "mosaic" and not path_mentions_tile(candidate.path, tile):
+            continue
+        candidates.append(candidate)
     return delete_cleanup_candidates(candidates)
 
 
@@ -903,6 +1029,12 @@ def _automation_config_from_mapping(data: Mapping[str, Any]) -> AutomationConfig
         cleanup_enabled=bool(data.get("cleanup_enabled", True)),
         min_free_space_gb=float(data.get("min_free_space_gb", 50.0) or 50.0),
         continue_on_tile_failure=bool(data.get("continue_on_tile_failure", True)),
+        deferred_download_retry_passes=max(
+            0,
+            int(data.get("deferred_download_retry_passes", 1) or 0),
+        ),
+        prevent_system_sleep=bool(data.get("prevent_system_sleep", True)),
+        prevent_display_sleep=bool(data.get("prevent_display_sleep", False)),
         run_id=str(data.get("run_id", "") or ""),
         run_dir=Path(run_dir_text) if run_dir_text else None,
     )
@@ -932,6 +1064,7 @@ def _tile_plan_from_mapping(data: Mapping[str, Any]) -> AutomationTilePlan:
         downloaded=_coerce_int(data.get("downloaded")),
         extracted=_coerce_int(data.get("extracted")),
         mosaic_sources=_coerce_int(data.get("mosaic_sources")),
+        submitted=_coerce_int(data.get("submitted")),
         uploaded=_coerce_int(data.get("uploaded")),
         missing_upload=_coerce_int(data.get("missing_upload")),
     )
@@ -1042,6 +1175,13 @@ def stage_skipped_result(
     )
 
 
+def is_retryable_download_failure(result: AutomationStageResult | None) -> bool:
+    """Return True for transient remote download/search failures that should not stop the queue."""
+    if result is None or result.stage != "download" or result.status.lower() != "failed":
+        return False
+    return is_retryable_download_message(result.message)
+
+
 def execute_cleanup_result(
     state: AutomationRunState,
     tile_config: Mapping[str, Any],
@@ -1057,7 +1197,8 @@ def execute_cleanup_result(
     started = now_text()
     deleted, bytes_deleted, errors = cleanup_stage(tile_config, tile, cleanup_stage_name)
     status = "success" if not errors else "warning"
-    message = f"Deleted {deleted} file(s), {format_bytes(bytes_deleted)}."
+    scope = "global verified mosaic sweep" if stage == "mosaic_cleanup" else f"{tile} {cleanup_stage_name}"
+    message = f"{scope}: deleted {deleted} file(s), {format_bytes(bytes_deleted)}."
     if errors:
         message = f"{message} {len(errors)} cleanup error(s): {'; '.join(errors[:3])}"
     return AutomationStageResult(
@@ -1129,6 +1270,26 @@ def run_automation(
 ) -> AutomationRunState:
     """Run the tile-by-tile automation workflow."""
     normalized = normalize_automation_config(config)
+    with keep_system_awake(
+        enabled=normalized.prevent_system_sleep,
+        keep_display_awake=normalized.prevent_display_sleep,
+    ):
+        return _run_automation_normalized(
+            normalized,
+            preflight_state=preflight_state,
+            progress_callback=progress_callback,
+            stop_event=stop_event,
+        )
+
+
+def _run_automation_normalized(
+    normalized: AutomationConfig,
+    *,
+    preflight_state: AutomationRunState | None = None,
+    progress_callback: ProgressCallback | None = None,
+    stop_event: Any = None,
+) -> AutomationRunState:
+    """Run automation with a normalized config while the caller owns power policy."""
     state = preflight_state if preflight_state is not None else preflight_automation(normalized)
     if not state.preflight_ok:
         return state
@@ -1142,72 +1303,15 @@ def run_automation(
     plan_by_tile = {plan.tile: plan for plan in state.tile_plans}
     resume_completed = completed_stage_keys(state)
     latest_results = latest_stage_results_by_key(state)
-    for tile in normalized.utm_tiles:
-        plan = plan_by_tile.get(tile)
-        if stop_event is not None and stop_event.is_set():
-            state.stopped = True
-            break
-        if plan is not None and plan.classification == "already complete" and plan.pending_downloads == 0:
-            tile_config = build_tile_config_dict(
-                normalized.base_config,
-                tile,
-                state.run_dir,
-                start_date=normalized.start_date,
-                end_date=normalized.end_date,
-                include_upload=normalized.include_upload,
-            )
-            stages = ["download", "duplicates", "extract", "raw_cleanup", "mosaic", "extracted_cleanup"]
-            if normalized.include_upload:
-                stages.extend(["upload", "ee_sync", "mosaic_cleanup"])
-            tile_failed = False
-            for stage in stages:
-                if stage in {"upload", "ee_sync", "mosaic_cleanup"} and not normalized.include_upload:
-                    continue
-                previous = latest_results.get((tile, stage))
-                if stage.endswith("_cleanup") and normalized.cleanup_enabled:
-                    if previous is not None and previous.status.lower() == "success":
-                        if progress_callback is not None:
-                            progress_callback(
-                                tile,
-                                stage,
-                                "skipped",
-                                "Cleanup already completed in this automation run; skipping during resume.",
-                            )
-                        continue
-                    if progress_callback is not None:
-                        progress_callback(
-                            tile,
-                            stage,
-                            "running",
-                            f"Cleaning already-complete tile at {stage}",
-                        )
-                    result = execute_cleanup_result(state, tile_config, tile, stage)
-                    append_stage_result(state, result)
-                    latest_results[(tile, stage)] = result
-                    if progress_callback is not None:
-                        progress_callback(tile, stage, result.status, result.message)
-                    if result.status == "failed":
-                        tile_failed = True
-                        break
-                    continue
-                if (tile, stage) in resume_completed:
-                    if progress_callback is not None:
-                        progress_callback(
-                            tile,
-                            stage,
-                            "skipped",
-                            "Stage already recorded as complete in this automation run.",
-                        )
-                    continue
-                result = stage_skipped_result(state, tile, stage, "Tile already complete for this requested date range.")
-                append_stage_result(state, result)
-                latest_results[(tile, stage)] = result
-                if progress_callback is not None:
-                    progress_callback(tile, stage, result.status, result.message)
-            if tile_failed and not normalized.continue_on_tile_failure:
-                break
-            continue
 
+    def stages_for_current_run() -> list[str]:
+        stages = ["download", "duplicates", "extract", "raw_cleanup", "mosaic", "extracted_cleanup"]
+        if normalized.include_upload:
+            stages.extend(["upload", "ee_sync", "mosaic_cleanup"])
+        return stages
+
+    def run_active_tile(tile: str) -> bool:
+        """Run every needed stage for one non-complete tile. Return True on failure."""
         tile_config = build_tile_config_dict(
             normalized.base_config,
             tile,
@@ -1218,12 +1322,8 @@ def run_automation(
         )
         tile_dir_path = tile_run_dir(state, tile)
         tile_config_path = write_tile_config(tile_config, tile_dir_path / "automation_config.yaml")
-        stages = ["download", "duplicates", "extract", "raw_cleanup", "mosaic", "extracted_cleanup"]
-        if normalized.include_upload:
-            stages.extend(["upload", "ee_sync", "mosaic_cleanup"])
-
         tile_failed = False
-        for stage in stages:
+        for stage in stages_for_current_run():
             if stop_event is not None and stop_event.is_set():
                 state.stopped = True
                 break
@@ -1267,10 +1367,84 @@ def run_automation(
             if result.status == "failed":
                 tile_failed = True
                 break
+        return tile_failed
+
+    deferred_retry_tiles: list[str] = []
+    stop_after_failure = False
+    for tile in normalized.utm_tiles:
+        plan = plan_by_tile.get(tile)
+        if stop_event is not None and stop_event.is_set():
+            state.stopped = True
+            break
+        if plan is not None and plan.classification == "already complete" and plan.pending_downloads == 0:
+            for stage in stages_for_current_run():
+                if stage in {"upload", "ee_sync", "mosaic_cleanup"} and not normalized.include_upload:
+                    continue
+                if (tile, stage) in resume_completed:
+                    if progress_callback is not None:
+                        progress_callback(
+                            tile,
+                            stage,
+                            "skipped",
+                            "Stage already recorded as complete in this automation run.",
+                        )
+                    continue
+                result = stage_skipped_result(
+                    state,
+                    tile,
+                    stage,
+                    (
+                        "Tile already complete for this requested date range; "
+                        "cleanup is not rerun during resume."
+                    ),
+                )
+                append_stage_result(state, result)
+                latest_results[(tile, stage)] = result
+                if progress_callback is not None:
+                    progress_callback(tile, stage, result.status, result.message)
+            continue
+
+        tile_failed = run_active_tile(tile)
         if state.stopped:
             break
-        if tile_failed and not normalized.continue_on_tile_failure:
+        retryable_download = is_retryable_download_failure(latest_results.get((tile, "download")))
+        if tile_failed and retryable_download:
+            deferred_retry_tiles.append(tile)
+        if tile_failed and not normalized.continue_on_tile_failure and not retryable_download:
+            stop_after_failure = True
             break
+
+    for retry_pass in range(1, normalized.deferred_download_retry_passes + 1):
+        if state.stopped or stop_after_failure or not deferred_retry_tiles:
+            break
+        retry_tiles = list(dict.fromkeys(deferred_retry_tiles))
+        deferred_retry_tiles = []
+        for tile in retry_tiles:
+            if stop_event is not None and stop_event.is_set():
+                state.stopped = True
+                break
+            latest_download = latest_results.get((tile, "download"))
+            if not is_retryable_download_failure(latest_download):
+                continue
+            if progress_callback is not None:
+                progress_callback(
+                    tile,
+                    "download",
+                    "running",
+                    (
+                        "Retrying deferred CMR/download search failure "
+                        f"(pass {retry_pass}/{normalized.deferred_download_retry_passes})"
+                    ),
+                )
+            tile_failed = run_active_tile(tile)
+            if state.stopped:
+                break
+            retryable_download = is_retryable_download_failure(latest_results.get((tile, "download")))
+            if tile_failed and retryable_download:
+                deferred_retry_tiles.append(tile)
+            if tile_failed and not normalized.continue_on_tile_failure and not retryable_download:
+                stop_after_failure = True
+                break
 
     state.finished_at = now_text()
     write_run_state(state)
