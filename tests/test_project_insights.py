@@ -187,6 +187,8 @@ class ProjectInsightsTests(unittest.TestCase):
             candidates = plan_cleanup_candidates(config)
 
             self.assertEqual(insights.metrics["Raw NetCDF files on disk"], "1")
+            self.assertEqual(insights.metrics["Downloaded raw files still present"], "1")
+            self.assertEqual(insights.metrics["Download manifest rows marked raw_exists yes"], "1")
             self.assertEqual(insights.metrics["Duplicate files moved"], "1")
             self.assertEqual(insights.metrics["Date coverage"], "2026-01-02 to 2026-01-02")
             self.assertEqual(insights.metrics["Known cumulative download size"], "2.0 MB")
@@ -219,6 +221,36 @@ class ProjectInsightsTests(unittest.TestCase):
             )
             self.assertIn(extracted.with_suffix(".tfw"), [candidate.path for candidate in candidates])
             self.assertIn(mosaic.with_suffix(".tif.aux.xml"), [candidate.path for candidate in candidates])
+
+    def test_downloaded_raw_files_still_present_uses_current_disk_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            logs = root / "00_logs"
+            stale_name = swot_name(crid="PGD0", counter="02")
+            write_csv(
+                logs / "download_manifest.csv",
+                [
+                    {
+                        "granule_id": "G1",
+                        "file_name": stale_name,
+                        "local_path": str(root / "01_raw_downloads" / stale_name),
+                        "utm_tile": "UTM34M",
+                        "start_time": "2026-01-02T00:00:00Z",
+                        "downloaded": "yes",
+                        "raw_exists": "yes",
+                        "last_status": "DOWNLOADED",
+                    }
+                ],
+            )
+
+            insights = collect_project_insights(config)
+
+            self.assertEqual(insights.metrics["Raw NetCDF files on disk"], "0")
+            self.assertEqual(insights.metrics["Downloaded granules recorded"], "1")
+            self.assertEqual(insights.metrics["Downloaded raw files still present"], "0")
+            self.assertEqual(insights.metrics["Downloaded raw files no longer present"], "1")
+            self.assertEqual(insights.metrics["Download manifest rows marked raw_exists yes"], "1")
 
     def test_update_coverage_rows_follow_preview_to_uploaded_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

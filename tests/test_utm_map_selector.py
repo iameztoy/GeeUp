@@ -95,11 +95,22 @@ class UTMMapSelectorTests(unittest.TestCase):
                     )
                 ]
             )
+            widget.pack(fill="both", expand=True)
+            root.update_idletasks()
+            initial_height = widget.status_frame.winfo_height()
 
             widget.update_tile_status("UTM34M")
-
+            root.update_idletasks()
+            hover_height = widget.status_frame.winfo_height()
             self.assertIn("First missing mosaic", widget.status_var.get())
             self.assertIn("SWOT_L2_HR_Raster_100m_UTM34M_example.tif", widget.status_var.get())
+            widget.on_canvas_leave(tk.Event())
+            root.update_idletasks()
+
+            self.assertFalse(widget.status_frame.grid_propagate())
+            self.assertEqual(int(widget.status_label.cget("height")), 3)
+            self.assertEqual(initial_height, hover_height)
+            self.assertEqual(hover_height, widget.status_frame.winfo_height())
         finally:
             root.destroy()
 

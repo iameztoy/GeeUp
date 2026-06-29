@@ -133,6 +133,70 @@ class UploaderDialogRegressionTests(unittest.TestCase):
         self.assertNotIn(UNKNOWN_AFTER_CLICK_STATUS, RESUME_SKIP_STATUSES)
         self.assertIn(UNKNOWN_AFTER_CLICK_STATUS, TERMINAL_STATUSES)
 
+    def test_wait_for_ee_pending_verification_returns_warning_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.uploader_config(root, completion_mode="wait_for_ee")
+            config.execution.dry_run = False
+            uploader = self.uploader(config)
+            item = UploadItem(
+                local_file=root / "inputs" / "a.tif",
+                asset_name="a",
+                asset_id="projects/example/assets/collection/a",
+            )
+
+            def mark_pending(_items):
+                uploader.report.merge_row(
+                    {
+                        "local_file": str(item.local_file),
+                        "asset_id": item.asset_id,
+                        "final_status": SUBMITTED_PENDING_VERIFICATION_STATUS,
+                    }
+                )
+
+            with (
+                mock.patch.object(uploader, "build_upload_plan", return_value=[item]),
+                mock.patch.object(uploader, "confirm_before_real_upload"),
+                mock.patch.object(uploader, "create_driver", return_value=mock.Mock()),
+                mock.patch.object(uploader, "open_earth_engine"),
+                mock.patch.object(uploader, "ensure_logged_in"),
+                mock.patch.object(uploader, "process_batches", side_effect=mark_pending),
+                mock.patch.object(uploader, "wait_for_all_tracked_tasks"),
+            ):
+                self.assertEqual(uploader._run(), 2)
+
+    def test_submit_and_continue_pending_verification_remains_success_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.uploader_config(root, completion_mode="submit_and_continue")
+            config.execution.dry_run = False
+            uploader = self.uploader(config)
+            item = UploadItem(
+                local_file=root / "inputs" / "a.tif",
+                asset_name="a",
+                asset_id="projects/example/assets/collection/a",
+            )
+
+            def mark_pending(_items):
+                uploader.report.merge_row(
+                    {
+                        "local_file": str(item.local_file),
+                        "asset_id": item.asset_id,
+                        "final_status": SUBMITTED_PENDING_VERIFICATION_STATUS,
+                    }
+                )
+
+            with (
+                mock.patch.object(uploader, "build_upload_plan", return_value=[item]),
+                mock.patch.object(uploader, "confirm_before_real_upload"),
+                mock.patch.object(uploader, "create_driver", return_value=mock.Mock()),
+                mock.patch.object(uploader, "open_earth_engine"),
+                mock.patch.object(uploader, "ensure_logged_in"),
+                mock.patch.object(uploader, "process_batches", side_effect=mark_pending),
+                mock.patch.object(uploader, "reconcile_submit_and_continue_uploads"),
+            ):
+                self.assertEqual(uploader._run(), 0)
+
     def test_invalid_session_is_fatal(self) -> None:
         self.assertTrue(is_invalid_browser_session(InvalidSessionIdException()))
         self.assertTrue(is_invalid_browser_session(WebDriverException("invalid session id")))
