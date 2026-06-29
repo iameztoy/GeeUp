@@ -491,12 +491,29 @@ class UTMPipelineStatusMap(ttk.Frame):
         self.legend_frame.columnconfigure(0, weight=1)
         self.draw_legend()
 
-        ttk.Label(
-            self,
+        self.status_frame = ttk.Frame(self, height=58, padding=(0, 6, 0, 0))
+        self.status_frame.grid(row=3, column=0, sticky="ew")
+        self.status_frame.grid_propagate(False)
+        self.status_frame.columnconfigure(0, weight=1)
+        self.status_label = tk.Label(
+            self.status_frame,
             textvariable=self.status_var,
             foreground="#184a8b",
+            anchor="nw",
+            justify="left",
             wraplength=900,
-        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+            height=3,
+            borderwidth=0,
+            padx=0,
+            pady=0,
+        )
+        self.status_label.grid(row=0, column=0, sticky="ew")
+        self.status_frame.bind(
+            "<Configure>",
+            lambda event: self.status_label.configure(
+                wraplength=max(240, int(event.width) - 4)
+            ),
+        )
 
     def current_mode_key(self) -> str:
         """Return the selected status-map mode key."""
