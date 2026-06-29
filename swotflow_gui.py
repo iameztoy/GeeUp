@@ -5419,22 +5419,24 @@ class LauncherApp:
         warning_results = [result for result in state.stage_results if result.status == "warning"]
         failed = len(failed_results)
         warnings = len(warning_results)
-        if not state.stopped and not failed:
-            self.automation_progress_completed_keys = {
-                (tile, stage)
-                for tile in self.automation_progress_tiles
-                for stage in self.automation_progress_stages
-            }
         self.set_automation_progress_text(
             "automation stopped" if state.stopped else "automation finished"
         )
+        progress_percent = self.automation_progress_var.get()
         first_failure = ""
         if failed_results:
             result = failed_results[0]
             first_failure = f" First failure: {result.tile}/{result.stage}: {result.message[:300]}"
+        pending_notice = ""
+        if not state.stopped and not failed and progress_percent < 99.999:
+            pending_notice = (
+                " Some stages are still pending or awaiting verification; run preflight/resume "
+                "after resolving the pending item(s)."
+            )
         self.automation_status_var.set(
             f"Automation {'stopped' if state.stopped else 'finished'}. "
-            f"Failed stages: {failed}; warning stages: {warnings}.{first_failure} Run folder: {state.run_dir}"
+            f"Failed stages: {failed}; warning stages: {warnings}.{first_failure}{pending_notice} "
+            f"Run folder: {state.run_dir}"
         )
         self.refresh_project_statistics_if_active("automation")
         messagebox.showinfo(

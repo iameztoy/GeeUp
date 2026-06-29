@@ -1124,6 +1124,11 @@ class EarthEngineUIUploader:
         self.logger.info("Run finished. Status summary: %s", counts)
         if counts.get("FAILED") or counts.get("ERROR") or counts.get(UNKNOWN_AFTER_CLICK_STATUS):
             return 2
+        if (
+            self.config.upload.completion_mode == UPLOAD_COMPLETION_WAIT_FOR_EE
+            and counts.get(SUBMITTED_PENDING_VERIFICATION_STATUS)
+        ):
+            return 2
         return 0
 
     def attach_product_identity_metadata(self, item: UploadItem) -> None:

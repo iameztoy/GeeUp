@@ -541,6 +541,45 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_automation_finish_does_not_force_incomplete_run_to_full_progress(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = AutomationConfig(
+                project_root=Path("."),
+                base_config={},
+                utm_tiles=["UTM34M", "UTM35M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=False,
+            )
+            state = AutomationRunState(
+                run_id="run",
+                run_dir=Path("run"),
+                config=config,
+                preflight_ok=True,
+                stage_results=[
+                    AutomationStageResult(
+                        run_id="run",
+                        tile="UTM34M",
+                        stage="download",
+                        status="success",
+                    )
+                ],
+            )
+
+            with mock.patch("swotflow_gui.messagebox.showinfo"):
+                with mock.patch.object(app, "refresh_project_statistics_if_active"):
+                    app.finish_automation(state)
+
+            self.assertAlmostEqual(app.automation_progress_var.get(), 1 / 12 * 100)
+            self.assertIn("1/12 stages", app.automation_progress_text_var.get())
+            self.assertIn("0/2 tiles complete", app.automation_progress_text_var.get())
+            self.assertIn("pending", app.automation_status_var.get())
+        finally:
+            root.destroy()
+
     def test_open_project_loads_latest_automation_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project_root = Path(temp) / "Project"

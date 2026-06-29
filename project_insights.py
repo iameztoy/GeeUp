@@ -951,6 +951,41 @@ def path_lookup_keys(path_text: str | Path) -> List[str]:
     return [key for key in keys if key]
 
 
+def existing_file_lookup_keys(
+    folder: Path,
+    patterns: Sequence[str],
+    *,
+    recursive: bool = False,
+) -> set[str]:
+    """Return path and basename lookup keys for files currently present on disk."""
+    keys: set[str] = set()
+    if not folder.exists() or not folder.is_dir():
+        return keys
+    for pattern in patterns:
+        iterator = folder.rglob(pattern) if recursive else folder.glob(pattern)
+        for path in iterator:
+            if path.is_file():
+                keys.update(path_lookup_keys(path))
+    return keys
+
+
+def row_matches_existing_file(
+    row: Mapping[str, str],
+    existing_keys: set[str],
+    fields: Sequence[str],
+) -> bool:
+    """Return True if any row path/name field matches a currently present file."""
+    if not existing_keys:
+        return False
+    for field in fields:
+        value = str(row.get(field, "") or "").strip()
+        if not value:
+            continue
+        if any(key in existing_keys for key in path_lookup_keys(value)):
+            return True
+    return False
+
+
 def lookup_path_value(
     lookup: Mapping[str, List[tuple[str, str]]],
     path_text: str | Path,
@@ -1752,7 +1787,15 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         upload_rows=upload_rows,
     )
     downloaded_rows = [row for row in download_rows if row.get("downloaded", "").lower() == "yes"]
-    raw_existing_download_rows = [row for row in download_rows if row.get("raw_exists", "").lower() == "yes"]
+    raw_manifest_existing_download_rows = [
+        row for row in download_rows if row.get("raw_exists", "").lower() == "yes"
+    ]
+    current_raw_file_keys = existing_file_lookup_keys(raw_folder, ["*.nc"], recursive=True)
+    raw_existing_download_rows = [
+        row
+        for row in downloaded_rows
+        if row_matches_existing_file(row, current_raw_file_keys, ("local_path", "file_name"))
+    ]
     excluded_download_rows = [
         row
         for row in download_rows
@@ -1976,6 +2019,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Known size excluded by version filter"] = format_bytes(int(excluded_size_mb * 1024 * 1024))
     metrics["Downloaded raw files still present"] = str(len(raw_existing_download_rows))
     metrics["Downloaded raw files no longer present"] = str(max(0, len(downloaded_rows) - len(raw_existing_download_rows)))
+    metrics["Download manifest rows marked raw_exists yes"] = str(len(raw_manifest_existing_download_rows))
     metrics["Known cumulative download size"] = format_bytes(int(known_size_mb * 1024 * 1024))
     metrics["Extraction manifest rows"] = str(len(extract_rows))
     metrics["Completed extractions recorded"] = str(len(complete_extract_rows))
