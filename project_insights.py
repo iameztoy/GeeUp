@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import time
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
@@ -141,7 +142,16 @@ def read_csv_rows(path: str | Path) -> List[Dict[str, str]]:
     """Read project rows from SQLite, falling back to unregistered CSV files."""
     csv_path = Path(path)
     if dataset_for_path(csv_path):
-        return read_project_rows(csv_path)
+        try:
+            return read_project_rows(csv_path)
+        except Exception:
+            return read_disk_csv_rows(csv_path)
+    return read_disk_csv_rows(csv_path)
+
+
+def read_disk_csv_rows(path: str | Path) -> List[Dict[str, str]]:
+    """Read rows directly from the on-disk CSV export."""
+    csv_path = Path(path)
     if not csv_path.exists() or not csv_path.is_file():
         return []
     try:
@@ -149,6 +159,34 @@ def read_csv_rows(path: str | Path) -> List[Dict[str, str]]:
             return [dict(row) for row in csv.DictReader(handle)]
     except OSError:
         return []
+
+
+def row_merge_key(row: Mapping[str, str], fields: Sequence[str], fallback_index: int) -> str:
+    """Return a stable merge key for report rows."""
+    for field in fields:
+        value = str(row.get(field, "") or "").strip()
+        if value:
+            return f"{field}:{value}"
+    return f"row:{fallback_index}"
+
+
+def read_rows_with_disk_export(path: str | Path, key_fields: Sequence[str]) -> List[Dict[str, str]]:
+    """Merge SQLite-backed rows with the CSV export, preferring export values.
+
+    The CSV export is useful when an external process has just synchronized EE
+    assets and the GUI cleanup process has a stale or temporarily unavailable
+    SQLite view.
+    """
+    merged: "OrderedDict[str, Dict[str, str]]" = OrderedDict()
+    for index, row in enumerate(read_csv_rows(path)):
+        merged[row_merge_key(row, key_fields, index)] = dict(row)
+    offset = len(merged)
+    for index, row in enumerate(read_disk_csv_rows(path), start=offset):
+        key = row_merge_key(row, key_fields, index)
+        current = merged.get(key, {})
+        current.update(dict(row))
+        merged[key] = current
+    return list(merged.values())
 
 
 def write_csv_rows(path: str | Path, fieldnames: Sequence[str], rows: Iterable[Mapping[str, Any]]) -> None:
@@ -1672,8 +1710,8 @@ def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]
             )
 
     upload_rows = merge_upload_rows_with_ee_inventory(
-        read_csv_rows(upload_report),
-        read_csv_rows(ee_inventory),
+        read_rows_with_disk_export(upload_report, ("asset_id", "local_file")),
+        read_rows_with_disk_export(ee_inventory, ("asset_id",)),
     )
     for row in upload_rows:
         if row.get("final_status", "").upper() not in UPLOAD_CLEANUP_STATUSES:
@@ -1716,8 +1754,16 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     extract_error_rows = read_csv_rows(config_path(config, "extract", "errors_csv"))
     mosaic_rows = read_csv_rows(config_path(config, "mosaic", "manifest_csv"))
     artifacts = config.get("artifacts", {})
-    upload_report_rows = read_csv_rows(artifacts.get("report_csv", "")) if isinstance(artifacts, Mapping) else []
-    ee_inventory_rows = read_csv_rows(artifacts.get("ee_asset_inventory_csv", "")) if isinstance(artifacts, Mapping) else []
+    upload_report_rows = (
+        read_rows_with_disk_export(artifacts.get("report_csv", ""), ("asset_id", "local_file"))
+        if isinstance(artifacts, Mapping)
+        else []
+    )
+    ee_inventory_rows = (
+        read_rows_with_disk_export(artifacts.get("ee_asset_inventory_csv", ""), ("asset_id",))
+        if isinstance(artifacts, Mapping)
+        else []
+    )
     ee_inventory_images = ee_inventory_image_rows(ee_inventory_rows)
     upload_rows = merge_upload_rows_with_ee_inventory(upload_report_rows, ee_inventory_rows)
     project_database = ProjectDatabase(database_path_from_config(config))
@@ -2199,13 +2245,29 @@ def delete_cleanup_candidates(candidates: Iterable[CleanupCandidate]) -> tuple[i
     bytes_deleted = 0
     errors: List[str] = []
     for candidate in candidates:
-        try:
-            size = cleanup_path_size(candidate.path)
-            candidate.path.unlink()
-            deleted += 1
-            bytes_deleted += size
-        except OSError as exc:
-            errors.append(f"{candidate.path}: {exc}")
+        last_error: OSError | None = None
+        for attempt in range(1, 4):
+            try:
+                size = cleanup_path_size(candidate.path)
+                candidate.path.unlink()
+                deleted += 1
+                bytes_deleted += size
+                last_error = None
+                break
+            except FileNotFoundError:
+                last_error = None
+                break
+            except PermissionError as exc:
+                last_error = exc
+                if attempt < 3:
+                    time.sleep(1.0)
+                    continue
+                break
+            except OSError as exc:
+                last_error = exc
+                break
+        if last_error is not None:
+            errors.append(f"{candidate.path}: {last_error}")
     return deleted, bytes_deleted, errors
 
 

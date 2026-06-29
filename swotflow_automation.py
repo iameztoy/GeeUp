@@ -1214,6 +1214,18 @@ def execute_cleanup_result(
     )
 
 
+def execute_final_verified_mosaic_cleanup_if_needed(
+    state: AutomationRunState,
+    normalized: AutomationConfig,
+) -> AutomationStageResult | None:
+    """Run one final global mosaic cleanup sweep for delayed EE verification."""
+    if not normalized.include_upload or not normalized.cleanup_enabled or state.stopped:
+        return None
+    if not any(candidate.stage == "mosaic" for candidate in plan_cleanup_candidates(normalized.base_config)):
+        return None
+    return execute_cleanup_result(state, normalized.base_config, "ALL", "mosaic_cleanup")
+
+
 def execute_command_result(
     state: AutomationRunState,
     tile: str,
@@ -1445,6 +1457,17 @@ def _run_automation_normalized(
             if tile_failed and not normalized.continue_on_tile_failure and not retryable_download:
                 stop_after_failure = True
                 break
+
+    final_cleanup = execute_final_verified_mosaic_cleanup_if_needed(state, normalized)
+    if final_cleanup is not None:
+        append_stage_result(state, final_cleanup)
+        if progress_callback is not None:
+            progress_callback(
+                final_cleanup.tile,
+                final_cleanup.stage,
+                final_cleanup.status,
+                final_cleanup.message,
+            )
 
     state.finished_at = now_text()
     write_run_state(state)
