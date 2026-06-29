@@ -463,6 +463,54 @@ class AutomationTests(unittest.TestCase):
             self.assertEqual(cleaned, [])
             self.assertIn("mosaic_cleanup", skipped)
 
+    def test_run_automation_runs_final_mosaic_cleanup_for_delayed_verified_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = AutomationConfig(
+                project_root=root,
+                base_config=base_config(root),
+                utm_tiles=["UTM34M"],
+                start_date="2026-01-01",
+                end_date="2026-01-31",
+                include_upload=True,
+                min_free_space_gb=0,
+            )
+            run_dir = root / "00_logs" / "automation_runs" / "run"
+            state = AutomationRunState(run_id="run", run_dir=run_dir, config=config, preflight_ok=True)
+            state.tile_plans = [
+                AutomationTilePlan(tile="UTM34M", classification="already complete", message="done"),
+            ]
+
+            def cleanup_result(state_arg, tile_config, tile, stage):
+                return AutomationStageResult(
+                    run_id=state_arg.run_id,
+                    tile=tile,
+                    stage=stage,
+                    status="success",
+                    message="global verified mosaic sweep: deleted 1 file(s), 1 B.",
+                    deleted_files=1,
+                    deleted_bytes=1,
+                )
+
+            with mock.patch(
+                "swotflow_automation.plan_cleanup_candidates",
+                return_value=[SimpleNamespace(stage="mosaic")],
+            ):
+                with mock.patch(
+                    "swotflow_automation.execute_cleanup_result",
+                    side_effect=cleanup_result,
+                ) as cleanup:
+                    result = run_automation(config, preflight_state=state)
+
+            cleanup.assert_called_once()
+            final_rows = [
+                row
+                for row in result.stage_results
+                if row.tile == "ALL" and row.stage == "mosaic_cleanup"
+            ]
+            self.assertEqual(len(final_rows), 1)
+            self.assertEqual(final_rows[0].deleted_files, 1)
+
     def test_retryable_cmr_download_failure_continues_even_when_fail_fast(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

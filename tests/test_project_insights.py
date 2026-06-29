@@ -12,6 +12,7 @@ from project_insights import (
     plan_cleanup_candidates,
     write_project_insights_snapshot,
 )
+from project_database import upsert_project_rows
 from project_updates import record_update_expected_rows
 
 
@@ -251,6 +252,47 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertEqual(insights.metrics["Downloaded raw files still present"], "0")
             self.assertEqual(insights.metrics["Downloaded raw files no longer present"], "1")
             self.assertEqual(insights.metrics["Download manifest rows marked raw_exists yes"], "1")
+
+    def test_cleanup_uses_newer_upload_csv_export_when_database_row_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            logs = root / "00_logs"
+            mosaic = root / "03_mosaics" / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_"
+                "20260102T000000_20260102T010000_PGD0_01.tif"
+            )
+            mosaic.parent.mkdir(parents=True, exist_ok=True)
+            mosaic.write_bytes(b"12345")
+            report_path = logs / "upload_report.csv"
+            asset_id = "projects/example/assets/SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_034_266_MOSA_20260102T000000_20260102T010000_PGD0_01"
+            upsert_project_rows(
+                report_path,
+                [
+                    {
+                        "local_file": str(mosaic),
+                        "asset_id": asset_id,
+                        "final_status": "SUBMITTED_PENDING_VERIFICATION",
+                    }
+                ],
+                dataset="upload_report",
+            )
+            write_csv(
+                report_path,
+                [
+                    {
+                        "local_file": str(mosaic),
+                        "asset_id": asset_id,
+                        "final_status": "EE_VERIFIED_EXISTS",
+                        "ee_asset_exists": "yes",
+                    }
+                ],
+            )
+
+            candidates = plan_cleanup_candidates(config)
+
+            self.assertEqual([candidate.stage for candidate in candidates], ["mosaic"])
+            self.assertEqual(candidates[0].path, mosaic)
 
     def test_update_coverage_rows_follow_preview_to_uploaded_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
