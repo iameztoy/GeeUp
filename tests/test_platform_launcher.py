@@ -32,6 +32,16 @@ def collect_button_texts(widget: tk.Widget) -> set[str]:
     return texts
 
 
+def collect_combobox_values(widget: tk.Widget) -> set[str]:
+    values: set[str] = set()
+    for child in widget.winfo_children():
+        if isinstance(child, ttk.Combobox):
+            for value in child.cget("values"):
+                values.add(str(value))
+        values.update(collect_combobox_values(child))
+    return values
+
+
 def find_button(widget: tk.Widget, text: str) -> ttk.Button:
     for child in widget.winfo_children():
         if isinstance(child, ttk.Button) and child.cget("text") == text:
@@ -114,7 +124,7 @@ class PixcAppTests(unittest.TestCase):
 
             self.assertEqual(
                 tab_texts,
-                ["Home", "Download", "Visualize Points", "Summary / QA"],
+                ["Home", "Download", "Visualize Points", "Pixel Cloud 3D", "Summary / QA"],
             )
             self.assertEqual(app.collection_var.get(), DEFAULT_COLLECTION_LABEL)
             self.assertIn(DEFAULT_COLLECTION_LABEL, COLLECTION_LABELS)
@@ -143,6 +153,10 @@ class PixcAppTests(unittest.TestCase):
             self.assertIn("Select All Values", buttons)
             self.assertIn("Clear Values", buttons)
             self.assertIn("Open Point Map", buttons)
+            self.assertIn("Use Selected File", buttons)
+            self.assertIn("Browse 3D File", buttons)
+            self.assertIn("Open 3D Viewer", buttons)
+            self.assertIn("Water-priority sampling", collect_combobox_values(root))
             self.assertNotIn("Use SWOT Date", buttons)
             self.assertNotIn("Use Earth Engine imagery", buttons)
             self.assertNotIn("Inspection Guide", buttons)
@@ -150,6 +164,8 @@ class PixcAppTests(unittest.TestCase):
             self.assertNotIn("Inspect File", buttons)
             self.assertIsNotNone(app.visualize_tree)
             self.assertIsNotNone(app.visualize_values_tree)
+            self.assertIsNotNone(app.view3d_files_tree)
+            self.assertIsNotNone(app.view3d_variable_tree)
             self.assertIsNotNone(app.download_progress_bar)
             self.assertEqual(app.download_progress_text_var.get(), "Progress: idle")
             self.assertTrue(PIXC_README_PATH.exists())
@@ -297,6 +313,7 @@ class PixcAppTests(unittest.TestCase):
                             "latitude": "/pixel_cloud/latitude",
                             "longitude": "/pixel_cloud/longitude",
                             "max_points": "1234",
+                            "sampling_mode": "Balanced by class",
                             "reference_imagery": {
                                 "enabled": True,
                                 "reference_date": "2026-01-17",
@@ -305,6 +322,15 @@ class PixcAppTests(unittest.TestCase):
                                 "sources": ["sentinel2", "landsat"],
                                 "methods": ["closest"],
                             },
+                        },
+                        "visualize_3d": {
+                            "input_file": str(Path(temp) / "PIXC_Test" / "01_raw_downloads" / "sample.nc"),
+                            "x": "/pixel_cloud/phase_noise_std",
+                            "y": "/pixel_cloud/sig0",
+                            "z": "/pixel_cloud/coherent_power",
+                            "color": "/pixel_cloud/classification",
+                            "max_points": "4321",
+                            "sampling_mode": "Water-priority sampling",
                         },
                     },
                 )
@@ -336,7 +362,18 @@ class PixcAppTests(unittest.TestCase):
                 self.assertEqual(app.visualize_latitude_var.get(), "/pixel_cloud/latitude")
                 self.assertEqual(app.visualize_longitude_var.get(), "/pixel_cloud/longitude")
                 self.assertEqual(app.visualize_max_points_var.get(), "1234")
+                self.assertEqual(app.visualize_sampling_mode_var.get(), "Balanced by class")
                 self.assertNotIn("reference_imagery", app.current_pixc_settings()["visualize"])
+                self.assertEqual(app.current_pixc_settings()["visualize"]["sampling_mode"], "Balanced by class")
+                self.assertEqual(app.view3d_file_var.get(), str(sample_file))
+                self.assertEqual(app.view3d_x_var.get(), "/pixel_cloud/phase_noise_std")
+                self.assertEqual(app.view3d_y_var.get(), "/pixel_cloud/sig0")
+                self.assertEqual(app.view3d_z_var.get(), "/pixel_cloud/coherent_power")
+                self.assertEqual(app.view3d_color_var.get(), "/pixel_cloud/classification")
+                self.assertEqual(app.view3d_max_points_var.get(), "4321")
+                self.assertEqual(app.view3d_sampling_mode_var.get(), "Water-priority sampling")
+                self.assertEqual(app.current_pixc_settings()["visualize_3d"]["max_points"], "4321")
+                self.assertEqual(app.current_pixc_settings()["visualize_3d"]["sampling_mode"], "Water-priority sampling")
                 self.assertIsNotNone(app.visualize_files_tree)
                 file_items = app.visualize_files_tree.get_children()
                 self.assertEqual(len(file_items), 1)

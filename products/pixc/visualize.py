@@ -24,6 +24,19 @@ DEFAULT_ATTRIBUTE_HINTS = (
     "sig0",
     "sigma0",
 )
+DEFAULT_3D_X_HINTS = ("phase_noise_std", "phase_noise", "phase_noise_stddev", "phase_noise_std_dev")
+DEFAULT_3D_Y_HINTS = ("sig0", "sigma0", "sigma0_karin")
+DEFAULT_3D_Z_HINTS = ("coherent_power", "coh_power", "power")
+DEFAULT_3D_COLOR_HINTS = ("classification", "class")
+SAMPLING_MODE_EVEN = "Even sampling"
+SAMPLING_MODE_WATER_PRIORITY = "Water-priority sampling"
+SAMPLING_MODE_BALANCED_CLASSES = "Balanced by class"
+SAMPLING_MODE_OPTIONS = (
+    SAMPLING_MODE_EVEN,
+    SAMPLING_MODE_WATER_PRIORITY,
+    SAMPLING_MODE_BALANCED_CLASSES,
+)
+WATER_CLASS_KEYS = frozenset({"3", "4", "5", "6", "7"})
 CATEGORICAL_MAX_DISTINCT = 24
 CATEGORY_COLORS = (
     "#1f77b4",
@@ -39,6 +52,15 @@ CATEGORY_COLORS = (
     "#637939",
     "#8c6d31",
 )
+PIXC_CLASSIFICATION_COLORS = {
+    "1": "#b35c1e",  # land
+    "2": "#7f8c2f",  # land near water
+    "3": "#4fc3f7",  # water near land
+    "4": "#1565c0",  # open water
+    "5": "#08306b",  # dark water
+    "6": "#008c8c",  # low-coherence water near land
+    "7": "#6a5acd",  # open low-coherence water
+}
 CONTINUOUS_STOPS = (
     (68, 1, 84),
     (58, 82, 139),
@@ -100,6 +122,7 @@ class PixcPointMapConfig:
     longitude_path: str = ""
     max_points: int = DEFAULT_MAX_POINTS
     allowed_value_keys: tuple[str, ...] = ()
+    sampling_mode: str = SAMPLING_MODE_EVEN
 
 
 @dataclass(frozen=True)
@@ -112,6 +135,20 @@ class PixcMultiPointMapConfig:
     longitude_path: str = ""
     max_points_per_file: int = DEFAULT_MAX_POINTS
     allowed_value_keys: tuple[str, ...] = ()
+    sampling_mode: str = SAMPLING_MODE_EVEN
+
+
+@dataclass(frozen=True)
+class Pixc3DViewConfig:
+    """Settings for building a PIXC 3D attribute-space viewer payload."""
+
+    file_path: Path
+    x_path: str = ""
+    y_path: str = ""
+    z_path: str = ""
+    color_attribute_path: str = ""
+    max_points: int = DEFAULT_MAX_POINTS
+    sampling_mode: str = SAMPLING_MODE_EVEN
 
 
 @dataclass(frozen=True)
@@ -137,6 +174,8 @@ class PixcSampledPoints:
     valid_points: int
     max_points: int
     sampled: bool
+    sampling_mode: str
+    sampling_summary: str
     bbox: Optional[tuple[float, float, float, float]]
     reference_bbox: Optional[tuple[float, float, float, float]]
     latitude: Any
@@ -156,6 +195,8 @@ class PixcPointMapLayer:
     valid_points: int
     rendered_points: int
     sampled: bool
+    sampling_mode: str
+    sampling_summary: str
     bbox: Optional[tuple[float, float, float, float]]
     reference_bbox: Optional[tuple[float, float, float, float]]
     features: list[dict[str, Any]] = field(default_factory=list)
@@ -174,6 +215,8 @@ class PixcPointMapData:
     rendered_points: int
     max_points: int
     sampled: bool
+    sampling_mode: str
+    sampling_summary: str
     bbox: Optional[tuple[float, float, float, float]]
     reference_bbox: Optional[tuple[float, float, float, float]]
     color_mode: str
@@ -200,12 +243,45 @@ class PixcMultiPointMapData:
     rendered_points: int
     max_points: int
     sampled: bool
+    sampling_mode: str
+    sampling_summary: str
     bbox: Optional[tuple[float, float, float, float]]
     reference_bbox: Optional[tuple[float, float, float, float]]
     color_mode: str
     legend: list[dict[str, Any]] = field(default_factory=list)
     features: list[dict[str, Any]] = field(default_factory=list)
     layers: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return asdict(self)
+
+
+@dataclass
+class Pixc3DViewData:
+    """Browser-ready sampled PIXC 3D attribute-space data."""
+
+    file_path: str
+    file_name: str
+    x_path: str
+    y_path: str
+    z_path: str
+    color_attribute_path: str
+    total_points: int
+    valid_points: int
+    rendered_points: int
+    max_points: int
+    sampled: bool
+    color_mode: str
+    x_label: str
+    y_label: str
+    z_label: str
+    color_label: str
+    sampling_mode: str = SAMPLING_MODE_EVEN
+    sampling_summary: str = ""
+    variable_options: list[dict[str, Any]] = field(default_factory=list)
+    legend: list[dict[str, Any]] = field(default_factory=list)
+    points: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
@@ -316,6 +392,77 @@ def choose_default_attribute(
     return candidates[0].path if candidates else ""
 
 
+def choose_variable_by_hints(
+    variables: Sequence[PixcPointVariable],
+    hints: Sequence[str],
+    *,
+    exclude_paths: set[str] | None = None,
+) -> str:
+    """Choose a variable path by name/path hints."""
+    excluded = exclude_paths or set()
+    candidates = [variable for variable in variables if variable.path not in excluded and variable.size > 0]
+    for hint in hints:
+        hint_text = str(hint).lower()
+        for variable in candidates:
+            name = variable.name.lower()
+            path = variable.path.lower()
+            if name == hint_text or path.endswith("/" + hint_text):
+                return variable.path
+    for hint in hints:
+        hint_text = str(hint).lower()
+        for variable in candidates:
+            if hint_text in variable.name.lower() or hint_text in variable.path.lower():
+                return variable.path
+    return ""
+
+
+def choose_default_3d_variables(catalog: PixcPointVariableCatalog) -> dict[str, str]:
+    """Return suggested x/y/z/color paths for the 3D PIXC viewer."""
+    coordinate_paths = {catalog.latitude_path, catalog.longitude_path}
+    x_path = choose_variable_by_hints(catalog.variables, DEFAULT_3D_X_HINTS, exclude_paths=coordinate_paths)
+    y_path = choose_variable_by_hints(catalog.variables, DEFAULT_3D_Y_HINTS, exclude_paths=coordinate_paths | {x_path})
+    z_path = choose_variable_by_hints(catalog.variables, DEFAULT_3D_Z_HINTS, exclude_paths=coordinate_paths | {x_path, y_path})
+    color_path = choose_variable_by_hints(
+        catalog.variables,
+        DEFAULT_3D_COLOR_HINTS,
+        exclude_paths=coordinate_paths | {x_path, y_path, z_path},
+    )
+    if not color_path:
+        color_path = catalog.default_attribute_path
+    return {
+        "x": x_path,
+        "y": y_path,
+        "z": z_path,
+        "color": color_path,
+    }
+
+
+def variable_options_from_catalog(catalog: PixcPointVariableCatalog) -> list[dict[str, Any]]:
+    """Return browser-ready variable selector options."""
+    options: list[dict[str, Any]] = []
+    for variable in catalog.variables:
+        label_parts = [variable.path]
+        details = []
+        if variable.long_name:
+            details.append(variable.long_name)
+        if variable.units:
+            details.append(variable.units)
+        if details:
+            label_parts.append(f"({', '.join(details)})")
+        options.append(
+            {
+                "path": variable.path,
+                "label": " ".join(label_parts),
+                "name": variable.name,
+                "dtype": variable.dtype,
+                "shape": list(variable.shape),
+                "units": variable.units,
+                "long_name": variable.long_name,
+            }
+        )
+    return options
+
+
 def discover_dataset_point_variables(dataset: Any, *, file_path: str | Path = "") -> PixcPointVariableCatalog:
     """Discover coordinate and attribute variables from an open NetCDF dataset."""
     variables = collect_dataset_variables(dataset)
@@ -407,6 +554,18 @@ def value_valid_mask(values: Any) -> Any:
     return mask
 
 
+def numeric_valid_mask(values: Any) -> Any:
+    """Return a NumPy mask for finite numeric values."""
+    import numpy as np
+
+    mask = value_valid_mask(values)
+    try:
+        filled = np.ma.filled(values, np.nan).astype(float)
+    except (TypeError, ValueError):
+        return np.zeros(values.shape, dtype=bool)
+    return mask & np.isfinite(filled)
+
+
 def select_sample_indices(valid_count: int, max_points: int) -> Any:
     """Return deterministic sample indices in the valid-value coordinate space."""
     import numpy as np
@@ -415,6 +574,138 @@ def select_sample_indices(valid_count: int, max_points: int) -> Any:
     if valid_count <= limit:
         return np.arange(valid_count)
     return np.linspace(0, valid_count - 1, num=limit, dtype=int)
+
+
+def sample_indices_array(indices: Any, count: int) -> Any:
+    """Return a deterministic sample from an array of original valid indices."""
+    import numpy as np
+
+    values = np.asarray(indices)
+    if count <= 0 or values.size == 0:
+        return values[:0]
+    if values.size <= count:
+        return values
+    positions = np.linspace(0, values.size - 1, num=int(count), dtype=int)
+    return values[positions]
+
+
+def remaining_indices(indices: Any, selected: Any) -> Any:
+    """Return indices not present in the selected array."""
+    import numpy as np
+
+    values = np.asarray(indices)
+    if values.size == 0 or np.asarray(selected).size == 0:
+        return values
+    selected_set = set(int(item) for item in np.asarray(selected))
+    mask = np.array([int(item) not in selected_set for item in values], dtype=bool)
+    return values[mask]
+
+
+def is_classification_path(path: str) -> bool:
+    """Return whether a variable path likely stores PIXC classification values."""
+    name = str(path or "").strip("/").split("/")[-1].lower()
+    return name in {"classification", "class"} or "classification" in name
+
+
+def class_keys_for_indices(values: Any, indices: Any) -> list[str]:
+    """Return display keys for color/class values at original indices."""
+    return [value_key(value) for value in values[indices]]
+
+
+def select_water_priority_indices(
+    valid_indices: Any,
+    color_values: Any,
+    *,
+    max_points: int,
+) -> tuple[Any, str]:
+    """Sample valid indices with water-like PIXC classes first."""
+    import numpy as np
+
+    limit = max(1, int(max_points or DEFAULT_MAX_POINTS))
+    keys = np.asarray(class_keys_for_indices(color_values, valid_indices))
+    water_mask = np.array([key in WATER_CLASS_KEYS for key in keys], dtype=bool)
+    water_indices = valid_indices[water_mask]
+    other_indices = valid_indices[~water_mask]
+    if water_indices.size == 0:
+        positions = select_sample_indices(int(valid_indices.size), limit)
+        return valid_indices[positions], "Water-priority sampling fell back to even sampling because no water-class points were found."
+    water_target = min(int(water_indices.size), max(1, int(round(limit * 0.8))))
+    selected_water = sample_indices_array(water_indices, water_target)
+    remaining = max(0, limit - int(selected_water.size))
+    selected_other = sample_indices_array(other_indices, min(int(other_indices.size), remaining))
+    selected_parts = [selected_water, selected_other]
+    remaining = max(0, limit - sum(int(part.size) for part in selected_parts))
+    if remaining:
+        extra_water = sample_indices_array(
+            remaining_indices(water_indices, selected_water),
+            remaining,
+        )
+        selected_parts.append(extra_water)
+        remaining = max(0, limit - sum(int(part.size) for part in selected_parts))
+    if remaining:
+        extra_other = sample_indices_array(
+            remaining_indices(other_indices, selected_other),
+            remaining,
+        )
+        selected_parts.append(extra_other)
+    selected = np.concatenate([part for part in selected_parts if part.size]) if selected_parts else valid_indices[:0]
+    selected = np.sort(selected)
+    water_selected = int(sum(1 for key in class_keys_for_indices(color_values, selected) if key in WATER_CLASS_KEYS))
+    other_selected = int(selected.size) - water_selected
+    return selected, f"Water-priority sampling selected {water_selected} water-like point(s) and {other_selected} land/background point(s)."
+
+
+def select_balanced_class_indices(
+    valid_indices: Any,
+    color_values: Any,
+    *,
+    max_points: int,
+) -> tuple[Any, str]:
+    """Sample valid indices as evenly as possible across color/class values."""
+    import numpy as np
+
+    limit = max(1, int(max_points or DEFAULT_MAX_POINTS))
+    keys = np.asarray(class_keys_for_indices(color_values, valid_indices))
+    unique_keys = sorted(set(str(key) for key in keys), key=lambda value: (0, float(value)) if value.replace(".", "", 1).isdigit() else (1, value))
+    if len(unique_keys) <= 1:
+        positions = select_sample_indices(int(valid_indices.size), limit)
+        return valid_indices[positions], "Balanced sampling fell back to even sampling because only one class/value was available."
+    base = max(1, limit // len(unique_keys))
+    remainder = max(0, limit - base * len(unique_keys))
+    selected_parts = []
+    for offset, key in enumerate(unique_keys):
+        class_indices = valid_indices[keys == key]
+        target = base + (1 if offset < remainder else 0)
+        selected_parts.append(sample_indices_array(class_indices, min(int(class_indices.size), target)))
+    selected = np.concatenate([part for part in selected_parts if part.size]) if selected_parts else valid_indices[:0]
+    remaining = max(0, limit - int(selected.size))
+    if remaining:
+        extra = sample_indices_array(remaining_indices(valid_indices, selected), remaining)
+        selected = np.concatenate([selected, extra]) if selected.size else extra
+    selected = np.sort(selected)
+    return selected, f"Balanced sampling selected points from {len(unique_keys)} class/value group(s)."
+
+
+def select_3d_sample_indices(
+    valid_indices: Any,
+    color_values: Any,
+    *,
+    max_points: int,
+    sampling_mode: str,
+    color_attribute_path: str,
+) -> tuple[Any, str]:
+    """Return original indices for the requested 3D sampling mode."""
+    mode = sampling_mode if sampling_mode in SAMPLING_MODE_OPTIONS else SAMPLING_MODE_EVEN
+    limit = max(1, int(max_points or DEFAULT_MAX_POINTS))
+    if mode == SAMPLING_MODE_WATER_PRIORITY and is_classification_path(color_attribute_path):
+        return select_water_priority_indices(valid_indices, color_values, max_points=limit)
+    if mode == SAMPLING_MODE_WATER_PRIORITY:
+        positions = select_sample_indices(int(valid_indices.size), limit)
+        return valid_indices[positions], "Water-priority sampling fell back to even sampling because the color attribute is not classification."
+    if mode == SAMPLING_MODE_BALANCED_CLASSES:
+        return select_balanced_class_indices(valid_indices, color_values, max_points=limit)
+    positions = select_sample_indices(int(valid_indices.size), limit)
+    return valid_indices[positions], "Even deterministic sampling selected points across all valid records."
 
 
 def value_key(value: Any) -> str:
@@ -577,6 +868,8 @@ def summarize_pixc_attribute_values(
 def build_color_mapping(
     values: Any,
     value_labels: Mapping[str, str] | None = None,
+    *,
+    attribute_path: str = "",
 ) -> tuple[str, dict[str, str], list[dict[str, Any]], tuple[float, float] | None]:
     """Build color metadata for categorical or continuous point values."""
     import numpy as np
@@ -588,12 +881,22 @@ def build_color_mapping(
     unique, counts = np.unique(values, return_counts=True)
     categorical = (not numeric) or len(unique) <= CATEGORICAL_MAX_DISTINCT or np.issubdtype(values.dtype, np.integer)
     if categorical:
-        order = sorted(zip(unique, counts), key=lambda item: (-int(item[1]), value_key(item[0])))
+        if is_classification_path(attribute_path):
+            order = sorted(
+                zip(unique, counts),
+                key=lambda item: (0, float(value_key(item[0]))) if value_key(item[0]) in PIXC_CLASSIFICATION_COLORS else (1, value_key(item[0])),
+            )
+        else:
+            order = sorted(zip(unique, counts), key=lambda item: (-int(item[1]), value_key(item[0])))
         mapping: dict[str, str] = {}
         legend: list[dict[str, Any]] = []
         for index, (value, count) in enumerate(order):
             key = value_key(value)
-            color = CATEGORY_COLORS[index % len(CATEGORY_COLORS)]
+            color = (
+                PIXC_CLASSIFICATION_COLORS.get(key, CATEGORY_COLORS[index % len(CATEGORY_COLORS)])
+                if is_classification_path(attribute_path)
+                else CATEGORY_COLORS[index % len(CATEGORY_COLORS)]
+            )
             mapping[key] = color
             legend.append(
                 {
@@ -701,8 +1004,13 @@ def sample_pixc_points_from_dataset(dataset: Any, config: PixcPointMapConfig) ->
             raise ValueError("No valid PIXC points found for the selected attribute value filter.")
         raise ValueError("No valid PIXC points found for the selected coordinates and attribute.")
 
-    sample_positions = select_sample_indices(valid_points, config.max_points)
-    selected_indices = valid_indices[sample_positions]
+    selected_indices, sampling_summary = select_3d_sample_indices(
+        valid_indices,
+        values,
+        max_points=config.max_points,
+        sampling_mode=getattr(config, "sampling_mode", SAMPLING_MODE_EVEN),
+        color_attribute_path=attribute_path,
+    )
     sampled_latitude = np.asarray(latitude[selected_indices], dtype=float)
     sampled_longitude = np.asarray(longitude[selected_indices], dtype=float)
     sampled_values = np.ma.array(values[selected_indices]).compressed()
@@ -726,6 +1034,12 @@ def sample_pixc_points_from_dataset(dataset: Any, config: PixcPointMapConfig) ->
         valid_points=valid_points,
         max_points=max(1, int(config.max_points or DEFAULT_MAX_POINTS)),
         sampled=valid_points > max(1, int(config.max_points or DEFAULT_MAX_POINTS)),
+        sampling_mode=(
+            config.sampling_mode
+            if getattr(config, "sampling_mode", SAMPLING_MODE_EVEN) in SAMPLING_MODE_OPTIONS
+            else SAMPLING_MODE_EVEN
+        ),
+        sampling_summary=sampling_summary,
         bbox=bbox,
         reference_bbox=reference_bbox,
         latitude=sampled_latitude,
@@ -747,7 +1061,11 @@ def map_data_from_samples(
     if not samples:
         raise ValueError("No PIXC point samples are available.")
     combined_values = np.concatenate([np.asarray(sample.values) for sample in samples])
-    color_mode, category_colors, legend, continuous_range = build_color_mapping(combined_values, value_labels)
+    color_mode, category_colors, legend, continuous_range = build_color_mapping(
+        combined_values,
+        value_labels,
+        attribute_path=samples[0].attribute_path,
+    )
     layers: list[PixcPointMapLayer] = []
     all_features: list[dict[str, Any]] = []
     west_values: list[float] = []
@@ -795,6 +1113,8 @@ def map_data_from_samples(
                 valid_points=sample.valid_points,
                 rendered_points=len(features),
                 sampled=sample.sampled,
+                sampling_mode=sample.sampling_mode,
+                sampling_summary=sample.sampling_summary,
                 bbox=sample.bbox,
                 reference_bbox=sample.reference_bbox,
                 features=features,
@@ -822,6 +1142,10 @@ def map_data_from_samples(
         rendered_points=len(all_features),
         max_points=max(sample.max_points for sample in samples),
         sampled=any(sample.sampled for sample in samples),
+        sampling_mode=samples[0].sampling_mode,
+        sampling_summary=" | ".join(
+            f"{sample.file_name}: {sample.sampling_summary}" for sample in samples if sample.sampling_summary
+        ),
         bbox=bbox,
         reference_bbox=reference_bbox,
         color_mode=color_mode,
@@ -845,6 +1169,8 @@ def build_pixc_point_map_from_dataset(dataset: Any, config: PixcPointMapConfig) 
         rendered_points=multi.rendered_points,
         max_points=sample.max_points,
         sampled=sample.sampled,
+        sampling_mode=sample.sampling_mode,
+        sampling_summary=sample.sampling_summary,
         bbox=sample.bbox,
         reference_bbox=sample.reference_bbox,
         color_mode=multi.color_mode,
@@ -852,6 +1178,166 @@ def build_pixc_point_map_from_dataset(dataset: Any, config: PixcPointMapConfig) 
         features=multi.features,
         layers=multi.layers,
     )
+
+
+def axis_label(path: str, variable: Any | None = None) -> str:
+    """Return a readable axis/attribute label for a NetCDF variable path."""
+    attrs = object_attributes(variable) if variable is not None else {}
+    long_name = str(attrs.get("long_name", "") or "").strip()
+    units = str(attrs.get("units", "") or "").strip()
+    label = long_name or str(path or "").strip("/").split("/")[-1].replace("_", " ")
+    if units:
+        label = f"{label} ({units})"
+    return label
+
+
+def build_3d_points(
+    x_values: Any,
+    y_values: Any,
+    z_values: Any,
+    color_values: Any,
+    *,
+    original_indices: Any,
+    color_mode: str,
+    category_colors: Mapping[str, str],
+    continuous_range: tuple[float, float] | None,
+    value_labels: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build browser-ready 3D point records."""
+    points: list[dict[str, Any]] = []
+    value_labels = value_labels or {}
+    for point_index, (x_value, y_value, z_value, color_value, original_index) in enumerate(
+        zip(x_values, y_values, z_values, color_values, original_indices)
+    ):
+        key = value_key(color_value)
+        if color_mode == "continuous" and continuous_range is not None:
+            color = interpolate_color(float(color_value), continuous_range[0], continuous_range[1])
+        else:
+            color = category_colors.get(key, CATEGORY_COLORS[point_index % len(CATEGORY_COLORS)])
+        points.append(
+            {
+                "index": int(original_index),
+                "x": float(x_value),
+                "y": float(y_value),
+                "z": float(z_value),
+                "color_value": clean_value(color_value),
+                "color_key": key,
+                "color_meaning": str(value_labels.get(key, "") or ""),
+                "display_color_value": display_value_label(key, value_labels),
+                "color": color,
+            }
+        )
+    return points
+
+
+def build_pixc_3d_view_from_dataset(dataset: Any, config: Pixc3DViewConfig) -> Pixc3DViewData:
+    """Build sampled 3D attribute-space data from an open PIXC NetCDF dataset."""
+    import numpy as np
+
+    catalog = discover_dataset_point_variables(dataset, file_path=config.file_path)
+    defaults = choose_default_3d_variables(catalog)
+    x_path = config.x_path or defaults["x"]
+    y_path = config.y_path or defaults["y"]
+    z_path = config.z_path or defaults["z"]
+    color_path = config.color_attribute_path or defaults["color"]
+    if not x_path or not y_path or not z_path:
+        raise ValueError("Choose X, Y, and Z variables for the PIXC 3D viewer.")
+
+    x_variable = variable_by_path(dataset, x_path)
+    y_variable = variable_by_path(dataset, y_path)
+    z_variable = variable_by_path(dataset, z_path)
+    color_variable = variable_by_path(dataset, color_path) if color_path else z_variable
+    x_values = read_variable_values(x_variable)
+    y_values = read_variable_values(y_variable)
+    z_values = read_variable_values(z_variable)
+    color_values = read_variable_values(color_variable)
+
+    total_points = min(x_values.size, y_values.size, z_values.size, color_values.size)
+    x_values = x_values[:total_points]
+    y_values = y_values[:total_points]
+    z_values = z_values[:total_points]
+    color_values = color_values[:total_points]
+    mask = (
+        numeric_valid_mask(x_values)
+        & numeric_valid_mask(y_values)
+        & numeric_valid_mask(z_values)
+        & value_valid_mask(color_values)
+    )
+    valid_indices = np.flatnonzero(mask)
+    valid_points = int(valid_indices.size)
+    if valid_points == 0:
+        raise ValueError("No valid PIXC points found for the selected 3D variables.")
+
+    selected_indices, sampling_summary = select_3d_sample_indices(
+        valid_indices,
+        color_values,
+        max_points=config.max_points,
+        sampling_mode=config.sampling_mode,
+        color_attribute_path=color_path,
+    )
+    sampled_x = np.asarray(np.ma.filled(x_values[selected_indices], np.nan), dtype=float)
+    sampled_y = np.asarray(np.ma.filled(y_values[selected_indices], np.nan), dtype=float)
+    sampled_z = np.asarray(np.ma.filled(z_values[selected_indices], np.nan), dtype=float)
+    sampled_color = np.ma.array(color_values[selected_indices]).compressed()
+    selected_indices = selected_indices[: sampled_color.size]
+    sampled_x = sampled_x[: sampled_color.size]
+    sampled_y = sampled_y[: sampled_color.size]
+    sampled_z = sampled_z[: sampled_color.size]
+    color_labels = flag_value_labels(color_variable, color_path)
+    color_mode, category_colors, legend, continuous_range = build_color_mapping(
+        sampled_color,
+        color_labels,
+        attribute_path=color_path,
+    )
+    points = build_3d_points(
+        sampled_x,
+        sampled_y,
+        sampled_z,
+        sampled_color,
+        original_indices=selected_indices,
+        color_mode=color_mode,
+        category_colors=category_colors,
+        continuous_range=continuous_range,
+        value_labels=color_labels,
+    )
+    return Pixc3DViewData(
+        file_path=str(config.file_path),
+        file_name=Path(config.file_path).name,
+        x_path=x_path,
+        y_path=y_path,
+        z_path=z_path,
+        color_attribute_path=color_path,
+        total_points=int(total_points),
+        valid_points=valid_points,
+        rendered_points=len(points),
+        max_points=max(1, int(config.max_points or DEFAULT_MAX_POINTS)),
+        sampled=valid_points > max(1, int(config.max_points or DEFAULT_MAX_POINTS)),
+        color_mode=color_mode,
+        x_label=axis_label(x_path, x_variable),
+        y_label=axis_label(y_path, y_variable),
+        z_label=axis_label(z_path, z_variable),
+        color_label=axis_label(color_path, color_variable) if color_path else axis_label(z_path, z_variable),
+        sampling_mode=config.sampling_mode if config.sampling_mode in SAMPLING_MODE_OPTIONS else SAMPLING_MODE_EVEN,
+        sampling_summary=sampling_summary,
+        variable_options=variable_options_from_catalog(catalog),
+        legend=legend,
+        points=points,
+    )
+
+
+def build_pixc_3d_view(config: Pixc3DViewConfig) -> Pixc3DViewData:
+    """Open a PIXC NetCDF file and build sampled 3D viewer data."""
+    nc_path = Path(config.file_path)
+    if not nc_path.exists() or not nc_path.is_file():
+        raise FileNotFoundError(f"PIXC NetCDF file not found: {nc_path}")
+    Dataset = import_netcdf4_dataset()
+    dataset = Dataset(str(nc_path), mode="r")
+    try:
+        return build_pixc_3d_view_from_dataset(dataset, config)
+    finally:
+        close = getattr(dataset, "close", None)
+        if callable(close):
+            close()
 
 
 def build_pixc_point_map(config: PixcPointMapConfig) -> PixcPointMapData:
@@ -891,6 +1377,7 @@ def build_pixc_multi_point_map(config: PixcMultiPointMapConfig) -> PixcMultiPoin
                     longitude_path=config.longitude_path,
                     max_points=config.max_points_per_file,
                     allowed_value_keys=config.allowed_value_keys,
+                    sampling_mode=config.sampling_mode,
                 ),
             )
             samples.append(sample)

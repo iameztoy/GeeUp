@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from .config import COLLECTION_LABELS, DEFAULT_COLLECTION_LABEL, PRODUCT_NAME
 from .download import DEFAULT_MAX_GRANULES, DEFAULT_RAW_DOWNLOADS_DIR
 from .project import DEFAULT_PIXC_PROJECT_PARENT
-from .visualize import DEFAULT_MAX_POINTS
+from .visualize import DEFAULT_MAX_POINTS, SAMPLING_MODE_EVEN, SAMPLING_MODE_OPTIONS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -93,8 +93,19 @@ class PixcApp:
         self.visualize_latitude_var = tk.StringVar(value="")
         self.visualize_longitude_var = tk.StringVar(value="")
         self.visualize_max_points_var = tk.StringVar(value=str(DEFAULT_MAX_POINTS))
+        self.visualize_sampling_mode_var = tk.StringVar(value=SAMPLING_MODE_EVEN)
         self.visualize_status_var = tk.StringVar(
             value="Select one or more downloaded PIXC files, choose variables, then open the point map."
+        )
+        self.view3d_file_var = tk.StringVar(value="")
+        self.view3d_x_var = tk.StringVar(value="")
+        self.view3d_y_var = tk.StringVar(value="")
+        self.view3d_z_var = tk.StringVar(value="")
+        self.view3d_color_var = tk.StringVar(value="")
+        self.view3d_max_points_var = tk.StringVar(value=str(DEFAULT_MAX_POINTS))
+        self.view3d_sampling_mode_var = tk.StringVar(value=SAMPLING_MODE_EVEN)
+        self.view3d_status_var = tk.StringVar(
+            value="Select one downloaded PIXC file, choose X/Y/Z attributes, then open the 3D viewer."
         )
         self.inspect_file_var = tk.StringVar(value="")
         self.inspect_output_var = tk.StringVar(value=str(DEFAULT_INSPECTION_OUTPUT_DIR))
@@ -125,11 +136,21 @@ class PixcApp:
         self.visualize_longitude_combo: ttk.Combobox | None = None
         self.visualize_files_tree: ttk.Treeview | None = None
         self.visualize_values_tree: ttk.Treeview | None = None
+        self.visualize_sampling_mode_combo: ttk.Combobox | None = None
         self.visualize_values_attribute_path = ""
         self.visualize_tree: ttk.Treeview | None = None
         self.visualize_catalog: object | None = None
         self.visualize_file_paths: list[Path] = []
         self.point_viewer_session: object | None = None
+        self.view3d_files_tree: ttk.Treeview | None = None
+        self.view3d_variable_tree: ttk.Treeview | None = None
+        self.view3d_x_combo: ttk.Combobox | None = None
+        self.view3d_y_combo: ttk.Combobox | None = None
+        self.view3d_z_combo: ttk.Combobox | None = None
+        self.view3d_color_combo: ttk.Combobox | None = None
+        self.view3d_sampling_mode_combo: ttk.Combobox | None = None
+        self.view3d_catalog: object | None = None
+        self.three_d_viewer_session: object | None = None
         self.inspect_tree: ttk.Treeview | None = None
         self.build_layout()
 
@@ -168,16 +189,19 @@ class PixcApp:
         home_tab = ttk.Frame(notebook, padding=12)
         download_tab = ttk.Frame(notebook, padding=12)
         visualize_tab = ttk.Frame(notebook, padding=12)
+        view3d_tab = ttk.Frame(notebook, padding=12)
         summary_tab = ttk.Frame(notebook, padding=12)
 
         notebook.add(home_tab, text="Home")
         notebook.add(download_tab, text="Download")
         notebook.add(visualize_tab, text="Visualize Points")
+        notebook.add(view3d_tab, text="Pixel Cloud 3D")
         notebook.add(summary_tab, text="Summary / QA")
 
         self.build_home_tab(home_tab)
         self.build_download_tab(download_tab)
         self.build_visualize_tab(visualize_tab)
+        self.build_3d_viewer_tab(view3d_tab)
         self.build_summary_tab(summary_tab)
         self.set_download_running(False)
 
@@ -321,6 +345,16 @@ class PixcApp:
                 "latitude": self.visualize_latitude_var.get().strip(),
                 "longitude": self.visualize_longitude_var.get().strip(),
                 "max_points": self.visualize_max_points_var.get().strip(),
+                "sampling_mode": self.visualize_sampling_mode_var.get().strip(),
+            },
+            "visualize_3d": {
+                "input_file": self.view3d_file_var.get().strip(),
+                "x": self.view3d_x_var.get().strip(),
+                "y": self.view3d_y_var.get().strip(),
+                "z": self.view3d_z_var.get().strip(),
+                "color": self.view3d_color_var.get().strip(),
+                "max_points": self.view3d_max_points_var.get().strip(),
+                "sampling_mode": self.view3d_sampling_mode_var.get().strip(),
             },
             "inspect": {
                 "input_file": self.inspect_file_var.get().strip(),
@@ -373,6 +407,22 @@ class PixcApp:
             self.visualize_max_points_var.set(
                 str(visualize.get("max_points", "") or DEFAULT_MAX_POINTS)
             )
+            sampling_mode = str(visualize.get("sampling_mode", "") or SAMPLING_MODE_EVEN)
+            self.visualize_sampling_mode_var.set(
+                sampling_mode if sampling_mode in SAMPLING_MODE_OPTIONS else SAMPLING_MODE_EVEN
+            )
+        visualize_3d = settings.get("visualize_3d", {})
+        if isinstance(visualize_3d, dict):
+            self.view3d_file_var.set(str(visualize_3d.get("input_file", "") or ""))
+            self.view3d_x_var.set(str(visualize_3d.get("x", "") or ""))
+            self.view3d_y_var.set(str(visualize_3d.get("y", "") or ""))
+            self.view3d_z_var.set(str(visualize_3d.get("z", "") or ""))
+            self.view3d_color_var.set(str(visualize_3d.get("color", "") or ""))
+            self.view3d_max_points_var.set(str(visualize_3d.get("max_points", "") or DEFAULT_MAX_POINTS))
+            sampling_mode = str(visualize_3d.get("sampling_mode", "") or SAMPLING_MODE_EVEN)
+            self.view3d_sampling_mode_var.set(
+                sampling_mode if sampling_mode in SAMPLING_MODE_OPTIONS else SAMPLING_MODE_EVEN
+            )
 
     def set_project_paths(self, root: str | Path) -> None:
         """Point PIXC output/report paths at the active project."""
@@ -393,10 +443,12 @@ class PixcApp:
         self.pixc_latest_preview = None
         self.pixc_latest_config = None
         self.visualize_catalog = None
+        self.view3d_catalog = None
         self.project_status_var.set(f"PIXC project open: {self.current_project_name_var.get()}")
         self.download_status_var.set("Project paths are active. Preview PIXC granules before downloading.")
         self.set_download_running(False)
         self.refresh_visualize_downloaded_files(show_status=False)
+        self.refresh_3d_downloaded_files(show_status=False)
 
     def new_pixc_project(self) -> None:
         """Create a new PIXC project from the current GUI settings."""
@@ -1823,6 +1875,15 @@ class PixcApp:
             padx=(10, 0),
             pady=(8, 0),
         )
+        ttk.Label(form, text="Sampling mode").grid(row=3, column=2, sticky="w", padx=(14, 0), pady=(8, 0))
+        self.visualize_sampling_mode_combo = ttk.Combobox(
+            form,
+            textvariable=self.visualize_sampling_mode_var,
+            values=SAMPLING_MODE_OPTIONS,
+            state="readonly",
+            width=28,
+        )
+        self.visualize_sampling_mode_combo.grid(row=3, column=3, sticky="ew", padx=(10, 0), pady=(8, 0))
         values_frame = ttk.LabelFrame(parent, text="Attribute Values Filter", padding=8)
         values_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         values_frame.columnconfigure(0, weight=1)
@@ -2177,6 +2238,7 @@ class PixcApp:
             longitude_path=self.visualize_longitude_var.get().strip(),
             max_points_per_file=max_points,
             allowed_value_keys=self.current_visualize_value_filter_keys(),
+            sampling_mode=self.visualize_sampling_mode_var.get().strip() or SAMPLING_MODE_EVEN,
         )
 
     def open_visualize_point_map(self) -> None:
@@ -2237,7 +2299,361 @@ class PixcApp:
         file_count = len(getattr(map_data, "file_paths", []) or [getattr(map_data, "file_path", "")])
         self.visualize_status_var.set(
             f"Opened point map with {getattr(map_data, 'rendered_points', 0)} point(s) from {file_count} file(s) "
-            f"colored by {getattr(map_data, 'attribute_path', '')}. Use the map viewer to add dated reference imagery."
+            f"colored by {getattr(map_data, 'attribute_path', '')}. "
+            f"{getattr(map_data, 'sampling_summary', '')} "
+            "Use the map viewer to add dated reference imagery."
+        )
+        self.save_active_pixc_project_quietly()
+
+    def build_3d_viewer_tab(self, parent: ttk.Frame) -> None:
+        """Create the PIXC 3D attribute-space visualization tab."""
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        parent.rowconfigure(2, weight=1)
+
+        files_frame = ttk.LabelFrame(parent, text="Project Downloads", padding=8)
+        files_frame.grid(row=0, column=0, sticky="nsew")
+        files_frame.columnconfigure(0, weight=1)
+        files_frame.rowconfigure(0, weight=1)
+        files_tree = ttk.Treeview(
+            files_frame,
+            columns=("status", "size_mb", "last_downloaded", "path"),
+            show="tree headings",
+            height=6,
+            selectmode="browse",
+        )
+        files_tree.heading("#0", text="File")
+        files_tree.heading("status", text="Status")
+        files_tree.heading("size_mb", text="Size MB")
+        files_tree.heading("last_downloaded", text="Last Downloaded")
+        files_tree.heading("path", text="")
+        files_tree.column("#0", width=330, stretch=True)
+        files_tree.column("status", width=110, stretch=False)
+        files_tree.column("size_mb", width=75, stretch=False)
+        files_tree.column("last_downloaded", width=150, stretch=False)
+        files_tree.column("path", width=0, minwidth=0, stretch=False)
+        files_tree.grid(row=0, column=0, columnspan=4, sticky="nsew")
+        files_tree.bind("<Double-1>", lambda event: self.use_selected_3d_download())
+        files_scrollbar = ttk.Scrollbar(files_frame, orient="vertical", command=files_tree.yview)
+        files_scrollbar.grid(row=0, column=4, sticky="ns")
+        files_tree.configure(yscrollcommand=files_scrollbar.set)
+        self.view3d_files_tree = files_tree
+        ttk.Button(
+            files_frame,
+            text="Refresh Files",
+            command=self.refresh_3d_downloaded_files,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(
+            files_frame,
+            text="Use Selected File",
+            command=self.use_selected_3d_download,
+        ).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Button(
+            files_frame,
+            text="Browse 3D File",
+            command=self.browse_3d_file,
+        ).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        form = ttk.LabelFrame(parent, text="3D Attribute Viewer", padding=12)
+        form.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        form.columnconfigure(1, weight=1)
+        form.columnconfigure(3, weight=1)
+        ttk.Label(form, text="Selected file").grid(row=0, column=0, sticky="w")
+        ttk.Entry(form, textvariable=self.view3d_file_var, state="readonly").grid(
+            row=0,
+            column=1,
+            columnspan=3,
+            sticky="ew",
+            padx=(10, 0),
+        )
+        ttk.Button(
+            form,
+            text="Load Variables",
+            command=self.load_3d_variables,
+        ).grid(row=0, column=4, sticky="w", padx=(8, 0))
+
+        ttk.Label(form, text="X variable").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.view3d_x_combo = ttk.Combobox(form, textvariable=self.view3d_x_var, values=[], state="normal")
+        self.view3d_x_combo.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
+        ttk.Label(form, text="Y variable").grid(row=1, column=2, sticky="w", padx=(14, 0), pady=(8, 0))
+        self.view3d_y_combo = ttk.Combobox(form, textvariable=self.view3d_y_var, values=[], state="normal")
+        self.view3d_y_combo.grid(row=1, column=3, sticky="ew", padx=(10, 0), pady=(8, 0))
+
+        ttk.Label(form, text="Z variable").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.view3d_z_combo = ttk.Combobox(form, textvariable=self.view3d_z_var, values=[], state="normal")
+        self.view3d_z_combo.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
+        ttk.Label(form, text="Color attribute").grid(row=2, column=2, sticky="w", padx=(14, 0), pady=(8, 0))
+        self.view3d_color_combo = ttk.Combobox(form, textvariable=self.view3d_color_var, values=[], state="normal")
+        self.view3d_color_combo.grid(row=2, column=3, sticky="ew", padx=(10, 0), pady=(8, 0))
+
+        ttk.Label(form, text="Max points").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(form, textvariable=self.view3d_max_points_var, width=12).grid(
+            row=3,
+            column=1,
+            sticky="w",
+            padx=(10, 0),
+            pady=(8, 0),
+        )
+        ttk.Label(form, text="Sampling mode").grid(row=3, column=2, sticky="w", padx=(14, 0), pady=(8, 0))
+        self.view3d_sampling_mode_combo = ttk.Combobox(
+            form,
+            textvariable=self.view3d_sampling_mode_var,
+            values=SAMPLING_MODE_OPTIONS,
+            state="readonly",
+            width=28,
+        )
+        self.view3d_sampling_mode_combo.grid(row=3, column=3, sticky="ew", padx=(10, 0), pady=(8, 0))
+        ttk.Button(
+            form,
+            text="Open 3D Viewer",
+            command=self.open_3d_viewer,
+        ).grid(row=4, column=3, sticky="e", padx=(8, 0), pady=(8, 0))
+
+        table_frame = ttk.LabelFrame(parent, text="Variable Details", padding=8)
+        table_frame.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(
+            table_frame,
+            columns=("dtype", "shape", "size", "units"),
+            show="tree headings",
+            height=9,
+        )
+        tree.heading("#0", text="Variable")
+        tree.heading("dtype", text="DType")
+        tree.heading("shape", text="Shape")
+        tree.heading("size", text="Size")
+        tree.heading("units", text="Units")
+        tree.column("#0", width=360, stretch=True)
+        tree.column("dtype", width=100, stretch=False)
+        tree.column("shape", width=120, stretch=False)
+        tree.column("size", width=90, stretch=False)
+        tree.column("units", width=120, stretch=True)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=scrollbar.set)
+        self.view3d_variable_tree = tree
+
+        ttk.Label(
+            parent,
+            textvariable=self.view3d_status_var,
+            foreground="#184a8b",
+            wraplength=820,
+            justify="left",
+        ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
+
+    def current_3d_file_path(self) -> Path | None:
+        """Return the selected PIXC file for the 3D viewer."""
+        text = self.view3d_file_var.get().strip()
+        return Path(text) if text else None
+
+    def refresh_3d_downloaded_files(self, show_status: bool = True) -> None:
+        """Refresh the 3D viewer project download inventory table."""
+        if self.view3d_files_tree is None:
+            return
+        tree = self.view3d_files_tree
+        for item in tree.get_children():
+            tree.delete(item)
+        try:
+            files = self.project_download_inventory()
+        except Exception as exc:
+            if show_status:
+                self.view3d_status_var.set(f"Could not read project downloads: {exc}")
+            return
+        local_files = [row for row in files if bool(getattr(row, "raw_exists", False))]
+        for row in local_files:
+            tree.insert(
+                "",
+                "end",
+                text=str(getattr(row, "file_name", "")),
+                values=(
+                    "Downloaded",
+                    str(getattr(row, "size_mb", "")),
+                    str(getattr(row, "last_downloaded", "")),
+                    str(getattr(row, "local_path", "")),
+                ),
+            )
+        if local_files:
+            first = tree.get_children()[0]
+            tree.selection_set(first)
+            tree.focus(first)
+        if show_status:
+            self.view3d_status_var.set(f"Found {len(local_files)} downloaded PIXC file(s) in this project.")
+
+    def use_selected_3d_download(self) -> None:
+        """Use the selected project download as the 3D viewer input."""
+        if self.view3d_files_tree is None:
+            return
+        selection = self.view3d_files_tree.selection()
+        if not selection:
+            messagebox.showwarning("No file selected", "Select one project download first.")
+            return
+        values = self.view3d_files_tree.item(selection[0], "values")
+        local_path = str(values[3] if len(values) >= 4 else "").strip()
+        path = Path(local_path)
+        if not local_path or not path.exists():
+            messagebox.showwarning("Local file missing", f"The selected file is not present locally:\n{path}")
+            return
+        self.view3d_file_var.set(str(path))
+        self.view3d_x_var.set("")
+        self.view3d_y_var.set("")
+        self.view3d_z_var.set("")
+        self.view3d_color_var.set("")
+        self.load_3d_variables()
+
+    def browse_3d_file(self) -> None:
+        """Choose one PIXC NetCDF file for 3D visualization."""
+        selected = filedialog.askopenfilename(
+            title="Choose a PIXC NetCDF file",
+            initialdir=self.visualize_initial_dir(),
+            filetypes=[("NetCDF files", "*.nc *.nc4"), ("All files", "*.*")],
+        )
+        if selected:
+            self.view3d_file_var.set(selected)
+            self.load_3d_variables()
+
+    def load_3d_variables(self) -> bool:
+        """Discover variables for the selected 3D PIXC file."""
+        if not self.require_active_pixc_project("visualize PIXC files in 3D"):
+            return False
+        file_path = self.current_3d_file_path()
+        if file_path is None:
+            messagebox.showerror("Missing PIXC NetCDF", "Choose one PIXC NetCDF file for the 3D viewer.")
+            return False
+        try:
+            from .visualize import choose_default_3d_variables, discover_pixc_point_variables
+
+            catalog = discover_pixc_point_variables(file_path)
+            defaults = choose_default_3d_variables(catalog)
+        except Exception as exc:
+            self.view3d_status_var.set(f"3D variable discovery failed: {exc}")
+            messagebox.showerror("PIXC 3D variable discovery failed", str(exc))
+            return False
+
+        self.view3d_catalog = catalog
+        paths = [str(variable.path) for variable in getattr(catalog, "variables", [])]
+        if self.view3d_x_combo is not None:
+            self.view3d_x_combo.configure(values=paths)
+        if self.view3d_y_combo is not None:
+            self.view3d_y_combo.configure(values=paths)
+        if self.view3d_z_combo is not None:
+            self.view3d_z_combo.configure(values=paths)
+        if self.view3d_color_combo is not None:
+            self.view3d_color_combo.configure(values=paths)
+        if not self.view3d_x_var.get().strip():
+            self.view3d_x_var.set(defaults.get("x", ""))
+        if not self.view3d_y_var.get().strip():
+            self.view3d_y_var.set(defaults.get("y", ""))
+        if not self.view3d_z_var.get().strip():
+            self.view3d_z_var.set(defaults.get("z", ""))
+        if not self.view3d_color_var.get().strip():
+            self.view3d_color_var.set(defaults.get("color", ""))
+        self.render_3d_variables(catalog)
+        self.view3d_status_var.set(
+            f"Loaded {len(paths)} variable(s) for {file_path.name}. Choose X/Y/Z and color, then open the 3D viewer."
+        )
+        self.save_active_pixc_project_quietly()
+        return True
+
+    def render_3d_variables(self, catalog: object) -> None:
+        """Render discovered variables in the 3D viewer table."""
+        if self.view3d_variable_tree is None:
+            return
+        tree = self.view3d_variable_tree
+        for item in tree.get_children():
+            tree.delete(item)
+        for variable in getattr(catalog, "variables", []) or []:
+            shape = "x".join(str(part) for part in getattr(variable, "shape", ()) or ())
+            tree.insert(
+                "",
+                "end",
+                text=str(getattr(variable, "path", "")),
+                values=(
+                    str(getattr(variable, "dtype", "")),
+                    shape,
+                    str(getattr(variable, "size", "")),
+                    str(getattr(variable, "units", "")),
+                ),
+            )
+
+    def build_3d_view_config(self) -> object:
+        """Build 3D viewer config from the 3D tab fields."""
+        from .visualize import Pixc3DViewConfig
+
+        file_path = self.current_3d_file_path()
+        if file_path is None:
+            raise ValueError("Choose one PIXC NetCDF file for the 3D viewer.")
+        try:
+            max_points = int(self.view3d_max_points_var.get().strip())
+        except ValueError as exc:
+            raise ValueError("Max points must be an integer.") from exc
+        if max_points <= 0:
+            raise ValueError("Max points must be greater than zero.")
+        return Pixc3DViewConfig(
+            file_path=file_path,
+            x_path=self.view3d_x_var.get().strip(),
+            y_path=self.view3d_y_var.get().strip(),
+            z_path=self.view3d_z_var.get().strip(),
+            color_attribute_path=self.view3d_color_var.get().strip(),
+            max_points=max_points,
+            sampling_mode=self.view3d_sampling_mode_var.get().strip() or SAMPLING_MODE_EVEN,
+        )
+
+    def open_3d_viewer(self) -> None:
+        """Build sampled 3D data and open it in the browser viewer."""
+        if not self.require_active_pixc_project("visualize PIXC files in 3D"):
+            return
+        if not all((self.view3d_x_var.get().strip(), self.view3d_y_var.get().strip(), self.view3d_z_var.get().strip())):
+            if not self.load_3d_variables():
+                return
+        try:
+            config = self.build_3d_view_config()
+        except Exception as exc:
+            messagebox.showerror("Invalid PIXC 3D viewer", str(exc))
+            return
+        self.view3d_status_var.set("Building 3D point sample...")
+
+        def run() -> None:
+            try:
+                from .visualize import build_pixc_3d_view
+
+                view_data = build_pixc_3d_view(config)
+            except Exception as exc:
+                error = str(exc)
+                self.root.after(0, lambda: self.finish_3d_viewer_error(error))
+            else:
+                self.root.after(0, lambda: self.finish_3d_viewer(view_data))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def finish_3d_viewer_error(self, error: str) -> None:
+        """Show 3D viewer build errors."""
+        self.view3d_status_var.set(f"3D viewer failed: {error}")
+        messagebox.showerror("PIXC 3D viewer failed", error)
+
+    def finish_3d_viewer(self, view_data: object) -> None:
+        """Open the browser 3D viewer for sampled PIXC data."""
+        try:
+            from .three_d_viewer import ThreeDViewerSession
+
+            if self.three_d_viewer_session is not None:
+                try:
+                    self.three_d_viewer_session.stop()
+                except Exception:
+                    pass
+            session = ThreeDViewerSession(view_data)
+            url = session.start()
+            self.three_d_viewer_session = session
+            webbrowser.open(url)
+        except Exception as exc:
+            self.view3d_status_var.set(f"3D viewer failed: {exc}")
+            messagebox.showerror("PIXC 3D viewer failed", str(exc))
+            return
+        self.view3d_status_var.set(
+            f"Opened 3D viewer with {getattr(view_data, 'rendered_points', 0)} point(s) "
+            f"colored by {getattr(view_data, 'color_attribute_path', '')}. "
+            f"{getattr(view_data, 'sampling_summary', '')}"
         )
         self.save_active_pixc_project_quietly()
 

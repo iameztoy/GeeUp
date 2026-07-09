@@ -437,8 +437,11 @@ POINT_VIEWER_HTML = """<!doctype html>
     <div class="title" id="title">PIXC points</div>
     <div class="meta" id="meta">Loading points...</div>
     <div class="tools">
+      <button type="button" class="toolButton" id="resetViewButton">Reset View</button>
       <button type="button" class="toolButton" id="measureButton">Measure Distance</button>
       <button type="button" class="toolButton" id="clearMeasureButton">Clear Measurement</button>
+      <button type="button" class="toolButton" id="showAllValuesButton">Show All Values</button>
+      <button type="button" class="toolButton" id="hideAllValuesButton">Hide All Values</button>
     </div>
     <div id="measureStatus">Measurement: inactive</div>
     <div class="legend" id="legend"></div>
@@ -494,6 +497,10 @@ POINT_VIEWER_HTML = """<!doctype html>
     let measurementLine = null;
     let measurementMarkers = [];
     let eeLayerCounter = 0;
+    let activePointLayers = [];
+    let valuePointLayers = {};
+    let activeValueKeys = new Set();
+    let legendHasValues = false;
     const eeDynamicLayers = {};
 
     L.DomEvent.disableClickPropagation(document.getElementById('pointPanel'));
@@ -513,17 +520,60 @@ POINT_VIEWER_HTML = """<!doctype html>
     function renderLegend(legend) {
       const container = document.getElementById('legend');
       container.innerHTML = '';
+      activeValueKeys = new Set();
+      legendHasValues = false;
       (legend || []).forEach(function(item) {
         const row = document.createElement('span');
         row.className = 'legendItem';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = true;
+        checkbox.dataset.valueKey = item.value || '';
+        if (item.value !== undefined) {
+          legendHasValues = true;
+          activeValueKeys.add(String(item.value));
+        } else {
+          checkbox.disabled = true;
+        }
+        checkbox.addEventListener('change', function() {
+          setValueVisibility(String(item.value || ''), checkbox.checked);
+        });
         const swatch = document.createElement('span');
         swatch.className = 'swatch';
         swatch.style.background = item.color || '#184a8b';
         const label = document.createElement('span');
         label.textContent = item.count !== undefined ? item.label + ' (' + item.count + ')' : item.label;
+        row.appendChild(checkbox);
         row.appendChild(swatch);
         row.appendChild(label);
         container.appendChild(row);
+      });
+    }
+
+    function isValueVisible(key) {
+      return !legendHasValues || activeValueKeys.has(String(key));
+    }
+
+    function setValueVisibility(key, visible) {
+      key = String(key);
+      if (!key) return;
+      if (visible) activeValueKeys.add(key);
+      else activeValueKeys.delete(key);
+      (valuePointLayers[key] || []).forEach(function(layer) {
+        if (layer.setStyle) {
+          layer.setStyle({
+            opacity: visible ? 1 : 0,
+            fillOpacity: visible ? 0.82 : 0
+          });
+        }
+      });
+    }
+
+    function setAllValueVisibility(visible) {
+      document.querySelectorAll('#legend input[type="checkbox"]').forEach(function(checkbox) {
+        if (checkbox.disabled) return;
+        checkbox.checked = visible;
+        setValueVisibility(checkbox.dataset.valueKey, visible);
       });
     }
 
@@ -595,6 +645,18 @@ POINT_VIEWER_HTML = """<!doctype html>
       overlayLayers[name] = layer;
       layerControl.addOverlay(layer, name);
       if (visible) layer.addTo(map);
+    }
+
+    function resetMapView() {
+      const payload = pointPayload || {};
+      if (payload.bbox) {
+        map.fitBounds([[payload.bbox[1], payload.bbox[0]], [payload.bbox[3], payload.bbox[2]]], { padding: [24, 24] });
+      } else if (activePointLayers.length) {
+        const group = L.featureGroup(activePointLayers);
+        map.fitBounds(group.getBounds(), { padding: [24, 24] });
+      } else {
+        map.setView([0, 0], 2);
+      }
     }
 
     function addEeTileLayer(layerPayload, visible = true) {
@@ -804,30 +866,42 @@ POINT_VIEWER_HTML = """<!doctype html>
               valid_points: payload.valid_points,
               rendered_points: payload.rendered_points,
               sampled: payload.sampled,
+              sampling_mode: payload.sampling_mode,
+              sampling_summary: payload.sampling_summary,
               bbox: payload.bbox,
               reference_bbox: payload.reference_bbox,
               features: payload.features || []
             }];
-        const features = payload.features || [];
         document.getElementById('title').textContent =
           (layers.length === 1 ? layers[0].file_name : layers.length + ' PIXC files') + ' - ' + payload.attribute_path;
-        document.getElementById('meta').textContent =
+        let metaText =
           payload.rendered_points + ' rendered from ' + payload.valid_points + ' valid point(s)'
           + (payload.sampled ? ' (sampled)' : '')
           + ' | color mode: ' + payload.color_mode;
+        if (payload.sampling_summary) {
+          metaText += ' | ' + payload.sampling_summary;
+        }
+        document.getElementById('meta').textContent = metaText;
         renderLegend(payload.legend || []);
-        const activeLayers = [];
+        activePointLayers = [];
+        valuePointLayers = {};
         layers.forEach(function(layerPayload) {
           const layer = L.geoJSON({ type: 'FeatureCollection', features: layerPayload.features || [] }, {
             pointToLayer: function(feature, latlng) {
               const color = (feature.properties && feature.properties.color) || '#184a8b';
-              return L.circleMarker(latlng, {
+              const valueKey = String((feature.properties && feature.properties.value_label) || '');
+              const visible = isValueVisible(valueKey);
+              const marker = L.circleMarker(latlng, {
                 renderer: pointRenderer,
                 radius: 3,
                 stroke: false,
                 fillColor: color,
-                fillOpacity: 0.82
+                opacity: visible ? 1 : 0,
+                fillOpacity: visible ? 0.82 : 0
               });
+              if (!valuePointLayers[valueKey]) valuePointLayers[valueKey] = [];
+              valuePointLayers[valueKey].push(marker);
+              return marker;
             },
             onEachFeature: function(feature, layer) {
               layer.bindPopup(popupText(feature));
@@ -842,20 +916,13 @@ POINT_VIEWER_HTML = """<!doctype html>
           }).addTo(map);
           const layerName = (layerPayload.file_name || fileName(layerPayload.file_path)) + ' (' + (layerPayload.rendered_points || 0) + ')';
           addNamedOverlay(layerName, layer, true);
-          activeLayers.push(layer);
+          activePointLayers.push(layer);
         });
         drawReferenceBbox(payload);
         (payload.reference_layers || []).forEach(function(layerPayload) {
           addEeTileLayer(layerPayload, Boolean(layerPayload.default_visible));
         });
-        if (payload.bbox) {
-          map.fitBounds([[payload.bbox[1], payload.bbox[0]], [payload.bbox[3], payload.bbox[2]]], { padding: [24, 24] });
-        } else if (features.length) {
-          const group = L.featureGroup(activeLayers);
-          map.fitBounds(group.getBounds(), { padding: [24, 24] });
-        } else {
-          map.setView([0, 0], 2);
-        }
+        resetMapView();
         document.getElementById('status').textContent =
           'Use the top-right layer control for basemaps, files, the EE search AOI, and reference imagery.';
         try {
@@ -873,6 +940,15 @@ POINT_VIEWER_HTML = """<!doctype html>
 
     document.getElementById('measureButton').addEventListener('click', function() {
       setMeasureActive(!measureActive);
+    });
+    document.getElementById('resetViewButton').addEventListener('click', function() {
+      resetMapView();
+    });
+    document.getElementById('showAllValuesButton').addEventListener('click', function() {
+      setAllValueVisibility(true);
+    });
+    document.getElementById('hideAllValuesButton').addEventListener('click', function() {
+      setAllValueVisibility(false);
     });
     document.getElementById('clearMeasureButton').addEventListener('click', function() {
       setMeasureActive(false);
