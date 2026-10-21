@@ -8,6 +8,8 @@ import json
 import os
 import sqlite3
 import threading
+import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +31,7 @@ DATASET_BY_FILENAME = {
     "mosaic_manifest.csv": "mosaic_manifest",
     "mixed_crid_mosaics.csv": "mixed_crid_mosaics",
     "upload_report.csv": "upload_report",
+    "upload_events.csv": "upload_events",
     "ee_asset_inventory.csv": "ee_asset_inventory",
     "workflow_manifest.csv": "workflow_manifest",
     "update_campaigns.csv": "update_campaigns",
@@ -45,6 +48,7 @@ KEY_FIELDS_BY_DATASET = {
     "mosaic_manifest": ("output_file",),
     "mixed_crid_mosaics": ("output_file",),
     "upload_report": ("asset_id",),
+    "upload_events": ("event_id",),
     "ee_asset_inventory": ("asset_id", "id", "name"),
     "workflow_manifest": ("stage", "record_id"),
     "update_campaigns": ("campaign_id",),
@@ -61,6 +65,7 @@ STATUS_FIELDS_BY_DATASET = {
     "mosaic_manifest": "status",
     "mixed_crid_mosaics": "status",
     "upload_report": "final_status",
+    "upload_events": "new_status",
     "ee_asset_inventory": "asset_type",
     "workflow_manifest": "status",
     "update_campaigns": "status",
@@ -169,6 +174,7 @@ class ProjectDatabase:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).resolve()
+        self._check_relocation_lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with _INITIALIZE_LOCK:
             if self.path not in _INITIALIZED_PATHS or not self.path.exists():
@@ -176,12 +182,24 @@ class ProjectDatabase:
                 _INITIALIZED_PATHS.add(self.path)
 
     def connect(self) -> sqlite3.Connection:
+        self._check_relocation_lock()
         connection = sqlite3.connect(self.path, timeout=60)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
         connection.execute("PRAGMA busy_timeout=60000")
         return connection
+
+    def _check_relocation_lock(self) -> None:
+        if any((self.path.parent / name).exists() for name in (
+            ".swotflow-relocation-lock", ".swotflow-relocation-pending.json"
+        )):
+            raise ValueError("Project relocation is in progress or needs recovery. Stop project work and use Relocate / Validate Project.")
+        validation = self.path.parent / ".swotflow-relocation-validation.json"
+        if validation.exists():
+            with validation.open(encoding="utf-8") as handle:
+                if not json.load(handle).get("ready", False):
+                    raise ValueError("Relocated project has unresolved file validation issues. Use Relocate / Validate Project before processing.")
 
     @contextmanager
     def session(self) -> Iterable[sqlite3.Connection]:
@@ -228,6 +246,7 @@ class ProjectDatabase:
             connection.execute(
                 "INSERT OR IGNORE INTO metadata(key, value) VALUES('revision', '0')"
             )
+            connection.commit()
 
     def _bump_revision(self, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -260,6 +279,20 @@ class ProjectDatabase:
                 (dataset,),
             ).fetchone()
         return int(row["count"]) if row else 0
+
+    def status_counts_since(self, dataset: str, updated_since: str) -> Dict[str, int]:
+        """Return status counts for records changed during the current GUI run."""
+        with self.session() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM records
+                WHERE dataset = ? AND updated_at >= ?
+                GROUP BY status
+                """,
+                (dataset, updated_since),
+            ).fetchall()
+        return {str(row["status"]): int(row["count"]) for row in rows}
 
     def dataset_prefix_count(self, dataset: str, record_key_prefix: str) -> int:
         """Count rows whose indexed record key begins with a stable prefix."""
@@ -474,23 +507,36 @@ class ProjectDatabase:
                         seen.add(key)
                         columns.append(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f"{path.name}.tmp")
-        with temporary.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
-            writer.writeheader()
-            if fieldnames:
-                with self.session() as connection:
-                    cursor = connection.execute(
-                        "SELECT payload_json FROM records WHERE dataset = ? ORDER BY record_key",
-                        (dataset,),
-                    )
-                    for stored in cursor:
-                        row = json.loads(stored["payload_json"])
+        # Each exporter owns its temporary file; simultaneous statistics/preflight
+        # exports must not truncate or rename another writer's in-flight file.
+        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+                writer.writeheader()
+                if fieldnames:
+                    with self.session() as connection:
+                        cursor = connection.execute(
+                            "SELECT payload_json FROM records WHERE dataset = ? ORDER BY record_key",
+                            (dataset,),
+                        )
+                        for stored in cursor:
+                            row = json.loads(stored["payload_json"])
+                            writer.writerow({column: row.get(column, "") for column in columns})
+                else:
+                    for row in rows:
                         writer.writerow({column: row.get(column, "") for column in columns})
-            else:
-                for row in rows:
-                    writer.writerow({column: row.get(column, "") for column in columns})
-        os.replace(temporary, path)
+            for attempt in range(5):
+                try:
+                    os.replace(temporary, path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.1 * (attempt + 1))
+        finally:
+            temporary.unlink(missing_ok=True)
         return path
 
 
@@ -550,6 +596,21 @@ def project_status_counts(path: str | Path, dataset: str | None = None) -> Dict[
     database = ProjectDatabase(database_path_for(csv_path))
     database.ensure_imported(dataset_name, csv_path)
     return database.status_counts(dataset_name)
+
+
+def project_status_counts_since(
+    path: str | Path,
+    updated_since: str,
+    dataset: str | None = None,
+) -> Dict[str, int]:
+    """Return status counts limited to rows updated since an ISO timestamp."""
+    csv_path = Path(path)
+    dataset_name = dataset or dataset_for_path(csv_path)
+    if dataset_name is None:
+        return {}
+    database = ProjectDatabase(database_path_for(csv_path))
+    database.ensure_imported(dataset_name, csv_path)
+    return database.status_counts_since(dataset_name, updated_since)
 
 
 def migrate_project_csvs(project_root: str | Path) -> MigrationResult:

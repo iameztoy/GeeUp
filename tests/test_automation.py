@@ -12,15 +12,18 @@ from swotflow_automation import (
     AutomationTilePlan,
     PROJECT_ROOT,
     build_tile_config_dict,
+    build_upload_repair_config,
     cleanup_stage,
     execute_download_result,
     execute_command_result,
     load_latest_automation_run_state,
     preflight_automation,
+    retryable_upload_candidates,
     run_automation,
     write_run_state,
     write_tile_config,
 )
+from project_database import upsert_project_rows
 from swot_download_tool import DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS
 from project_updates import record_update_expected_rows
 from power_management import active_hours_leave_overnight_unprotected, hour_inside_active_hours
@@ -170,7 +173,8 @@ class AutomationTests(unittest.TestCase):
             pending = {plan.tile: plan.pending_downloads for plan in state.tile_plans}
             estimated_mosaics = {plan.tile: plan.estimated_mosaic_groups for plan in state.tile_plans}
             self.assertTrue(state.preflight_ok)
-            self.assertEqual(classifications["UTM34M"], "already complete")
+            # Lifetime upload totals alone cannot prove this window's sources.
+            self.assertEqual(classifications["UTM34M"], "partial/resumable")
             self.assertEqual(classifications["UTM35M"], "new")
             self.assertEqual(pending["UTM34M"], 0)
             self.assertEqual(pending["UTM35M"], 1)
@@ -979,6 +983,51 @@ class AutomationTests(unittest.TestCase):
                 if row.tile == "UTM34M" and row.stage == "download"
             ]
             self.assertEqual(len(download_rows), 1)
+
+    def test_retryable_upload_candidates_are_tile_scoped_for_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = base_config(root)
+            mosaics = root / "03_mosaics"
+            mosaics.mkdir(parents=True)
+            selected = mosaics / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PID0_01.tif"
+            )
+            other = mosaics / (
+                "SWOT_L2_HR_Raster_100m_UTM35M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PID0_01.tif"
+            )
+            selected.write_bytes(b"1")
+            other.write_bytes(b"1")
+            report = Path(config["artifacts"]["report_csv"])
+            upsert_project_rows(
+                report,
+                [
+                    {
+                        "asset_id": f"projects/example/assets/collection/{selected.stem}",
+                        "local_file": str(selected),
+                        "source_utm_tiles": '["UTM34M"]',
+                        "final_status": "SUBMITTED_PENDING_VERIFICATION",
+                    },
+                    {
+                        "asset_id": f"projects/example/assets/collection/{other.stem}",
+                        "local_file": str(other),
+                        "source_utm_tiles": '["UTM35M"]',
+                        "final_status": "ERROR",
+                    },
+                ],
+                dataset="upload_report",
+            )
+
+            candidates = retryable_upload_candidates(config, ["UTM34M"])
+            repair_config = build_upload_repair_config(config, ["UTM34M"])
+
+            self.assertEqual(candidates, [selected])
+            self.assertEqual(repair_config["input_folder"], str(mosaics))
+            self.assertEqual(repair_config["upload"]["scope"], "selected_utm")
+            self.assertEqual(repair_config["upload"]["utm_tiles"], ["UTM34M"])
+            self.assertTrue(repair_config["execution"]["resume"])
 
 
 if __name__ == "__main__":

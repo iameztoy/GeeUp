@@ -41,6 +41,10 @@ CRID_FIDELITY_RANK = {
     "G": 2,
 }
 SUPPORTED_CRID_PRODUCERS = {"P", "D"}
+PRODUCT_IDENTITY_FIELDS = (
+    "descriptor", "cycle_id", "pass_id", "scene_id",
+    "range_beginning", "range_ending", "filename_suffix",
+)
 
 
 @dataclass
@@ -172,15 +176,7 @@ def product_identity_parts(file_name: str | Path) -> Optional[Tuple[str, ...]]:
     if metadata is None:
         return None
     fields = metadata.fields
-    return (
-        fields.get("descriptor", ""),
-        fields.get("cycle_id", ""),
-        fields.get("pass_id", ""),
-        fields.get("scene_id", ""),
-        fields.get("range_beginning", ""),
-        fields.get("range_ending", ""),
-        fields.get("filename_suffix", ""),
-    )
+    return tuple(fields.get(key, "") for key in PRODUCT_IDENTITY_FIELDS)
 
 
 def product_identity_key(file_name: str | Path) -> str:

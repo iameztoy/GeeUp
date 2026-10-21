@@ -412,6 +412,9 @@ class UTMPipelineStatusMap(ttk.Frame):
         self.update_campaign_label_by_id: Dict[str, str] = {}
         self.update_campaign_id_by_label: Dict[str, str] = {}
         self.active_update_campaign_id = ""
+        self.campaigns: Sequence[Sequence[object]] = []
+        self.campaign_details: Dict[str, Mapping[str, object]] = {}
+        self.show_archived_var = tk.BooleanVar(value=False)
         self.transform = CanvasTransform(
             geometry.bounds if geometry is not None else (-180.0, -80.0, 180.0, 84.0),
             self.canvas_width,
@@ -471,6 +474,14 @@ class UTMPipelineStatusMap(ttk.Frame):
             variable=self.show_labels_var,
             command=self.draw_map,
         ).grid(row=0, column=5, sticky="e", padx=(10, 0))
+        ttk.Checkbutton(controls, text="Show archived windows", variable=self.show_archived_var,
+                        command=self.refresh_campaign_choices).grid(row=1, column=3, columnspan=3, sticky="e")
+        self.execution_var = tk.StringVar(value="Saved coverage view | Execution: idle")
+        execution_frame = ttk.Frame(controls, height=40)
+        execution_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+        execution_frame.grid_propagate(False)
+        ttk.Label(execution_frame, textvariable=self.execution_var, wraplength=560,
+                  anchor="w").place(relwidth=1, relheight=1)
 
         self.canvas = tk.Canvas(
             self,
@@ -615,12 +626,23 @@ class UTMPipelineStatusMap(ttk.Frame):
         campaigns: Sequence[Sequence[object]],
         rows_by_campaign: Mapping[str, Sequence[Sequence[object]]],
         active_campaign_id: str = "",
+        details: Sequence[Mapping[str, object]] = (),
     ) -> None:
         """Load persisted update windows and select the latest/current campaign."""
         self.update_coverage_campaign_rows = {
             str(campaign_id): rows
             for campaign_id, rows in rows_by_campaign.items()
         }
+        self.campaigns = campaigns
+        self.campaign_details = {str(row.get("campaign_id", "")): row for row in details}
+        if not self.active_update_campaign_id:
+            self.active_update_campaign_id = active_campaign_id
+        self.refresh_campaign_choices()
+
+    def refresh_campaign_choices(self) -> None:
+        """Preserve the viewed window and hide archived windows by default."""
+        campaigns = [row for row in self.campaigns if self.show_archived_var.get()
+                     or str(self.campaign_details.get(str(row[0]), {}).get("archived", "")).lower() not in {"yes", "true", "1"}]
         self.update_campaign_label_by_id = {}
         self.update_campaign_id_by_label = {}
         labels: list[str] = []
@@ -628,13 +650,15 @@ class UTMPipelineStatusMap(ttk.Frame):
             if len(campaign) < 7:
                 continue
             campaign_id = str(campaign[0])
-            label = f"{campaign[1]} ({campaign[6]} tiles, {campaign[5]} expected)"
+            detail = self.campaign_details.get(campaign_id, {})
+            suffix = " | Archived" if str(detail.get("archived", "")).lower() in {"yes", "true", "1"} else ""
+            label = f"{campaign[1]} ({campaign[6]} tiles, {campaign[5]} expected){suffix}"
             self.update_campaign_label_by_id[campaign_id] = label
             self.update_campaign_id_by_label[label] = campaign_id
             labels.append(label)
         selected_id = (
-            active_campaign_id
-            if active_campaign_id in self.update_campaign_label_by_id
+            self.active_update_campaign_id
+            if self.active_update_campaign_id in self.update_campaign_label_by_id
             else (str(campaigns[0][0]) if campaigns else "")
         )
         self.active_update_campaign_id = selected_id
@@ -650,6 +674,8 @@ class UTMPipelineStatusMap(ttk.Frame):
             self.set_update_coverage_statuses(
                 self.update_coverage_campaign_rows.get(selected_id, [])
             )
+        else:
+            self.set_update_coverage_statuses([])
 
     def set_missing_upload_rows(self, rows: Sequence[Sequence[object]]) -> None:
         """Track upload-ready mosaic rows that are not yet uploaded/verified."""
@@ -677,6 +703,8 @@ class UTMPipelineStatusMap(ttk.Frame):
         self.update_campaign_label_by_id = {}
         self.update_campaign_id_by_label = {}
         self.active_update_campaign_id = ""
+        self.campaigns = []
+        self.campaign_details = {}
         self.update_campaign_var.set("")
         self.update_campaign_combo.configure(values=(), state="disabled")
         self.missing_upload_rows_by_tile = {}

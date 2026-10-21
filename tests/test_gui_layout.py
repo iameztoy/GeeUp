@@ -90,6 +90,18 @@ def swot_tif_name(tile: str) -> str:
 
 
 class GuiLayoutTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # GUI constructors auto-open config.yaml; tests must never touch a user's project.
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        config_patch = mock.patch("swotflow_gui.load_config", return_value=self.sample_config(root / "NoProject"))
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
+        path_patch = mock.patch("swotflow_gui.CONFIG_PATH", root / "config.yaml")
+        path_patch.start()
+        self.addCleanup(path_patch.stop)
+
     def sample_config(self, root: Path) -> dict:
         return {
             "processing": {
@@ -134,6 +146,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("New Project", collect_button_texts(app.root))
             self.assertIn("Open Project", collect_button_texts(app.root))
             self.assertIn("Save Project", collect_button_texts(app.root))
+            self.assertIn("Relocate / Validate Project", collect_button_texts(app.root))
             self.assertIn("Prepare Update", collect_button_texts(app.root))
             self.assertIn("Download Data", collect_button_texts(app.root))
             self.assertIn("View Statistics", collect_button_texts(app.root))
@@ -213,6 +226,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Validate Typed Tiles", collect_button_texts(upload_tab))
             self.assertIn("Clear Upload Tiles", collect_button_texts(upload_tab))
             self.assertIn("Refresh Available Tiles", collect_button_texts(upload_tab))
+            self.assertIn("Select Retryable Uploads", collect_button_texts(upload_tab))
             self.assertIn("Execution", collect_label_texts(upload_tab))
             self.assertIn("Sync EE Assets", collect_button_texts(upload_tab))
             self.assertIn("Run Dry Run", collect_button_texts(upload_tab))
@@ -314,6 +328,35 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertFalse(saved)
                 self.assertEqual(app.current_project_root_var.get(), "")
                 warning.assert_called_once()
+            finally:
+                root.destroy()
+
+    def test_opening_moved_project_routes_to_relocation_dialog(self) -> None:
+        from project_relocation import RelocationRequired
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            with mock.patch("swotflow_gui.load_project", side_effect=RelocationRequired("moved")), mock.patch("swotflow_gui.messagebox.showwarning"), mock.patch.object(app, "show_project_transfer") as dialog:
+                app.open_project_path(Path("copied/project.yaml"))
+            dialog.assert_called_once_with(str(Path("copied/project.yaml")))
+        finally:
+            root.destroy()
+
+    def test_project_load_keeps_explicit_external_data_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            project = create_project(folder / "project", "Mapped project", self.sample_config(folder / "project"))
+            external = str(folder / "external_mosaics")
+            project.config["mosaic"]["output_folder"] = external
+            project.config["input_folder"] = external
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                app = LauncherApp(root)
+                app.apply_project(project)
+                self.assertEqual(app.mosaic_output_var.get(), external)
+                self.assertEqual(app.folder_var.get(), external)
             finally:
                 root.destroy()
 
@@ -584,6 +627,7 @@ class GuiLayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             project_root = Path(temp) / "Project"
             config_data = self.sample_config(project_root)
+            config_data["automation"] = {"utm_tiles": ["UTM34M"], "start_date": "2026-01-01", "end_date": "2026-01-31"}
             project = create_project(project_root, "Project", config_data)
             run_config = AutomationConfig(
                 project_root=project_root,
@@ -793,6 +837,29 @@ class GuiLayoutTests(unittest.TestCase):
             finally:
                 root.destroy()
 
+    def test_upload_progress_uses_only_rows_changed_in_current_run(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            app.upload_progress_started_at = "2026-08-11T20:12:08+02:00"
+            with mock.patch(
+                "swotflow_gui.project_status_counts_since",
+                return_value={"PLANNED_UPLOAD": 108},
+            ) as counts_since:
+                app.update_upload_progress_from_report(Path("upload_report.csv"))
+
+            self.assertEqual(app.upload_progress_var.get(), 0.0)
+            self.assertIn("planning complete", app.upload_progress_text_var.get())
+            self.assertIn("planned pending 108", app.upload_progress_text_var.get())
+            counts_since.assert_called_once_with(
+                Path("upload_report.csv"),
+                "2026-08-11T20:12:08+02:00",
+                "upload_report",
+            )
+        finally:
+            root.destroy()
+
     def test_upload_tile_selection_is_saved_to_config(self) -> None:
         root = tk.Tk()
         root.withdraw()
@@ -807,10 +874,25 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertEqual(config["upload"]["scope"], "selected_utm")
             self.assertEqual(config["upload"]["completion_mode"], "submit_and_continue")
             self.assertEqual(config["upload"]["utm_tiles"], ["UTM34M", "UTM35M"])
+            self.assertEqual(config["upload"]["max_pending_browser_uploads"], 3)
             self.assertTrue(config["upload"]["ee_sync_before_upload"])
             self.assertTrue(config["artifacts"]["ee_asset_inventory_csv"].endswith("ee_asset_inventory.csv"))
             self.assertEqual(config["extract"]["workers"], 1)
             self.assertEqual(config["mosaic"]["workers"], 1)
+        finally:
+            root.destroy()
+
+    def test_real_upload_is_confirmed_in_gui_before_launch(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            with mock.patch.object(app, "save_config", return_value=True):
+                with mock.patch("swotflow_gui.messagebox.askyesno", return_value=True):
+                    with mock.patch.object(app, "launch_uploader") as launch:
+                        app.save_and_run_real()
+
+            launch.assert_called_once_with(dry_run=False)
         finally:
             root.destroy()
 

@@ -22,17 +22,21 @@ import yaml
 from gdal_runtime import build_gdal_runtime_env
 from power_management import keep_system_awake, windows_automation_reboot_warnings
 from project_database import read_project_rows
+from project_operation_lock import automation_lock
 from project_insights import (
     CleanupCandidate,
+    build_update_coverage_tile_rows,
     collect_project_insights,
     delete_cleanup_candidates,
     format_bytes,
     plan_cleanup_candidates,
 )
 from project_updates import record_update_preview
+from project_updates import preview_rows as update_preview_rows
 from project_updates import expected_rows as read_update_expected_rows
 from project_updates import update_campaign_id
 from swot_download_tool import (
+    apply_product_version_filter,
     DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS,
     DownloadConfig,
     DownloadGranule,
@@ -76,6 +80,14 @@ RETRYABLE_DOWNLOAD_FAILURE_MARKERS = (
     "internal error",
     "temporarily unavailable",
 )
+RETRYABLE_UPLOAD_STATUSES = {
+    "SUBMITTED",
+    "SUBMITTED_PENDING_VERIFICATION",
+    "UNKNOWN_AFTER_CLICK",
+    "ERROR",
+    "FAILED",
+    "PLANNED_UPLOAD",
+}
 
 
 def is_retryable_download_message(message: str) -> bool:
@@ -118,6 +130,7 @@ class AutomationConfig:
     prevent_display_sleep: bool = False
     run_id: str = ""
     run_dir: Optional[Path] = None
+    refresh_cmr: bool = False
 
 
 @dataclass
@@ -175,6 +188,8 @@ class AutomationRunState:
     started_at: str = ""
     finished_at: str = ""
     stopped: bool = False
+    unresolved_upload_count: int = 0
+    unresolved_upload_tiles: list[str] = field(default_factory=list)
 
     @property
     def csv_path(self) -> Path:
@@ -235,6 +250,7 @@ def normalize_automation_config(config: AutomationConfig) -> AutomationConfig:
         prevent_display_sleep=bool(config.prevent_display_sleep),
         run_id=config.run_id,
         run_dir=Path(config.run_dir) if config.run_dir is not None else None,
+        refresh_cmr=config.refresh_cmr,
     )
     if not normalized.project_root:
         raise ValueError("Automation requires an open project root.")
@@ -382,6 +398,92 @@ def build_tile_config_dict(
     config["input_folder"] = str(project_mosaic)
     config.setdefault("automation", {})
     config["automation"].update({"include_upload": include_upload, "tile": tile})
+    return config
+
+
+def upload_report_path(base_config: Mapping[str, Any]) -> Path:
+    """Return the project upload report path from configuration."""
+    artifacts = base_config.get("artifacts", {})
+    if isinstance(artifacts, Mapping):
+        configured = str(artifacts.get("report_csv", "") or "").strip()
+        if configured:
+            return Path(configured)
+    processing = base_config.get("processing", {})
+    logs = str(processing.get("logs", "") or "") if isinstance(processing, Mapping) else ""
+    return Path(logs) / "upload_report.csv"
+
+
+def upload_row_tiles(row: Mapping[str, Any]) -> list[str]:
+    """Return normalized source tiles recorded for one upload row."""
+    value = row.get("source_utm_tiles", "")
+    raw_tiles: Any = value
+    if isinstance(value, str) and value.strip():
+        try:
+            raw_tiles = json.loads(value)
+        except json.JSONDecodeError:
+            raw_tiles = value
+    try:
+        tiles = normalize_utm_tiles(raw_tiles)
+    except ValueError:
+        tiles = []
+    if tiles:
+        return tiles
+    metadata = parse_swot_l2_hr_raster_metadata(
+        str(row.get("local_file", "") or row.get("asset_id", ""))
+    )
+    if metadata is None:
+        return []
+    try:
+        return normalize_utm_tiles([metadata.fields.get("coordinate_system", "")])
+    except ValueError:
+        return []
+
+
+def retryable_upload_candidates(
+    base_config: Mapping[str, Any],
+    selected_tiles: Iterable[str],
+) -> list[Path]:
+    """Return local mosaics whose upload is unresolved and safe to retry."""
+    wanted = set(normalize_utm_tiles(list(selected_tiles)))
+    candidates: list[Path] = []
+    for row in read_project_rows(upload_report_path(base_config), "upload_report"):
+        status = str(row.get("final_status", "") or "").strip().upper()
+        if status not in RETRYABLE_UPLOAD_STATUSES:
+            continue
+        local_file = Path(str(row.get("local_file", "") or ""))
+        if not local_file.is_file() or local_file.suffix.lower() not in {".tif", ".tiff"}:
+            continue
+        if wanted and not (wanted & set(upload_row_tiles(row))):
+            continue
+        candidates.append(local_file)
+    return sorted(set(candidates))
+
+
+def build_upload_repair_config(
+    base_config: Mapping[str, Any],
+    selected_tiles: Iterable[str],
+) -> Dict[str, Any]:
+    """Return a global upload-only repair config for unresolved automation mosaics."""
+    config = deepcopy(dict(base_config))
+    tiles = normalize_utm_tiles(list(selected_tiles))
+    processing = config.get("processing", {})
+    mosaics = str(processing.get("mosaics", "") or "") if isinstance(processing, Mapping) else ""
+    config["input_folder"] = mosaics
+    upload = dict(config.get("upload", {}))
+    upload.update(
+        {
+            "scope": "selected_utm",
+            "utm_tiles": tiles,
+            "ee_sync_before_upload": True,
+        }
+    )
+    config["upload"] = upload
+    execution = dict(config.get("execution", {}))
+    execution.update({"dry_run": False, "resume": True, "require_confirmation": False})
+    config["execution"] = execution
+    automation = dict(config.get("automation", {}))
+    automation.update({"upload_repair": True, "utm_tiles": tiles})
+    config["automation"] = automation
     return config
 
 
@@ -544,6 +646,7 @@ def cached_update_preview(download_config: DownloadConfig) -> DownloadPreview | 
         )
     if not granules:
         return None
+    apply_product_version_filter(granules, download_config.product_version_filter)
     return DownloadPreview(
         query=build_download_query(download_config),
         granules=sorted(granules, key=lambda granule: granule.file_name.lower()),
@@ -577,6 +680,54 @@ def preflight_automation(
     progress_callback: ProgressCallback | None = None,
 ) -> AutomationRunState:
     """Validate an automation request and classify each selected tile."""
+    with automation_lock(Path(config.project_root)):
+        return _preflight_automation(config, preview_builder, progress_callback)
+
+
+def reconcile_preflight_completion(
+    state: AutomationRunState,
+    expected: Sequence[Mapping[str, str]],
+    manifest: Mapping[str, Mapping[str, str]],
+) -> None:
+    """Require date-window source proof, not lifetime tile totals, for skipping."""
+    if not expected:
+        return
+    config = dict(state.config.base_config)
+    config["download"] = {**config.get("download", {}), "start_date": state.config.start_date,
+                          "end_date": state.config.end_date, "utm_tiles": state.config.utm_tiles}
+    rows = build_update_coverage_tile_rows(
+        config=config, download_preview_rows=expected, download_rows=list(manifest.values()),
+        extract_rows=read_project_rows(project_manifest_path(config, "extract", "manifest_csv"), "extract_manifest"),
+        mosaic_rows=read_project_rows(project_manifest_path(config, "mosaic", "manifest_csv"), "mosaic_manifest"),
+        upload_rows=read_project_rows(upload_report_path(config), "upload_report"),
+    )
+    by_tile = {row[0]: row for row in rows}
+    for plan in state.tile_plans:
+        row = by_tile.get(plan.tile)
+        if row is None or not row[1] or plan.classification in {"blocked", "cmr retry later"}:
+            continue
+        total, downloaded, extracted, mosaicked, uploaded = row[1:6]
+        complete = min(downloaded, extracted, mosaicked) >= total
+        if state.config.include_upload:
+            complete = complete and uploaded >= total
+        # Cached expectations may name an excluded lower version whose higher
+        # version already has project proof. Never clear a genuinely new match.
+        plan.pending_downloads = min(plan.pending_downloads, max(0, total - downloaded))
+        if complete:
+            plan.classification = "already complete"
+            plan.message = f"All {total} expected observations have completed-stage proof for these dates."
+        elif plan.classification == "already complete" or (plan.classification == "needs update" and plan.pending_downloads == 0):
+            plan.classification = "partial/resumable"
+            plan.message = (f"This window: {total} expected observations; {extracted} extracted, "
+                            f"{mosaicked} mosaic sources, {uploaded} uploaded/verified. Remaining stages need work.")
+
+
+def _preflight_automation(
+    config: AutomationConfig,
+    preview_builder: Callable[..., Any],
+    progress_callback: ProgressCallback | None,
+) -> AutomationRunState:
+    """Run preflight while the caller owns the project operation lock."""
     normalized = normalize_automation_config(config)
     state = ensure_run_state(normalized)
     state.started_at = now_text()
@@ -628,6 +779,7 @@ def preflight_automation(
     counts_by_tile = tile_counts_from_insights(base_config)
     manifest = read_download_manifest(project_manifest_path(base_config, "download", "manifest_csv"))
     recorded_mosaic_names = completed_mosaic_output_names(base_config)
+    request_expected: list[dict[str, Any]] = []
 
     for tile in normalized.utm_tiles:
         try:
@@ -646,7 +798,7 @@ def preflight_automation(
                 end_date=normalized.end_date,
                 include_upload=normalized.include_upload,
             )
-            preview = cached_update_preview(download_config)
+            preview = None if normalized.refresh_cmr else cached_update_preview(download_config)
             preview_source = "cached_update_expected"
             if preview is None:
                 preview = preview_builder(download_config)
@@ -657,6 +809,7 @@ def preflight_automation(
                     source=preview_source,
                     campaign_tiles=normalized.utm_tiles,
                 )
+            request_expected.extend(update_preview_rows(preview))
             pending = 0
             for granule in preview.selected_granules:
                 if manifest_has_downloaded(manifest, granule):
@@ -734,6 +887,12 @@ def preflight_automation(
                 )
             )
 
+    if progress_callback is not None:
+        progress_callback("ALL", "preflight", "running", "Checking source lineage for the requested date window...")
+    try:
+        reconcile_preflight_completion(state, request_expected, manifest)
+    except Exception as exc:
+        state.errors.append(f"Could not verify date-window completion: {exc}")
     state.preflight_ok = not state.errors
     state.finished_at = now_text()
     write_run_state(state)
@@ -1005,6 +1164,8 @@ def write_run_state(state: AutomationRunState) -> None:
         "started_at": state.started_at,
         "finished_at": state.finished_at,
         "stopped": state.stopped,
+        "unresolved_upload_count": state.unresolved_upload_count,
+        "unresolved_upload_tiles": state.unresolved_upload_tiles,
     }
     with state.json_path.open("w", encoding="utf-8") as handle:
         json.dump(serializable, handle, indent=2, default=str)
@@ -1037,6 +1198,7 @@ def _automation_config_from_mapping(data: Mapping[str, Any]) -> AutomationConfig
         prevent_display_sleep=bool(data.get("prevent_display_sleep", False)),
         run_id=str(data.get("run_id", "") or ""),
         run_dir=Path(run_dir_text) if run_dir_text else None,
+        refresh_cmr=bool(data.get("refresh_cmr", False)),
     )
 
 
@@ -1112,6 +1274,10 @@ def load_automation_run_state(path: str | Path) -> AutomationRunState:
         started_at=str(data.get("started_at", "") or ""),
         finished_at=str(data.get("finished_at", "") or ""),
         stopped=bool(data.get("stopped", False)),
+        unresolved_upload_count=_coerce_int(data.get("unresolved_upload_count")),
+        unresolved_upload_tiles=[
+            str(value) for value in data.get("unresolved_upload_tiles", []) or []
+        ],
     )
     return state
 
@@ -1121,7 +1287,8 @@ def latest_automation_run_dir(base_config: Mapping[str, Any], project_root: str 
     root = automation_runs_root(base_config, Path(project_root))
     if not root.exists():
         return None
-    candidates = [path for path in root.iterdir() if (path / "automation_run.json").exists()]
+    candidates = [path for path in root.iterdir() if (path / "automation_run.json").exists()
+                  and not (path / "archived.json").exists()]
     if not candidates:
         return None
     return max(candidates, key=lambda path: (path.stat().st_mtime, path.name))
@@ -1273,6 +1440,69 @@ def execute_command_result(
     )
 
 
+def execute_deferred_upload_repair_if_needed(
+    state: AutomationRunState,
+    normalized: AutomationConfig,
+    gdal_python: Path,
+    progress_callback: ProgressCallback | None = None,
+) -> list[AutomationStageResult]:
+    """Retry unresolved local mosaics once after the tile queue finishes."""
+    if not normalized.include_upload or state.stopped:
+        return []
+    before = retryable_upload_candidates(normalized.base_config, normalized.utm_tiles)
+    if not before:
+        return []
+
+    repair_dir = state.run_dir / "upload_repair"
+    config_path = write_tile_config(
+        build_upload_repair_config(normalized.base_config, normalized.utm_tiles),
+        repair_dir / "automation_config.yaml",
+    )
+    if progress_callback is not None:
+        progress_callback(
+            "REPAIR",
+            "upload",
+            "running",
+            f"Retrying {len(before)} unresolved local mosaic upload(s) after EE reconciliation.",
+        )
+    upload_result = execute_command_result(
+        state,
+        "REPAIR",
+        "upload",
+        config_path,
+        gdal_python,
+        progress_callback=progress_callback,
+    )
+    upload_result.message = (
+        f"Deferred upload repair considered {len(before)} unresolved local mosaic(s). "
+        f"{upload_result.message}"
+    )
+
+    if progress_callback is not None:
+        progress_callback(
+            "REPAIR",
+            "ee_sync",
+            "running",
+            "Reconciling repaired submissions with Earth Engine assets and operations.",
+        )
+    sync_result = execute_command_result(
+        state,
+        "REPAIR",
+        "ee_sync",
+        config_path,
+        gdal_python,
+        progress_callback=progress_callback,
+    )
+    after = retryable_upload_candidates(normalized.base_config, normalized.utm_tiles)
+    sync_result.message = (
+        f"Deferred upload repair reconciliation left {len(after)} unresolved local mosaic(s) "
+        f"from {len(before)} candidate(s). {sync_result.message}"
+    )
+    if after and sync_result.status == "success":
+        sync_result.status = "warning"
+    return [upload_result, sync_result]
+
+
 def run_automation(
     config: AutomationConfig,
     *,
@@ -1282,7 +1512,7 @@ def run_automation(
 ) -> AutomationRunState:
     """Run the tile-by-tile automation workflow."""
     normalized = normalize_automation_config(config)
-    with keep_system_awake(
+    with automation_lock(normalized.project_root), keep_system_awake(
         enabled=normalized.prevent_system_sleep,
         keep_display_awake=normalized.prevent_display_sleep,
     ):
@@ -1302,7 +1532,7 @@ def _run_automation_normalized(
     stop_event: Any = None,
 ) -> AutomationRunState:
     """Run automation with a normalized config while the caller owns power policy."""
-    state = preflight_state if preflight_state is not None else preflight_automation(normalized)
+    state = preflight_state if preflight_state is not None else _preflight_automation(normalized, build_download_preview, progress_callback)
     if not state.preflight_ok:
         return state
     state.config = normalized
@@ -1458,6 +1688,22 @@ def _run_automation_normalized(
                 stop_after_failure = True
                 break
 
+    repair_results = execute_deferred_upload_repair_if_needed(
+        state,
+        normalized,
+        gdal_python,
+        progress_callback=progress_callback,
+    )
+    for repair_result in repair_results:
+        append_stage_result(state, repair_result)
+        if progress_callback is not None:
+            progress_callback(
+                repair_result.tile,
+                repair_result.stage,
+                repair_result.status,
+                repair_result.message,
+            )
+
     final_cleanup = execute_final_verified_mosaic_cleanup_if_needed(state, normalized)
     if final_cleanup is not None:
         append_stage_result(state, final_cleanup)
@@ -1468,6 +1714,25 @@ def _run_automation_normalized(
                 final_cleanup.status,
                 final_cleanup.message,
             )
+
+    if normalized.include_upload:
+        unresolved = retryable_upload_candidates(
+            normalized.base_config,
+            normalized.utm_tiles,
+        )
+        unresolved_tiles: set[str] = set()
+        for path in unresolved:
+            metadata = parse_swot_l2_hr_raster_metadata(path)
+            if metadata is None:
+                continue
+            try:
+                unresolved_tiles.update(
+                    normalize_utm_tiles([metadata.fields.get("coordinate_system", "")])
+                )
+            except ValueError:
+                continue
+        state.unresolved_upload_count = len(unresolved)
+        state.unresolved_upload_tiles = sorted(unresolved_tiles)
 
     state.finished_at = now_text()
     write_run_state(state)

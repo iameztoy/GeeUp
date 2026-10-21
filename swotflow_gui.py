@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import csv
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -115,7 +116,15 @@ ensure_isolated_python_environment()
 import yaml
 
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env
-from project_database import ProjectDatabase, database_path_for, project_status_counts
+from project_database import (
+    ProjectDatabase,
+    database_path_for,
+    project_status_counts,
+    project_status_counts_since,
+)
+from project_relocation import RelocationRequired
+from project_transfer_dialog import ProjectTransferDialog
+from project_updates import campaign_is_archived, set_campaign_archived
 from swotflow_project import (
     SWOTFlowProject,
     TilePreset,
@@ -357,6 +366,9 @@ class LauncherApp:
         self.automation_progress_text_var = tk.StringVar(value="Progress: not started")
         self.automation_preflight_state: AutomationRunState | None = None
         self.automation_running = False
+        self.automation_preflight_running = False
+        self.automation_refresh_cmr_var = tk.BooleanVar(value=bool(automation_data.get("refresh_cmr", True)))
+        self.automation_activity_var = tk.StringVar(value="Execution: idle")
         self.automation_stop_event: threading.Event | None = None
         self.automation_progress_tiles: list[str] = []
         self.automation_progress_stages: list[str] = []
@@ -371,6 +383,7 @@ class LauncherApp:
             date_var.trace_add("write", lambda *_args: self.update_automation_date_status())
         self.upload_stats_poll_after_id: str | None = None
         self.upload_report_update_callback: Optional[Callable[[], None]] = None
+        self.upload_progress_started_at: str | None = None
 
         self.duplicate_input_var = tk.StringVar(
             value=duplicate_data.get("input_folder", raw_downloads)
@@ -451,11 +464,17 @@ class LauncherApp:
         self.cached_completed_upload_tiles: list[str] = []
         self.upload_tile_scan_after_id: str | None = None
         self.upload_tile_scan_generation = 0
+        self.select_retryable_upload_tiles_after_scan = False
         self.batch_size_var = tk.StringVar(
             value=str(self.data.get("upload", {}).get("batch_size", 50))
         )
         self.max_active_var = tk.StringVar(
             value=str(self.data.get("upload", {}).get("max_active_ingestions", 0))
+        )
+        self.max_pending_browser_uploads_var = tk.StringVar(
+            value=str(
+                self.data.get("upload", {}).get("max_pending_browser_uploads", 3)
+            )
         )
         self.prefix_var = tk.StringVar(
             value=self.data.get("upload", {}).get("prefix", "")
@@ -787,6 +806,9 @@ class LauncherApp:
         ttk.Button(actions, text="Prepare Update", command=self.prepare_project_update).grid(
             row=0, column=4, sticky="w", padx=(8, 0)
         )
+        ttk.Button(actions, text="Relocate / Validate Project", command=self.show_project_transfer).grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(8, 0)
+        )
         ttk.Button(
             actions,
             text="Download Data",
@@ -1097,9 +1119,8 @@ class LauncherApp:
         actions = ttk.LabelFrame(parent, text="Execution", padding=10)
         actions.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         actions.columnconfigure(5, weight=1)
-        ttk.Button(actions, text="Run Preflight", command=self.run_automation_preflight).grid(
-            row=0, column=0, sticky="w"
-        )
+        self.automation_preflight_button = ttk.Button(actions, text="Run Preflight", command=self.run_automation_preflight)
+        self.automation_preflight_button.grid(row=0, column=0, sticky="w")
         self.automation_start_button = ttk.Button(
             actions,
             text="Start Automation",
@@ -1120,6 +1141,8 @@ class LauncherApp:
             text="Start automatically after successful preflight",
             variable=self.automation_auto_start_after_preflight_var,
         ).grid(row=0, column=4, columnspan=2, sticky="w", padx=(12, 0))
+        ttk.Checkbutton(settings, text="Refresh remote catalogue during preflight",
+                        variable=self.automation_refresh_cmr_var).grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Progressbar(
             actions,
             variable=self.automation_progress_var,
@@ -1816,13 +1839,18 @@ class LauncherApp:
             text="Refresh Available Tiles",
             command=lambda: self.refresh_upload_tile_list(async_scan=True),
         ).grid(row=3, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(
+            selected_upload_frame,
+            text="Select Retryable Uploads",
+            command=self.select_retryable_upload_tiles,
+        ).grid(row=4, column=0, sticky="ew", pady=(4, 0))
         ttk.Label(
             selected_upload_frame,
             textvariable=self.upload_tile_status_var,
             foreground="#184a8b",
             wraplength=320,
             justify="left",
-        ).grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        ).grid(row=5, column=0, sticky="ew", pady=(6, 0))
         row += 1
 
         row = self.add_entry_row(
@@ -1838,6 +1866,13 @@ class LauncherApp:
             "Max active ingestions",
             self.max_active_var,
             "Use 0 if you want the next batch to wait until the previous batch is fully finished",
+        )
+        row = self.add_entry_row(
+            form,
+            row,
+            "Max pending browser uploads",
+            self.max_pending_browser_uploads_var,
+            "Caps local Chrome transfers before Earth Engine creates ingestion tasks; 3 is a safe default for slower links",
         )
         ttk.Label(form, text="Upload completion mode").grid(row=row, column=0, sticky="w", pady=4)
         ttk.Combobox(
@@ -2110,11 +2145,31 @@ class LauncherApp:
         status_map.rowconfigure(0, weight=1)
         self.stats_status_map = UTMPipelineStatusMap(status_map)
         self.stats_status_map.grid(row=0, column=0, sticky="nsew")
+        self.automation_activity_var.trace_add("write", lambda *_: self.stats_status_map.execution_var.set(
+            "Saved coverage view | " + self.automation_activity_var.get()))
 
         updates.columnconfigure(0, weight=1)
-        updates.rowconfigure(0, weight=1)
+        updates.rowconfigure(1, weight=1)
+        self.update_window_details: Dict[str, Dict[str, Any]] = {}
+        self.stats_show_archived_updates_var = tk.BooleanVar(value=False)
+        windows = ttk.LabelFrame(updates, text="Update Windows", padding=8)
+        windows.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        windows.columnconfigure(0, weight=1)
+        self.stats_update_windows_tree = ttk.Treeview(windows, columns=("start", "end", "state", "complete", "pending", "verified"),
+                                                      show="headings", height=5)
+        for column, title in (("start", "Start"), ("end", "End"), ("state", "Coverage"),
+                              ("complete", "Complete tiles"), ("pending", "Tiles needing work"), ("verified", "Verified / expected")):
+            self.stats_update_windows_tree.heading(column, text=title)
+            self.stats_update_windows_tree.column(column, width=200 if column == "state" else 120)
+        self.stats_update_windows_tree.grid(row=0, column=0, sticky="ew")
+        window_actions = ttk.Frame(windows)
+        window_actions.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(window_actions, text="Continue Selected Update", command=self.continue_selected_update).pack(side="left")
+        ttk.Button(window_actions, text="Archive / Restore Selected", command=self.toggle_selected_update_archive).pack(side="left", padx=8)
+        ttk.Checkbutton(window_actions, text="Show archived windows", variable=self.stats_show_archived_updates_var,
+                        command=self.populate_update_windows).pack(side="left")
         update_run_frame = ttk.LabelFrame(updates, text="Recorded Update Runs", padding=8)
-        update_run_frame.grid(row=0, column=0, sticky="nsew")
+        update_run_frame.grid(row=1, column=0, sticky="nsew")
         update_run_frame.columnconfigure(0, weight=1)
         update_run_frame.rowconfigure(0, weight=1)
         self.stats_update_runs_tree = ttk.Treeview(
@@ -2958,6 +3013,9 @@ class LauncherApp:
 
     def new_project(self) -> None:
         """Create a new SWOTFlow project from the current GUI settings."""
+        if self.automation_running or self.automation_preflight_running:
+            messagebox.showwarning("Project busy", "Wait for automation or preflight before changing projects.")
+            return
         root = filedialog.askdirectory(
             title="Choose a folder for the new SWOTFlow project",
             initialdir=str(PROJECT_ROOT),
@@ -2993,9 +3051,30 @@ class LauncherApp:
         )
         if not selected:
             return
+        self.open_project_path(Path(selected))
+
+    def show_project_transfer(self, initial_path: str = "") -> None:
+        """Open the offline project-copy maintenance dialog."""
+        if self.automation_running or self.automation_preflight_running or self.statistics_refresh_running or self.cleanup_delete_running:
+            messagebox.showwarning("Project is busy", "Wait for project operations to finish before relocation or validation.")
+            return
+        ProjectTransferDialog(
+            self.root, self.open_project_path,
+            current_root=self.current_project_root_var.get().strip(), initial_path=initial_path,
+        )
+
+    def open_project_path(self, selected: Path) -> None:
+        """Open a project only after location/recovery checks pass."""
+        if self.automation_running or self.automation_preflight_running:
+            messagebox.showwarning("Project busy", "Wait for automation or preflight before changing projects.")
+            return
         try:
             project = load_project(selected)
             ensure_project_structure(project.root)
+        except RelocationRequired as exc:
+            messagebox.showwarning("Project relocation required", str(exc))
+            self.show_project_transfer(str(selected))
+            return
         except (OSError, ValueError, yaml.YAMLError) as exc:
             messagebox.showerror(
                 "Could not open project",
@@ -3072,7 +3151,8 @@ class LauncherApp:
 
     def apply_project(self, project: SWOTFlowProject, write_config: bool = False) -> None:
         """Apply a loaded project to the GUI and optionally refresh config.yaml."""
-        project.config = config_for_project(project.config, project.root)
+        # Keep explicitly configured external data folders. Relocation updates
+        # paths before loading; resetting them here would detach their history.
         self.current_project_name_var.set(project.name)
         self.current_project_root_var.set(str(project.root))
         self.project_created_at = project.created_at
@@ -3244,6 +3324,7 @@ class LauncherApp:
             str(automation_data.get("end_date") or download_data.get("end_date", ""))
         )
         self.automation_include_upload_var.set(bool(automation_data.get("include_upload", False)))
+        self.automation_refresh_cmr_var.set(bool(automation_data.get("refresh_cmr", True)))
         self.automation_cleanup_enabled_var.set(bool(automation_data.get("cleanup_enabled", True)))
         self.automation_min_free_space_var.set(str(automation_data.get("min_free_space_gb", 50)))
         self.automation_continue_on_failure_var.set(
@@ -3316,6 +3397,9 @@ class LauncherApp:
         self.refresh_upload_tile_list(async_scan=True)
         self.batch_size_var.set(str(upload_data.get("batch_size", 50)))
         self.max_active_var.set(str(upload_data.get("max_active_ingestions", 0)))
+        self.max_pending_browser_uploads_var.set(
+            str(upload_data.get("max_pending_browser_uploads", 3))
+        )
         self.prefix_var.set(upload_data.get("prefix", ""))
         self.suffix_var.set(upload_data.get("suffix", ""))
         self.pyramiding_var.set(
@@ -3857,14 +3941,38 @@ class LauncherApp:
             return
         self.cached_available_upload_tiles = list(available_tiles)
         self.cached_completed_upload_tiles = list(completed_tiles)
+        if self.select_retryable_upload_tiles_after_scan:
+            self.select_retryable_upload_tiles_after_scan = False
+            self.upload_tile_filter_var.set("")
+            self.upload_selected_tiles = set(available_tiles)
+            self.upload_selected_tiles_var.set(", ".join(sorted(available_tiles)))
+            if available_tiles:
+                self.upload_scope_var.set(
+                    UPLOAD_SCOPE_LABEL_BY_VALUE["selected_utm"]
+                )
         self.render_upload_tile_list(available_tiles, completed_tiles)
+        if available_tiles and self.upload_selected_tiles == set(available_tiles):
+            self.update_upload_tile_status(
+                available_tiles=available_tiles,
+                completed_tiles=completed_tiles,
+                prefix="Selected all retryable local upload tiles.",
+            )
 
     def finish_upload_tile_scan_error(self, generation: int, exc: Exception) -> None:
         """Show a failed background Upload tile scan."""
         if generation != self.upload_tile_scan_generation:
             return
+        self.select_retryable_upload_tiles_after_scan = False
         self.upload_tile_availability_var.set(f"Could not scan upload tiles: {exc}")
         self.update_upload_tile_status(prefix="Upload tile scan failed.")
+
+    def select_retryable_upload_tiles(self) -> None:
+        """Select every tile represented by a non-verified local mosaic."""
+        self.select_retryable_upload_tiles_after_scan = True
+        self.upload_tile_status_var.set(
+            "Scanning the mosaic folder and project upload records for retryable uploads..."
+        )
+        self.refresh_upload_tile_list(async_scan=True)
 
     def on_upload_tile_select(self, _event: tk.Event | None = None) -> None:
         """Add the current Upload listbox selection to the selected tile state."""
@@ -4493,12 +4601,16 @@ class LauncherApp:
         try:
             batch_size = int(self.batch_size_var.get())
             max_active = int(self.max_active_var.get())
+            max_pending_browser_uploads = int(
+                self.max_pending_browser_uploads_var.get()
+            )
             retry_attempts = int(self.retry_attempts_var.get())
             retry_wait = float(self.retry_wait_var.get())
         except ValueError:
             messagebox.showerror(
                 "Invalid numbers",
-                "Batch size, max active ingestions, retry attempts, and retry wait must be numeric.",
+                "Batch size, max active ingestions, max pending browser uploads, "
+                "retry attempts, and retry wait must be numeric.",
             )
             return False
 
@@ -4509,6 +4621,12 @@ class LauncherApp:
             messagebox.showerror(
                 "Invalid queue setting",
                 "Max active ingestions cannot be negative.",
+            )
+            return False
+        if max_pending_browser_uploads < 1:
+            messagebox.showerror(
+                "Invalid browser queue setting",
+                "Max pending browser uploads must be at least 1.",
             )
             return False
         if retry_attempts < 1:
@@ -4606,6 +4724,10 @@ class LauncherApp:
         )
         batch_size = self.parse_int_or_default(self.batch_size_var.get(), 50)
         max_active = self.parse_int_or_default(self.max_active_var.get(), 0)
+        max_pending_browser_uploads = self.parse_int_or_default(
+            self.max_pending_browser_uploads_var.get(),
+            3,
+        )
         retry_attempts = self.parse_int_or_default(self.retry_attempts_var.get(), 3)
         retry_wait = self.parse_float_or_default(self.retry_wait_var.get(), 3.0)
         mosaic_report_csv = (
@@ -4734,6 +4856,7 @@ class LauncherApp:
             "upload": {
                 "batch_size": batch_size,
                 "max_active_ingestions": max_active,
+                "max_pending_browser_uploads": max_pending_browser_uploads,
                 "scope": self.selected_upload_scope(),
                 "utm_tiles": self.upload_tiles_for_config(),
                 "ee_sync_before_upload": True,
@@ -4822,6 +4945,7 @@ class LauncherApp:
                 "continue_on_tile_failure": self.automation_continue_on_failure_var.get(),
                 "prevent_system_sleep": self.automation_prevent_sleep_var.get(),
                 "auto_start_after_preflight": self.automation_auto_start_after_preflight_var.get(),
+                "refresh_cmr": self.automation_refresh_cmr_var.get(),
             },
         }
 
@@ -4837,7 +4961,7 @@ class LauncherApp:
         require_project: bool = True,
     ) -> bool:
         """Save config.yaml from the current form values."""
-        if self.automation_running and (
+        if (self.automation_running or self.automation_preflight_running) and (
             validate_download
             or validate_duplicates
             or validate_extract
@@ -4916,14 +5040,15 @@ class LauncherApp:
             ),
             continue_on_tile_failure=self.automation_continue_on_failure_var.get(),
             prevent_system_sleep=self.automation_prevent_sleep_var.get(),
+            refresh_cmr=self.automation_refresh_cmr_var.get(),
         )
 
     def run_automation_preflight(self) -> None:
         """Run required automation preflight in a background thread."""
-        if self.automation_running:
+        if self.automation_running or self.automation_preflight_running:
             messagebox.showwarning(
                 "Automation running",
-                "Automation is already running. Stop or wait for it before preflight.",
+                "Automation or preflight is already running. Wait for it to finish before starting another preflight.",
             )
             return
         try:
@@ -4941,6 +5066,9 @@ class LauncherApp:
         ):
             return
         self.automation_preflight_state = None
+        self.automation_preflight_running = True
+        self.automation_preflight_button.configure(state=tk.DISABLED)
+        self.automation_activity_var.set(f"Execution: preflight | {automation_config.start_date} to {automation_config.end_date}")
         self.automation_start_button.configure(state=tk.DISABLED)
         self.clear_treeview(self.automation_tree)
         self.update_automation_date_status()
@@ -4977,6 +5105,9 @@ class LauncherApp:
 
     def finish_automation_preflight_error(self, exc: Exception) -> None:
         """Show failed automation preflight."""
+        self.automation_preflight_running = False
+        self.automation_preflight_button.configure(state=tk.NORMAL)
+        self.automation_activity_var.set("Execution: idle | preflight failed")
         self.automation_progress_var.set(0.0)
         self.automation_progress_text_var.set("Progress: preflight failed")
         self.automation_status_var.set(f"Automation preflight failed: {exc}")
@@ -4984,6 +5115,12 @@ class LauncherApp:
 
     def finish_automation_preflight(self, state: AutomationRunState) -> None:
         """Render automation preflight results."""
+        self.automation_preflight_running = False
+        self.automation_preflight_button.configure(state=tk.NORMAL)
+        self.automation_activity_var.set(
+            f"Execution: idle | {'preflight ready' if state.preflight_ok else 'preflight failed'} | "
+            f"{state.config.start_date} to {state.config.end_date} | {state.run_id}"
+        )
         if not self.automation_dates_match_download():
             warning = self.automation_date_mismatch_message()
             if warning not in state.warnings:
@@ -5156,6 +5293,7 @@ class LauncherApp:
         self.automation_continue_on_failure_var.set(bool(config.continue_on_tile_failure))
         self.automation_prevent_sleep_var.set(bool(config.prevent_system_sleep))
         self.automation_preflight_state = state
+        self.automation_activity_var.set(f"Execution: idle | saved run {state.run_id} | {config.start_date} to {config.end_date}")
         self.refresh_automation_tile_list()
         self.update_automation_date_status()
         self.populate_automation_tree(state)
@@ -5172,7 +5310,8 @@ class LauncherApp:
             status_text = (
                 f"Loaded automation run {state.run_id}: {len(state.tile_plans)} tile(s), "
                 f"{len(state.stage_results)} stage row(s), failed stages {failed}. "
-                "Use Resume Run to continue this run, or Run Preflight for a fresh plan."
+                + ("Use Resume Run to continue this run, or Run Preflight for a fresh plan."
+                   if state.preflight_ok else "Run Preflight on this computer before starting; completed history is preserved.")
             )
         self.automation_status_var.set(status_text)
 
@@ -5205,12 +5344,25 @@ class LauncherApp:
                     "No saved automation run was found for this project. Run Preflight to create one.",
                 )
             return False
+        request_changed = (state.config.start_date, state.config.end_date, sorted(state.config.utm_tiles)) != (
+            self.automation_start_date_var.get(), self.automation_end_date_var.get(), sorted(self.automation_selected_tiles)
+        )
+        if request_changed and not notify:
+            self.automation_status_var.set("Saved project dates/tiles differ from the last run. Run Preflight for the displayed settings.")
+            return False
+        if request_changed and not messagebox.askyesno(
+            "Resume saved update?",
+            f"Resume run {state.run_id}: {state.config.start_date} to {state.config.end_date} "
+            f"({len(state.config.utm_tiles)} tiles)?\n"
+            "This replaces the displayed date range and tile selection. Choose No to keep the displayed settings and run Preflight.",
+        ):
+            return False
         self.apply_automation_run_state(state)
         return True
 
     def resume_automation_run(self) -> None:
         """Load the latest run when needed, then continue automation."""
-        if self.automation_running:
+        if self.automation_running or self.automation_preflight_running:
             messagebox.showwarning("Automation running", "Automation is already running.")
             return
         if self.automation_preflight_state is None:
@@ -5220,7 +5372,7 @@ class LauncherApp:
 
     def start_automation(self) -> None:
         """Start or resume the preflighted automation run."""
-        if self.automation_running:
+        if self.automation_running or self.automation_preflight_running:
             messagebox.showwarning("Automation running", "Automation is already running.")
             return
         if self.automation_preflight_state is None or not self.automation_preflight_state.preflight_ok:
@@ -5247,8 +5399,17 @@ class LauncherApp:
             messagebox.showerror("Automation setup failed", str(exc))
             return
         automation_config.run_id = self.automation_preflight_state.run_id
+        if (automation_config.start_date, automation_config.end_date, sorted(automation_config.utm_tiles), automation_config.include_upload) != (
+            self.automation_preflight_state.config.start_date, self.automation_preflight_state.config.end_date,
+            sorted(self.automation_preflight_state.config.utm_tiles), self.automation_preflight_state.config.include_upload,
+        ):
+            messagebox.showwarning("Preflight required", "Dates, tiles, or upload scope changed after preflight. Run Preflight for these settings.")
+            return
         automation_config.run_dir = self.automation_preflight_state.run_dir
         self.automation_running = True
+        self.automation_activity_var.set(
+            f"Execution: running | {automation_config.start_date} to {automation_config.end_date} | {automation_config.run_id}"
+        )
         self.automation_stop_event = threading.Event()
         self.initialize_automation_progress_tracker(self.automation_preflight_state)
         self.set_automation_progress_text("automation running")
@@ -5387,7 +5548,7 @@ class LauncherApp:
                 f"; {self.completed_automation_tile_count()}/{tile_total} tiles complete"
             )
         self.automation_progress_text_var.set(
-            f"Progress: {percentage:.1f}% ({completed}/{total} stages{tile_detail}) | {detail}"
+            f"Stage execution: {percentage:.1f}% ({completed}/{total} stages{tile_detail}) | {detail}"
         )
 
     def stop_automation_after_current_stage(self) -> None:
@@ -5402,6 +5563,7 @@ class LauncherApp:
     def finish_automation_error(self, exc: Exception) -> None:
         """Show unexpected automation failure."""
         self.automation_running = False
+        self.automation_activity_var.set("Execution: idle | automation failed")
         self.automation_stop_event = None
         self.set_automation_progress_text("automation failed")
         self.automation_status_var.set(f"Automation failed: {exc}")
@@ -5419,6 +5581,8 @@ class LauncherApp:
         warning_results = [result for result in state.stage_results if result.status == "warning"]
         failed = len(failed_results)
         warnings = len(warning_results)
+        result_label = "paused" if state.stopped else ("finished with outstanding work" if failed or warnings or state.unresolved_upload_count else "finished")
+        self.automation_activity_var.set(f"Execution: idle | {result_label} | {state.config.start_date} to {state.config.end_date}")
         self.set_automation_progress_text(
             "automation stopped" if state.stopped else "automation finished"
         )
@@ -5428,7 +5592,13 @@ class LauncherApp:
             result = failed_results[0]
             first_failure = f" First failure: {result.tile}/{result.stage}: {result.message[:300]}"
         pending_notice = ""
-        if not state.stopped and not failed and progress_percent < 99.999:
+        if state.unresolved_upload_count:
+            pending_notice = (
+                f" Upload verification incomplete: {state.unresolved_upload_count} local mosaic(s) "
+                f"remain retryable across {len(state.unresolved_upload_tiles)} tile(s) "
+                f"({self.compact_tile_list(state.unresolved_upload_tiles)})."
+            )
+        elif not state.stopped and not failed and progress_percent < 99.999:
             pending_notice = (
                 " Some stages are still pending or awaiting verification; run preflight/resume "
                 "after resolving the pending item(s)."
@@ -5445,6 +5615,8 @@ class LauncherApp:
                 f"Stopped: {'yes' if state.stopped else 'no'}\n"
                 f"Failed stages: {failed}\n"
                 f"Warning stages: {warnings}\n"
+                f"Unverified retryable mosaics: {state.unresolved_upload_count}\n"
+                f"Affected tiles: {self.compact_tile_list(state.unresolved_upload_tiles)}\n"
                 f"{first_failure.strip()}\n"
                 f"Run CSV:\n{state.csv_path}\n"
                 f"Run JSON:\n{state.json_path}"
@@ -6085,6 +6257,81 @@ class LauncherApp:
         for item in tree.get_children():
             tree.delete(item)
 
+    def populate_update_windows(self) -> None:
+        """Render coverage windows independently of execution/run history."""
+        if not hasattr(self, "stats_update_windows_tree"):
+            return
+        selected = self.stats_update_windows_tree.selection()
+        self.clear_treeview(self.stats_update_windows_tree)
+        for campaign_id, row in sorted(self.update_window_details.items(), key=lambda item: str(item[1].get("updated_at", "")), reverse=True):
+            archived = campaign_is_archived(row)
+            if archived and not self.stats_show_archived_updates_var.get():
+                continue
+            self.stats_update_windows_tree.insert("", tk.END, iid=campaign_id, values=(
+                row.get("start_date", ""), row.get("end_date", ""),
+                ("Archived | " if archived else "") + str(row.get("coverage_state", "")),
+                row.get("complete_tiles", 0), row.get("incomplete_tiles", 0),
+                f"{row.get('verified_observations', 0)} / {row.get('expected_observations', 0)}",
+            ))
+        if selected and self.stats_update_windows_tree.exists(selected[0]):
+            self.stats_update_windows_tree.selection_set(selected[0])
+
+    def selected_update_window(self) -> Dict[str, Any] | None:
+        """Return the selected window or request a selection."""
+        if self.automation_running or self.automation_preflight_running or self.statistics_refresh_running:
+            messagebox.showwarning("Project busy", "Wait for automation, preflight, or statistics refresh to finish.")
+            return None
+        selected = self.stats_update_windows_tree.selection()
+        if not selected:
+            messagebox.showinfo("Select an update", "Select a row in Update Windows first.")
+            return None
+        return self.update_window_details.get(selected[0])
+
+    def toggle_selected_update_archive(self) -> None:
+        """Hide/restore an accidental date window without removing stage memory."""
+        row = self.selected_update_window()
+        if row is None:
+            return
+        archive = not campaign_is_archived(row)
+        if not messagebox.askyesno("Archive update" if archive else "Restore update",
+                f"{'Archive' if archive else 'Restore'} {row['start_date']} to {row['end_date']}?\n"
+                "Files and processing history will be kept. Archiving does not complete unfinished work."):
+            return
+        try:
+            set_campaign_archived(self.build_config(), str(row["campaign_id"]), archive, "Archived from Update Windows")
+        except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
+            messagebox.showerror("Could not change update window", str(exc))
+            return
+        self.refresh_project_statistics_async()
+
+    def continue_selected_update(self) -> None:
+        """Prepare the selected window and validate it against shared project history."""
+        row = self.selected_update_window()
+        if row is None:
+            return
+        tiles = normalize_utm_tiles(json.loads(str(row.get("tiles", "[]"))))
+        if not messagebox.askyesno("Continue update", f"Run preflight for {row['start_date']} to {row['end_date']} ({len(tiles)} tiles)?\n"
+                                  "Completed work will be reused. The automatic-start setting still applies."):
+            return
+        if campaign_is_archived(row):
+            try:
+                set_campaign_archived(self.build_config(), str(row["campaign_id"]), False)
+            except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
+                messagebox.showerror("Could not restore update window", str(exc))
+                return
+        self.set_automation_tiles(tiles)
+        self.set_download_tiles(tiles)
+        self.download_start_date_var.set(row["start_date"])
+        self.download_end_date_var.set(row["end_date"])
+        self.automation_start_date_var.set(row["start_date"])
+        self.automation_end_date_var.set(row["end_date"])
+        self.automation_preflight_state = None
+        for tab in self.notebook.tabs():
+            if self.notebook.tab(tab, "text") == "Automation":
+                self.notebook.select(tab)
+                break
+        self.run_automation_preflight()
+
     def clear_project_statistics_display(self, message: str = "") -> None:
         """Clear statistics widgets."""
         for tree in (
@@ -6117,6 +6364,8 @@ class LauncherApp:
         )
         self.draw_bar_chart(self.stats_tile_chart_canvas, [], "Top UTM tiles by recorded files")
         self.stats_status_map.clear_statuses()
+        self.update_window_details = {}
+        self.populate_update_windows()
         self.statistics_summary_var.set("")
         self.statistics_lineage_var.set("Refresh statistics to build the mosaic lineage table.")
         self.latest_project_insights = None
@@ -6143,7 +6392,10 @@ class LauncherApp:
             getattr(insights, "update_campaigns", []),
             getattr(insights, "update_coverage_campaign_rows", {}),
             getattr(insights, "active_update_campaign_id", ""),
+            getattr(insights, "update_campaign_details", []),
         )
+        self.update_window_details = {str(row["campaign_id"]): dict(row) for row in getattr(insights, "update_campaign_details", [])}
+        self.populate_update_windows()
         self.stats_status_map.set_missing_upload_rows(insights.ready_not_uploaded_rows)
 
     def display_project_statistics(
@@ -6980,6 +7232,17 @@ class LauncherApp:
             validate_mosaic=False,
         ):
             return
+        if not messagebox.askyesno(
+            "Start real upload",
+            (
+                "Start submitting the selected local mosaics to Earth Engine?\n\n"
+                f"Destination:\n{self.destination_var.get().strip()}\n\n"
+                "SWOTFlow will synchronize existing assets first and preserve any "
+                "unverified local mosaics for retry."
+            ),
+        ):
+            self.status_var.set("Real upload cancelled before the uploader was started.")
+            return
         self.launch_uploader(dry_run=False)
 
     def sync_ee_assets(self) -> None:
@@ -7035,10 +7298,15 @@ class LauncherApp:
             uploader_command.append("--dry-run")
         if sync_only:
             uploader_command.append("--sync-only")
+        elif not dry_run:
+            uploader_command.append("--yes")
 
         creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         command = ["cmd.exe", "/k", subprocess.list2cmdline(uploader_command)]
         try:
+            self.upload_progress_started_at = datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
             subprocess.Popen(command, cwd=str(PROJECT_ROOT), creationflags=creationflags)
         except OSError as exc:
             messagebox.showerror(
@@ -7061,7 +7329,7 @@ class LauncherApp:
             "Uploader started",
             (
                 f"Started {run_type}.\n\n"
-                "A separate console window should open for logs and prompts.\n"
+                "A separate console window should open for logs.\n"
                 "It will now stay open after the run finishes, so you can read the result."
             ),
         )
@@ -7081,7 +7349,13 @@ class LauncherApp:
             return None
 
     def upload_report_status_counts(self, report_path: Path) -> dict[str, int]:
-        """Return indexed final-status counts from the project database."""
+        """Return status counts for the active upload run when one is being watched."""
+        if self.upload_progress_started_at:
+            return project_status_counts_since(
+                report_path,
+                self.upload_progress_started_at,
+                "upload_report",
+            )
         return project_status_counts(report_path, "upload_report")
 
     def upload_report_revision(self, report_path: Path) -> int:
@@ -7123,11 +7397,15 @@ class LauncherApp:
         else:
             percent = 100.0 if filtered else 0.0
         self.upload_progress_var.set(percent)
+        if planned and not (dry_planned or submitted or active or errors):
+            phase = "planning complete; waiting for console/browser confirmation or first submission"
+        else:
+            phase = "current run"
         self.upload_progress_text_var.set(
             "Progress: "
-            f"{percent:.0f}% | planned pending {planned}, dry-run planned {dry_planned}, "
-            f"submitted {submitted}, active {active}, completed/skipped/verified {completed}, "
-            f"errors {errors}, filtered {filtered}."
+            f"{percent:.0f}% ({phase}) | planned pending {planned}, "
+            f"dry-run planned {dry_planned}, submitted {submitted}, active {active}, "
+            f"completed/skipped/verified {completed}, errors {errors}, filtered {filtered}."
         )
 
     def start_upload_statistics_watcher(

@@ -479,7 +479,7 @@ What to do:
 2. Close the controlled Chrome window if it is still open.
 3. Restart Chrome from the launcher or run the upload again with the same configured Chrome profile.
 4. Keep `execution.resume: true`.
-5. Verify the assets already visible in Earth Engine, then rerun. Resume skips `SUBMITTED`, `READY`, `RUNNING`, `COMPLETED`, and `SKIPPED_ALREADY_EXISTS`; it does not skip `ERROR` or `UNKNOWN_AFTER_CLICK` rows.
+5. Run **Sync EE Assets**, then retry unresolved files. With EE sync enabled, resume skips verified assets and protects active ingestion operations. `SUBMITTED` or `SUBMITTED_PENDING_VERIFICATION` alone is not durable proof: after the confirmation grace period, a row with neither an asset nor an operation becomes retryable. `ERROR` and `UNKNOWN_AFTER_CLICK` rows remain eligible for retry, while product-version conflicts remain blocked for an explicit replacement decision.
 
 During uploads, do not interact with the controlled Chrome/Earth Engine window. You can use the computer for other work, but avoid touching that Chrome profile/window, refreshing the page, closing tabs, signing out, or changing the Earth Engine UI while Selenium is controlling it.
 
@@ -567,7 +567,27 @@ Enable `Start automatically after successful preflight` only when the queue
 should begin immediately. Leave it disabled when you want to inspect the
 preflight classifications and counts first.
 
+## Mistaken Dates Or An Older Update Still Looks Incomplete
+
+Use **Statistics > Update Runs > Update Windows**. Archive only mistaken windows with **Archive/Restore Selected**; this does not erase any processing history. Select the intended older window and choose **Continue Selected Update** to check its remaining work. Keep **Refresh remote catalogue during preflight** enabled after a long gap. See [returning to an update](./GETTING_STARTED.md#return-to-an-unfinished-or-mistaken-update).
+
+A saved window is not another running job. The Status Map's execution label identifies the current Automation activity. The map preserves the selected window when statistics refresh, and hides archived windows unless **Show archived windows** is checked.
+
+Older versions intentionally excluded by best-version filtering should not remain false download gaps once a higher version has completed the required stages. Refresh Statistics to recompute this. Genuine missing uploads, excluded/corrupt mosaic sources, and replacement conflicts remain unresolved; do not archive a window merely to hide them. A fresh remote search can also reveal products published after the original run.
+
+`PermissionError` or `WinError 32` mentioning `update_runs.csv.tmp` can occur with older versions when two preflights export simultaneously. The current app blocks concurrent preflight/run requests and uses unique export temporary files. Close any old app instance before retrying; do not delete the database or history CSVs. If a CSV is open in Excel, close it before exporting.
+
+## Upload Cannot Find Add Start Time
+
+An occluded Chrome tab can keep a hidden upload-dialog wrapper in the page while its actual form has not rendered. The uploader now checks the inner visible dialog and asks Chrome to reactivate a hidden page before opening a form. Metadata is still required and verified; it is not silently omitted. Restart with the current code, sync EE assets, and retry unresolved uploads. Keep the dedicated upload browser untouched. If Chrome cannot reactivate or the controls still fail, the file remains an error with diagnostic artifacts and is not eligible for cleanup.
+
 ## General Advice
+
+### Copied Project Still Refers To The Old Computer
+
+Use **Home > Relocate / Validate Project**, select the copied `project.yaml` at its final destination, confirm all project processes are stopped, then click **Relocate Copy**. Do not use Save Project As to transfer a project. Do not edit SQLite path strings manually.
+
+If validation reports missing files without downstream proof, restore those files from the original copy and click **Validate** again. If relocation was interrupted, use **Restore Backup** before retrying. After a successful move, check GDAL/Chrome settings, authenticate on the destination computer, and run fresh Automation preflight followed by Start Automation. See [Project Relocation And Recovery](./SWOT_PROCESSING_GUIDE.md#project-relocation-and-recovery).
 
 When debugging:
 

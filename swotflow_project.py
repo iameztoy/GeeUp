@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 import yaml
 
 from project_database import DATABASE_FILE_NAME, ProjectDatabase, migrate_project_csvs
+from project_relocation import assert_project_location
 from swot_download_tool import normalize_utm_tiles
 
 
@@ -201,6 +202,7 @@ def load_project(path: str | Path) -> SWOTFlowProject:
     project_file = project_file_path(path)
     with project_file.open("r", encoding="utf-8") as handle:
         document = yaml.safe_load(handle) or {}
+    assert_project_location(project_file, document)
     project_data = document.get("project", {})
     root = Path(project_data.get("root") or project_file.parent)
     if not root.is_absolute():

@@ -7,7 +7,7 @@ import json
 import re
 import time
 from collections import Counter, OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -22,8 +22,10 @@ from project_database import (
 from project_updates import campaign_rows as read_update_campaigns
 from project_updates import expected_rows as read_update_expected
 from project_updates import run_rows as read_update_runs
+from project_updates import campaign_is_archived
 from swot_metadata import (
     SWOT_L2_HR_RASTER_PATTERN,
+    PRODUCT_IDENTITY_FIELDS,
     processing_level_from_filename,
     processing_level_label as metadata_processing_level_label,
     product_identity_key,
@@ -126,6 +128,7 @@ class ProjectInsights:
     mosaic_lineage_rows: List[Dict[str, str]]
     product_version_audit_rows: List[Dict[str, str]]
     cleanup_candidates: List[CleanupCandidate]
+    update_campaign_details: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def statistics_folder(config: Mapping[str, Any]) -> Path:
@@ -1249,6 +1252,35 @@ def build_update_coverage_tile_rows(
     download_config = config.get("download", {})
     if not isinstance(download_config, Mapping):
         download_config = {}
+    version_aware = download_config.get("product_version_filter", "best") == "best"
+    required_ranks: Dict[str, tuple] = {}
+
+    @lru_cache(maxsize=None)
+    def coverage_key(name: str) -> str:
+        fields = cached_swot_filename_fields(name) if version_aware else None
+        identity = "|".join(fields.get(key, "") for key in PRODUCT_IDENTITY_FIELDS) if fields else ""
+        return identity or source_file_key(name)
+
+    # A newer version can satisfy an older expectation, never the reverse.
+    # Preserve exact-version accounting when the user intentionally selected all.
+    @lru_cache(maxsize=None)
+    def version_rank(name: str) -> tuple:
+        fields = cached_swot_filename_fields(Path(name).name)
+        return swot_product_rank(fields.get("crid", ""), fields.get("product_counter", "")) if fields else swot_product_rank("", "")
+
+    for row in download_preview_rows:
+        if (str(row.get("selected_for_download", "yes")).lower() == "no"
+                or str(row.get("status", "")).upper() == "EXCLUDED_OLDER_VERSION"
+                or str(row.get("duplicate_filter_status", "")).lower() == "excluded_older_version"):
+            continue
+        name = str(row.get("file_name", "") or "")
+        key = coverage_key(name)
+        rank = version_rank(name)
+        required_ranks[key] = max(rank, required_ranks.get(key, rank))
+
+    def qualifies(name: str) -> bool:
+        rank = required_ranks.get(coverage_key(name))
+        return rank is None or version_rank(name) >= rank
     start_date = str(download_config.get("start_date", "") or "").strip()[:10]
     end_date = str(download_config.get("end_date", "") or "").strip()[:10]
     selected_tiles: set[str] = set()
@@ -1279,7 +1311,7 @@ def build_update_coverage_tile_rows(
         if selected == "no" or status == "EXCLUDED_OLDER_VERSION" or duplicate_status == "excluded_older_version":
             continue
         file_name = str(row.get("file_name", "") or "")
-        key = source_file_key(file_name)
+        key = coverage_key(file_name)
         tile = normalize_utm_tile_token(str(row.get("utm_tile", "") or "")) or file_utm_tile(file_name)
         date_text = date_from_text(str(row.get("start_time", "") or file_name))
         if not key or not tile or not date_in_window(date_text, start_date, end_date):
@@ -1287,7 +1319,7 @@ def build_update_coverage_tile_rows(
         expected_by_tile.setdefault(tile, set()).add(key)
         source_tile_date[key] = (tile, date_text)
         update_latest_date(latest_expected, tile, date_text)
-        if str(row.get("downloaded", "") or "").strip().lower() == "yes":
+        if str(row.get("downloaded", "") or "").strip().lower() == "yes" and qualifies(file_name):
             downloaded_by_tile.setdefault(tile, set()).add(key)
             update_latest_date(latest_downloaded, tile, date_text)
 
@@ -1295,10 +1327,10 @@ def build_update_coverage_tile_rows(
         if str(row.get("downloaded", "") or "").strip().lower() not in {"yes", "true", "1"}:
             continue
         file_name = str(row.get("file_name", "") or "")
-        key = source_file_key(file_name)
+        key = coverage_key(file_name)
         tile = normalize_utm_tile_token(str(row.get("utm_tile", "") or "")) or file_utm_tile(file_name)
         date_text = date_from_text(str(row.get("start_time", "") or file_name))
-        if not key or not tile or not date_in_window(date_text, start_date, end_date):
+        if not key or not tile or not date_in_window(date_text, start_date, end_date) or not qualifies(file_name):
             continue
         downloaded_by_tile.setdefault(tile, set()).add(key)
         source_tile_date.setdefault(key, (tile, date_text))
@@ -1308,10 +1340,10 @@ def build_update_coverage_tile_rows(
     for row in completed_extract_rows(extract_rows):
         input_nc = str(row.get("input_nc", "") or "")
         output_tif = str(row.get("output_tif", "") or "")
-        key = source_file_key(input_nc)
+        key = coverage_key(input_nc)
         tile = normalize_utm_tile_token(f"UTM{row.get('utm_zone', '')}{row.get('mgrs_band', '')}") or file_utm_tile(input_nc)
         date_text = date_from_text(str(row.get("date", "") or row.get("start", "") or input_nc))
-        if not key or not tile or not date_in_window(date_text, start_date, end_date):
+        if not key or not tile or not date_in_window(date_text, start_date, end_date) or not qualifies(input_nc):
             continue
         extracted_by_tile.setdefault(tile, set()).add(key)
         source_tile_date.setdefault(key, (tile, date_text))
@@ -1325,6 +1357,8 @@ def build_update_coverage_tile_rows(
         output_file = str(row.get("output_file", "") or "")
         output_sources: set[str] = set()
         for source in parse_path_list(row.get("input_files", "")):
+            if not qualifies(source):
+                continue
             mapped = next(
                 (
                     extract_output_to_source[path_key]
@@ -1334,7 +1368,7 @@ def build_update_coverage_tile_rows(
                 None,
             )
             if mapped is None:
-                key = source_file_key(source)
+                key = coverage_key(source)
                 tile = file_utm_tile(source)
                 date_text = date_from_text(source)
             else:
@@ -1362,7 +1396,7 @@ def build_update_coverage_tile_rows(
             set(),
         )
         if not source_keys:
-            key = source_file_key(local_file)
+            key = coverage_key(local_file) if qualifies(local_file) else ""
             if key:
                 source_keys = {key}
                 date_text = date_from_text(str(row.get("metadata_start_time", "") or local_file))
@@ -1500,6 +1534,7 @@ def build_update_campaign_coverage(
                 "start_date": start_date,
                 "end_date": end_date,
                 "utm_tiles": tile_values,
+                "product_version_filter": campaign.get("product_version_filter", "best"),
             }
         )
         campaign_config["download"] = campaign_download
@@ -1524,7 +1559,8 @@ def build_update_campaign_coverage(
                 len(rows),
             )
         )
-    active_id = campaign_summaries[0][0] if campaign_summaries else ""
+    visible_ids = {row.get("campaign_id") for row in campaigns if not campaign_is_archived(row)}
+    active_id = next((row[0] for row in campaign_summaries if row[0] in visible_ids), "")
     return campaign_summaries, coverage_by_campaign, active_id
 
 
@@ -2182,6 +2218,23 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         upload_rows=upload_rows,
     )
     update_run_rows = read_update_runs(config)
+    campaign_details = []
+    for campaign in read_update_campaigns(config):
+        rows = update_coverage_campaign_rows.get(campaign.get("campaign_id", ""), [])
+        counts = Counter(row[-1] for row in rows)
+        incomplete = sum(count for status, count in counts.items() if status not in {"complete", "no_expected"})
+        campaign_details.append({
+            **campaign,
+            "coverage_state": "Needs work" if incomplete else ("Complete (recorded matches)" if any(row[1] for row in rows) else "No recorded matches"),
+            "expected_observations": sum(row[1] for row in rows),
+            "downloaded_observations": sum(row[2] for row in rows),
+            "extracted_observations": sum(row[3] for row in rows),
+            "mosaicked_observations": sum(row[4] for row in rows),
+            "verified_observations": sum(row[5] for row in rows),
+            "complete_tiles": counts.get("complete", 0),
+            "incomplete_tiles": incomplete,
+            "no_expected_tiles": counts.get("no_expected", 0),
+        })
     update_coverage_rows = update_coverage_campaign_rows.get(active_update_campaign_id, [])
     update_status_counter = Counter(row[-1] for row in update_coverage_rows)
     if update_coverage_rows:
@@ -2227,6 +2280,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         mosaic_lineage_rows=mosaic_lineage_rows,
         product_version_audit_rows=product_version_audit_rows,
         cleanup_candidates=cleanup_candidates,
+        update_campaign_details=campaign_details,
     )
 
 
@@ -2450,6 +2504,7 @@ def project_insights_snapshot(insights: ProjectInsights) -> Dict[str, Any]:
             for campaign_id, rows in insights.update_coverage_campaign_rows.items()
         },
         "active_update_campaign_id": insights.active_update_campaign_id,
+        "update_campaign_details": insights.update_campaign_details,
         "ready_not_uploaded_rows": [
             {
                 "output_file": output_file,
@@ -2484,6 +2539,12 @@ def write_project_insights_snapshot(config: Mapping[str, Any], insights: Project
     snapshot_path = statistics_snapshot_path(config)
     with snapshot_path.open("w", encoding="utf-8") as handle:
         json.dump(snapshot, handle, indent=2)
+
+    write_csv_rows(folder / "project_statistics_update_windows.csv",
+                   ["campaign_id", "start_date", "end_date", "tiles", "archived", "coverage_state",
+                    "complete_tiles", "incomplete_tiles", "no_expected_tiles", "expected_observations",
+                    "downloaded_observations", "extracted_observations", "mosaicked_observations", "verified_observations"],
+                   insights.update_campaign_details)
 
     write_csv_rows(
         folder / "project_statistics_metrics.csv",
@@ -2877,6 +2938,7 @@ def load_project_insights_snapshot(
             if isinstance(rows, list)
         },
         active_update_campaign_id=str(snapshot.get("active_update_campaign_id", "")),
+        update_campaign_details=list(snapshot.get("update_campaign_details", [])),
         ready_not_uploaded_rows=[
             (
                 str(row.get("output_file", "")),

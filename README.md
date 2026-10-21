@@ -13,6 +13,7 @@ python swotflow_gui.py
 ## What SWOTFlow Does
 
 - **Projects:** one folder per AOI or workflow, with project-specific raw downloads, extracted GeoTIFFs, mosaics, logs, presets, and settings.
+- **Project relocation:** validate and rebase a copied project's paths while preserving its processing history. See [moving a project](./GETTING_STARTED.md#move-a-project-to-another-computer).
 - **Home:** a visual landing tab with project status, workflow shortcuts, GitHub access, and selected-tile summary.
 - **Automation:** runs the project workflow tile by tile after a required preflight, with resumable manifests and verified-stage cleanup.
 - **Download:** searches and downloads PO.DAAC SWOT L2 HR Raster 100 m data through `earthaccess`, with date and UTM tile filtering.
@@ -20,7 +21,7 @@ python swotflow_gui.py
 - **Extraction:** converts SWOT NetCDF files into two-band GeoTIFFs with `wse` and `wse_qual`, with optional worker-based parallelism.
 - **Mosaic:** reduces GeoTIFF counts before upload, while keeping SWOT-compatible naming and metadata parsing, with optional cautious group parallelism.
 - **Upload:** uploads GeoTIFFs to Google Earth Engine through Chrome/Selenium, with optional UTM/source-tile filtering and Earth Engine asset verification.
-- **Statistics:** summarizes project coverage, update coverage, processing status, file counts, dates, UTM tiles, uploads, and QA tables.
+- **Statistics:** summarizes project coverage, saved update windows, processing status, file counts, dates, UTM tiles, uploads, and QA tables. See [returning to an update](./GETTING_STARTED.md#return-to-an-unfinished-or-mistaken-update).
 - **Cleanup:** previews and deletes safe intermediate-file cleanup candidates with downstream project-record proof.
 
 ## Basic Workflow
@@ -100,6 +101,7 @@ A SWOTFlow project keeps settings and intermediate files together:
 - `swotflow_gui.py`: desktop launcher with Home, Automation, Download, Duplicate Removal, Extraction, Mosaic, Upload, Statistics, and Cleanup tools.
 - `swotflow_automation.py`: tile-by-tile unattended workflow orchestration.
 - `swotflow_project.py`: project metadata, project folders, history, and tile profile helpers.
+- `project_relocation.py` and `project_transfer_dialog.py`: copied-project path relocation, validation, and recovery.
 - `project_database.py`: SQLite project store, legacy CSV migration, indexed status queries, and CSV exports.
 - `project_updates.py`: persistent date-window update campaigns and expected-granule records.
 - `swot_download_tool.py`: Earthdata / PO.DAAC search, preview, manifest, and download logic.

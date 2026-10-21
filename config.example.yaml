@@ -212,6 +212,9 @@ chrome:
 upload:
   batch_size: 50
   max_active_ingestions: 2
+  # Maximum clicked files that may remain in Chrome before an Earth Engine
+  # ingestion operation appears. Keep this small on slow or unstable links.
+  max_pending_browser_uploads: 3
 
   # all: upload every GeoTIFF in the origin folder.
   # selected_utm: upload only files whose output UTM tile or mosaic source
@@ -303,10 +306,12 @@ execution:
   # Set true to plan uploads without clicking the final UPLOAD button.
   dry_run: true
 
-  # Skip files that already appear in the CSV report as submitted/completed.
+  # Reuse SQLite upload history. EE sync verifies assets and active operations;
+  # stale provisional submissions without remote proof can be retried.
   resume: true
 
-  # Ask for a final YES confirmation before the first real upload.
+  # Ask for confirmation before a real upload. The GUI confirms in its window;
+  # direct CLI runs ask for YES unless --yes is passed. Automation is preapproved.
   require_confirmation: true
 
   # How often to re-check the Tasks panel.
@@ -355,3 +360,6 @@ automation:
   # Begin the workflow immediately when preflight succeeds. Leave false when
   # you want to review the queue before starting.
   auto_start_after_preflight: false
+  # Search NASA again to discover late/reprocessed products. False uses saved
+  # expected matches where available and cannot discover newly published files.
+  refresh_cmr: true

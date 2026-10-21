@@ -1,4 +1,5 @@
 import csv
+from datetime import datetime, timedelta
 import logging
 import tempfile
 import unittest
@@ -17,11 +18,13 @@ from ee_ui_uploader import (
     TERMINAL_STATUSES,
     UNKNOWN_AFTER_CLICK_STATUS,
     EarthEngineUIUploader,
+    EarthEngineOperation,
     RetryableUIError,
     UploadItem,
     active_upload_dialog_helper_js,
     is_invalid_browser_session,
     normalize_dialog_error_messages,
+    normalize_ee_operation,
     parse_config,
 )
 from project_database import read_project_rows
@@ -842,6 +845,156 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             submit.assert_called_once_with(item)
             wait_gate.assert_not_called()
             reconcile.assert_called_once()
+
+    def test_browser_transfer_gate_waits_for_ee_operation_acknowledgement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.uploader_config(root, ee_sync=True)
+            uploader = self.uploader(config)
+            items = []
+            for number in (1, 2):
+                path = config.input_folder / (
+                    "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_"
+                    f"00{number}_MOSA_20260102T000000_20260102T010000_PID0_01.tif"
+                )
+                path.write_bytes(b"1")
+                item = UploadItem(
+                    local_file=path,
+                    asset_name=path.stem,
+                    asset_id=f"{config.destination_parent}/{path.stem}",
+                )
+                items.append(item)
+                uploader.tracked_items[item.asset_id] = item
+                uploader.report.upsert(
+                    uploader.make_report_row(
+                        item=item,
+                        submit_time=datetime.now().astimezone().isoformat(timespec="seconds"),
+                        detected_task_name="",
+                        final_status=SUBMITTED_PENDING_VERIFICATION_STATUS,
+                        error_message="Dialog closed.",
+                    )
+                )
+
+            def acknowledge_one() -> dict[str, EarthEngineOperation]:
+                item = items[0]
+                operation = EarthEngineOperation(
+                    asset_id=item.asset_id,
+                    operation_name="projects/example/operations/123",
+                    state="RUNNING",
+                    done=False,
+                )
+                uploader.ee_operations_by_asset[item.asset_id] = operation
+                return {item.asset_id: operation}
+
+            with mock.patch.object(
+                uploader,
+                "refresh_earth_engine_operations",
+                side_effect=acknowledge_one,
+            ) as refresh:
+                with mock.patch("ee_ui_uploader.time.sleep"):
+                    drained = uploader.wait_for_browser_upload_capacity(target_pending=1)
+
+            self.assertTrue(drained)
+            self.assertEqual(
+                uploader.report.get_status(items[0].asset_id),
+                "RUNNING",
+            )
+            self.assertEqual(
+                uploader.pending_browser_upload_asset_ids(),
+                {items[1].asset_id},
+            )
+            refresh.assert_called_once()
+
+    def test_normalize_ee_operation_extracts_destination_asset(self) -> None:
+        asset_id = "projects/example/assets/collection/test_asset"
+        operation = normalize_ee_operation(
+            {
+                "name": "projects/example/operations/123",
+                "done": False,
+                "metadata": {
+                    "type": "INGEST_IMAGE",
+                    "state": "RUNNING",
+                    "destinationUris": [
+                        f"https://code.earthengine.google.com/?asset={asset_id}"
+                    ],
+                },
+            }
+        )
+        self.assertEqual(operation.asset_id, asset_id)
+        self.assertEqual(operation.state, "RUNNING")
+
+    def test_unconfirmed_submission_without_asset_or_operation_becomes_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.uploader_config(root, ee_sync=True)
+            uploader = self.uploader(config)
+            path = config.input_folder / (
+                "SWOT_L2_HR_Raster_100m_UTM34M_N_x_x_x_001_002_MOSA_"
+                "20260102T000000_20260102T010000_PID0_01.tif"
+            )
+            path.write_bytes(b"1")
+            item = UploadItem(
+                local_file=path,
+                asset_name=path.stem,
+                asset_id=f"{config.destination_parent}/{path.stem}",
+            )
+            old_submit_time = (
+                datetime.now().astimezone() - timedelta(minutes=5)
+            ).isoformat(timespec="seconds")
+            uploader.report.upsert(
+                uploader.make_report_row(
+                    item=item,
+                    submit_time=old_submit_time,
+                    detected_task_name="",
+                    final_status=SUBMITTED_PENDING_VERIFICATION_STATUS,
+                    error_message="Dialog closed.",
+                )
+            )
+            uploader.ee_inventory_synced = True
+            uploader.ee_existing_asset_ids = set()
+            uploader.ee_operations_by_asset = {}
+
+            uploader.reconcile_unconfirmed_report_rows()
+
+            self.assertEqual(
+                uploader.report.get_status(item.asset_id),
+                UNKNOWN_AFTER_CLICK_STATUS,
+            )
+            event_rows = read_project_rows(
+                config.artifacts.report_csv.with_name("upload_events.csv"),
+                "upload_events",
+            )
+            self.assertTrue(
+                any(row.get("new_status") == UNKNOWN_AFTER_CLICK_STATUS for row in event_rows)
+            )
+
+    def test_active_ee_operation_keeps_upload_out_of_retry_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.uploader_config(root, ee_sync=True)
+            uploader = self.uploader(config)
+            asset_id = f"{config.destination_parent}/test_asset"
+            uploader.ee_inventory_synced = True
+            uploader.ee_operations_by_asset = {
+                asset_id: EarthEngineOperation(
+                    asset_id=asset_id,
+                    operation_name="projects/example/operations/123",
+                    state="RUNNING",
+                    done=False,
+                )
+            }
+            uploader.report.rows[asset_id] = {
+                "asset_id": asset_id,
+                "final_status": SUBMITTED_PENDING_VERIFICATION_STATUS,
+                "submit_time": "2026-01-01T00:00:00+00:00",
+            }
+
+            self.assertTrue(
+                uploader.should_resume_skip_existing_status(
+                    SUBMITTED_PENDING_VERIFICATION_STATUS,
+                    asset_id,
+                )
+            )
 
 
 if __name__ == "__main__":

@@ -92,7 +92,7 @@ SWOTFlow opens on the **Home** tab. Use it for the project summary, selected-til
 
 The **Automation** tab is for unattended tile-by-tile runs inside an open project. Use `Authenticate Earthdata` there, or authenticate from Download, before a run that needs new PO.DAAC downloads. Select tiles, choose the date range, run `Run Preflight`, then start automation only after the preflight passes. When `Include upload` is enabled, preflight first synchronizes the target Earth Engine collection automatically so tile classifications and cleanup decisions use current verified assets. Preflight also warns about pending Windows reboot markers and active-hours restart risk; restart, pause updates, or adjust Windows Update settings before overnight runs when those warnings appear. Use `Upload completion mode` to choose whether Automation waits for active EE ingestion tasks before moving to the next tile or submits and verifies them later. Keep `Prevent computer sleep while automation runs` enabled for overnight work; on Windows this asks the OS to stay awake while Automation is active. Enable `Start automatically after successful preflight` when you want the run to begin without a second click. `Stop After Current Stage` records a resumable run. After reopening an unchanged project, authenticate Earthdata if downloads remain and click `Resume Run`; a new preflight is not required. Run a fresh preflight instead when dates, tiles, settings, project files, uploads, cleanup, or manual processing changed while Automation was stopped. Use `Copy Download Date Range` when you want automation to use the same temporal window as the manual Download tab; SWOTFlow warns when the two date ranges differ. Upload is optional because browser-based Earth Engine upload still needs an untouched Chrome/session.
 
-During execution, Automation reports an aggregate percentage based on completed or skipped tile-stage units, together with the current tile position and stage. This gives a stable overview for large queues while detailed file progress remains in the status message and stage logs. Tiles already complete for the requested date range are skipped on resume; cleanup is not rerun for those complete tiles. If a CMR/Earthdata metadata search times out, the tile is left resumable, later tiles can continue, and Automation retries deferred CMR/download-search failures after the first tile pass.
+During execution, Automation reports `Stage execution`, an aggregate percentage based on completed or skipped tile-stage units, together with the current tile position and stage. This gives a stable overview for large queues while detailed file progress remains in the status message and stage logs. A 100% stage-execution value means all configured stages were attempted; the final message separately reports any mosaics still awaiting upload verification. Tiles already complete for the requested date range are skipped on resume; cleanup is not rerun for those complete tiles. If a CMR/Earthdata metadata search times out, the tile is left resumable, later tiles can continue, and Automation retries deferred CMR/download-search failures after the first tile pass.
 
 Use this restart rule:
 
@@ -126,6 +126,47 @@ The project folder contains:
 Existing projects are migrated automatically when opened. Their CSV manifests are imported once and retained; after migration, SQLite is authoritative and CSV reports are compatibility exports rather than the live record updated after every file.
 
 `config.yaml` remains a local session mirror for command-line compatibility. It is not the main project record.
+
+## Move A Project To Another Computer
+
+Use **Home > Relocate / Validate Project** for a copied project. **Save Project As** copies settings into a new project; it does not transfer processing history or data.
+
+There are two separate things to move:
+
+| Item | What to do on the destination computer |
+| --- | --- |
+| SWOTFlow application | Get the same code version from GitHub and install fresh Python/GDAL environments. |
+| Existing project | Copy the entire project folder, then relocate/validate that copy. Its SQLite database preserves completed work. |
+| Machine setup | Sign in again and set the new GDAL executable and Chrome profile paths. Credentials and running browser transfers are not portable. |
+
+To obtain the application with Git, run these commands in a parent folder where you want a new `SWOTFlow` directory:
+
+```powershell
+git clone --branch main https://github.com/iameztoy/GeeUp.git SWOTFlow
+cd SWOTFlow
+```
+
+The repository is still named `GeeUp`; the application is SWOTFlow. Alternatively, download and extract the repository's ZIP from GitHub. Follow [Install Python Packages](#install-python-packages) and [Install The GDAL Processing Environment](#install-the-gdal-processing-environment) on the destination. A GitHub clone/ZIP contains the application, **not** your project data or processing history. There is no one-click portable application/project bundle yet.
+
+For a project such as `D:\SWOT_e2e`:
+
+1. Stop Automation with **Stop After Current Stage**, and wait for it to stop. Finish or stop other processing and upload processes. Browser-side file transfers cannot move between computers; let them finish if possible, then use **Sync EE Assets**. Keep any unverified mosaics.
+2. Save the project and close SWOTFlow and its separate processing/upload terminals. Copy the **entire project folder** to your external drive, including `project.yaml`, `swotflow.sqlite3`, `00_logs`, `profiles`, and all remaining raw/extracted/mosaic files and sidecars. Do not copy an actively changing database. If SQLite `-wal`/`-shm` companion files remain, keep them with the database; never discard a WAL file manually.
+3. Install the same updated SWOTFlow code on the other computer and recreate its Python and GDAL environments as described above. Do not copy `.venv`, the conda environment, Chrome profiles, or credentials. Do not reuse the old application's `config.yaml`; open the transferred project explicitly. With Git, compare `git rev-parse HEAD` on both computers to confirm they have the same code revision before continuing. Include any local fixes that have not yet been pushed to GitHub.
+4. Copy the project from the external drive to its **final working location** on the destination computer. You may also work directly from a writable, locally attached external drive, but keep its drive letter/path stable and keep it connected. Do not run the project from a network share or synchronize an active SQLite database between computers.
+5. Start SWOTFlow. In **Home > Relocate / Validate Project**, browse to the copied `project.yaml`, confirm all project processes are stopped, and click **Relocate Copy**. Normal Open Project also detects a changed root and directs you to this dialog. The old root is mapped automatically; normally no additional mappings are needed for `D:\SWOT_e2e`.
+6. Wait for relocation and validation to finish. Large histories can take time; progress is shown without blocking the dialog. A rollback backup is retained under `.swotflow-relocation`, and the validation report is written to `00_logs/relocation_validation.json`. Files deliberately removed after downstream completion are not treated as lost work. Missing files without proof are listed and prevent opening the relocated project: restore them from the original copy, then click **Validate** again.
+7. Click **Open Project**. Check the GDAL Python executable and Chrome configuration, authenticate Earthdata and Earth Engine on this computer, then run a **fresh Automation preflight** with the intended tiles/dates and click **Start Automation**. Do not immediately resume an old machine's preflight: relocated checkpoints require a new one. Preflight and processing retain the original manifests, campaign IDs and verified completion history; moving a project does not reset completed work. Upload-enabled preflight synchronizes EE assets. Refresh Statistics and preview Cleanup before deleting anything.
+
+If the destination uses exactly the same absolute project path, use **Validate**, then still run a fresh preflight after checking the new machine's setup. Keep the original computer's project unchanged until you have successfully continued on the destination. Use only one copy as the working project; this feature does not merge two independently updated copies.
+
+Moving the project does not move or rename its Earth Engine collection. Keep the same destination asset path if you want to continue that collection, and use a Google account with access to it. The GDAL setting must point to the destination machine's `python.exe`, not merely its environment folder. These instructions describe Windows-to-Windows transfer; a full Windows-to-macOS processing/browser migration has not been validated.
+
+If you decide to stay on the original computer, no relocation is needed: open the existing project normally. A copy on an external drive can remain a backup until you actually switch computers.
+
+Validation checks SQLite integrity, history counts, recorded file presence and downstream proof. It does **not** checksum every raster or verify all raster pixels. Use a reliable copy operation and retain the original as a fallback. The external drive must support files larger than 4 GB when your project contains them; FAT32 is unsuitable in that case.
+
+For external data folders, interrupted relocation recovery and the command-line equivalent, see [Project Relocation And Recovery](./SWOT_PROCESSING_GUIDE.md#project-relocation-and-recovery).
 
 ## Chrome Profile For Earth Engine Upload
 
@@ -220,9 +261,11 @@ List clicks update the optional UTM filter immediately. `Validate Typed Tiles` o
 
 Dry run is recommended when you changed the origin folder, destination collection, upload scope, selected tiles, naming prefix/suffix, or metadata settings. If only retrying the same checked setup, you can run the real upload directly. The dry-run console prints only a short preview; the full per-file plan is saved in the project database and exported to `upload_report.csv`. The Upload tab progress bar reads indexed project status counts and summarizes planned, submitted, completed, failed, and filtered rows.
 
-If a real upload was accepted by the browser but the task or final asset has not yet been verified, project records may show `SUBMITTED_PENDING_VERIFICATION` or `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It lists the destination collection and marks matching local mosaics as `EE_VERIFIED_EXISTS`, which also updates Statistics and Cleanup eligibility.
+If a real upload was accepted by the browser but the task or final asset has not yet been verified, project records may show `SUBMITTED_PENDING_VERIFICATION` or `SUBMITTED`. After the Earth Engine assets have appeared in the target collection, use `Sync EE Assets` in the Upload tab. It checks both destination assets and recent ingestion operations. A dialog closure with no corresponding asset or operation becomes retryable instead of remaining pending indefinitely. `Select Retryable Uploads` replaces any older manual tile filter with all tiles represented by unresolved local mosaics; a subsequent real upload skips verified assets and retries only the missing ones. Upload status transitions remain in the project database and are exported to `00_logs/upload_events.csv`.
 
-For the current Earth Engine dialog, SWOTFlow waits for the browser-side upload dialog to close, records `SUBMITTED_PENDING_VERIFICATION`, and immediately prepares the next file. It does not switch to Tasks after every submission. Visible percentage/progress changes keep the dialog wait alive; an open dialog with no detectable progress is recovered and retried. `Upload completion mode` controls tile handoff: `Wait for EE verification before next tile` waits for active EE tasks, while `Submit and continue; verify later` runs a non-blocking task/inventory reconciliation and lets Automation move to later tiles. EE sync verifies successful assets, while unverified mosaics remain on disk and are retryable in a later upload run. In Automation, each upload-enabled mosaic cleanup is a global verified-mosaic sweep, so a later tile can remove mosaics from an earlier tile once a later EE sync confirms those assets.
+For the current Earth Engine dialog, SWOTFlow waits for the browser-side upload dialog to close and records `SUBMITTED_PENDING_VERIFICATION`. `Max pending browser uploads` then limits how many clicked files may remain in Chrome before Earth Engine acknowledges them as ingestion operations; use the default `3`, or `1` on a slow or unstable link. Visible percentage/progress changes keep the dialog wait alive, and an open dialog with no detectable progress is recovered and retried. `Upload completion mode` controls tile handoff: `Wait for EE verification before next tile` waits for active EE tasks, while `Submit and continue; verify later` runs a non-blocking task/inventory reconciliation and lets Automation move to later tiles. EE sync verifies successful assets, while unverified mosaics remain on disk. After an upload-enabled Automation queue, one deferred repair pass retries unresolved mosaics without repeating download, extraction, or mosaicking, then runs EE sync and verified cleanup. A later manual Upload run is also safe because Automation and Upload use the same SQLite upload records, asset IDs, Statistics, and Cleanup proof.
+
+Real upload confirmation is shown in the SWOTFlow window. GUI-launched uploads no longer wait for a separate `YES` in the console; the console remains available for logs.
 
 Before planning uploads, SWOTFlow can list existing Earth Engine assets and mark matching files as `EE_VERIFIED_EXISTS`, so already uploaded images are skipped even if the exported upload report is incomplete. The Upload tile list also excludes local files already recorded as `COMPLETED`, `SKIPPED_ALREADY_EXISTS`, or `EE_VERIFIED_EXISTS`; the status text shows which source tiles are already completed or verified.
 
@@ -259,6 +302,22 @@ Each refresh writes a saved statistics snapshot under:
 ```
 
 When you reopen a project, SWOTFlow reloads the latest saved snapshot so the Statistics tab is not blank. Click `Refresh Statistics` again whenever files or project records have changed and you want to recompute and resave the statistics.
+
+#### Return To An Unfinished Or Mistaken Update
+
+1. Open the project and use **Statistics > Update Runs > Update Windows**. Each row is a saved date window, not a running job. **Status Map** also shows the current execution state separately.
+2. To finish an older window, select it and click **Continue Selected Update**. This restores its dates and tiles and starts preflight. With `Include upload` enabled, preflight synchronizes Earth Engine first. Leave **Refresh remote catalogue during preflight** enabled when returning after a long gap, to discover late products or new processing versions.
+3. Review the queue and click **Start Automation**, unless automatic start is enabled. Completed work is reused; unresolved work is retried. Refresh Statistics afterwards to see the remaining gaps.
+
+For a mistaken date window, select it and click **Archive/Restore Selected**. This hides it from the normal list and map selector, but retains its expected products, files, and processing history. **Show archived windows** makes it accessible again. Archiving does not certify completion and must not be used to dismiss genuine missing files. Overlapping windows share processing evidence, so finishing a file can improve coverage in several windows at once.
+
+`Complete (recorded matches)` means every expected observation from the saved search has downstream proof. It is not a promise that NASA will never publish more products for those dates. Use fresh remote preflight for that check. In best-version mode a processed higher version can satisfy an older expectation; the reverse is not allowed. Upload conflicts requiring replacement remain visible and are not replaced automatically.
+
+#### Start The Next Update
+
+For example, after completing `2026-06-30` to `2026-08-10`, the next window can be `2026-08-10` to `2026-09-30`. Including the previous end date gives a safe one-day overlap; leave existing-file and manifest skipping enabled. In Automation, select the tiles, enter the new dates, authenticate Earthdata, keep **Refresh remote catalogue during preflight** enabled, and run **Preflight**, then **Start Automation**. Do not resume the old completed run. Use **Copy Download Date Range** if you first entered those dates in Download.
+
+A different date window creates a separate campaign. Reusing the exact dates of an archived mistaken window reactivates that window rather than deleting its earlier history. Searches only detect late or reprocessed products inside the dates you request: to check earlier acquisitions again, deliberately use a wider overlap. New product versions may need explicit EE replacement later; SWOTFlow does not silently overwrite older EE assets.
 
 ### 7. Cleanup
 

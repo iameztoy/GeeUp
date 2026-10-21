@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from project_database import ProjectDatabase, database_path_for, read_project_rows, upsert_project_rows
+from project_operation_lock import automation_lock
 
 
 def now_iso() -> str:
@@ -96,6 +97,45 @@ def run_rows(config: Any) -> list[dict[str, str]]:
     return read_project_rows(update_runs_path(config), "update_runs")
 
 
+def campaign_is_archived(row: Mapping[str, Any]) -> bool:
+    """Return whether a window is hidden without deleting its provenance."""
+    return str(row.get("archived", "")).lower() in {"yes", "true", "1"}
+
+
+def set_campaign_archived(config: Any, campaign_id: str, archived: bool, reason: str = "") -> None:
+    """Archive/restore a window; leave expected products and stage history intact."""
+    path, _ = update_paths(config)
+    with automation_lock(database_path_for(path).parent):
+        _set_campaign_archived(config, campaign_id, archived, reason)
+
+
+def _set_campaign_archived(config: Any, campaign_id: str, archived: bool, reason: str) -> None:
+    row = next((r for r in campaign_rows(config) if r.get("campaign_id") == campaign_id), None)
+    if row is None:
+        raise ValueError("Update window no longer exists. Refresh statistics.")
+    row.update(archived="yes" if archived else "no", archived_at=now_iso() if archived else "",
+               archive_reason=reason if archived else "")
+    path, _ = update_paths(config)
+    runs_root = path.parent / "automation_runs"
+    markers = []
+    if runs_root.exists():
+        for run_path in runs_root.glob("*/automation_run.json"):
+            with run_path.open(encoding="utf-8") as handle:
+                saved = json.load(handle)
+            auto = saved.get("config", {})
+            mapped = dict(auto.get("base_config", {}))
+            mapped["download"] = {**mapped.get("download", {}), "start_date": auto.get("start_date", ""), "end_date": auto.get("end_date", "")}
+            if update_campaign_id(mapped) != campaign_id:
+                continue
+            markers.append(run_path.parent / "archived.json")
+    upsert_project_rows(path, [row], dataset="update_campaigns", export_csv=True)
+    for marker in markers:
+        if archived:
+            marker.write_text(json.dumps({"campaign_id": campaign_id, "archived_at": now_iso(), "reason": reason}, indent=2), encoding="utf-8")
+        elif marker.exists():
+            marker.unlink()
+
+
 def _date_text(value: Any) -> str:
     return str(value or "").strip()[:10]
 
@@ -168,7 +208,7 @@ def record_update_expected_rows(
         str(row.get("campaign_id", "") or ""): row
         for row in read_project_rows(campaigns_path, "update_campaigns")
     }
-    prior_campaign_rows = list(existing_campaigns.values())
+    prior_campaign_rows = [row for row in existing_campaigns.values() if not campaign_is_archived(row)]
     existing = existing_campaigns.get(campaign_id, {})
     existing_tiles: list[str] = []
     try:
@@ -224,8 +264,12 @@ def record_update_expected_rows(
         database_path_for(expected_path)
     ).dataset_prefix_count("update_expected", f"{campaign_id}|")
     campaign_row = {
+        **existing,
         "campaign_id": campaign_id,
         "status": "ACTIVE",
+        "archived": "no",
+        "archived_at": "",
+        "archive_reason": "",
         "label": campaign_label(fields),
         **fields,
         "tiles": json.dumps(tiles),

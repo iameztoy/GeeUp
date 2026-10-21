@@ -24,10 +24,12 @@ import subprocess
 import sys
 import textwrap
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 def in_isolated_python_environment() -> bool:
@@ -123,6 +125,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "upload": {
         "batch_size": 50,
         "max_active_ingestions": 2,
+        "max_pending_browser_uploads": 3,
         "scope": "all",
         "utm_tiles": [],
         "ee_sync_before_upload": True,
@@ -194,6 +197,18 @@ REPORT_COLUMNS = [
     "processing_level",
     "best_processing_level",
     "conflicting_asset_id",
+]
+
+UPLOAD_EVENT_COLUMNS = [
+    "event_id",
+    "event_time",
+    "asset_id",
+    "local_file",
+    "previous_status",
+    "new_status",
+    "detected_task_name",
+    "message",
+    "submit_time",
 ]
 
 RESUME_SKIP_STATUSES = {
@@ -311,15 +326,18 @@ def active_upload_dialog_helper_js() -> str:
       if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
       const rects = element.getClientRects();
       const box = element.getBoundingClientRect();
-      return rects.length > 0 || box.width > 0 || box.height > 0;
+      return rects.length > 0 && box.width > 0 && box.height > 0;
     }}
 
     function uploadDialogLooksOpen(dialog) {{
       if (!dialog || !dialog.shadowRoot) return false;
-      if (dialog.hasAttribute('opened') || dialog.hasAttribute('open')) return true;
       const innerDialog = dialog.shadowRoot.querySelector('#asset-upload-dialog, paper-dialog, mwc-dialog, dialog');
-      if (innerDialog && (innerDialog.hasAttribute('opened') || innerDialog.hasAttribute('open'))) return true;
-      return uploadElementVisible(dialog) || uploadElementVisible(innerDialog);
+      // ee-dialog retains a layout box even while its nested paper-dialog is
+      // closed. Wait for the actual rendered panel, not the custom-element host.
+      const panel = innerDialog && innerDialog.shadowRoot
+        ? innerDialog.shadowRoot.querySelector('paper-dialog, mwc-dialog, dialog, [role="dialog"]')
+        : innerDialog;
+      return uploadElementVisible(panel);
     }}
 
     function findActiveUploadDialog() {{
@@ -391,6 +409,7 @@ class UploadConfig:
 
     batch_size: int = 50
     max_active_ingestions: int = 2
+    max_pending_browser_uploads: int = 3
     scope: str = UPLOAD_SCOPE_ALL
     utm_tiles: List[str] = field(default_factory=list)
     ee_sync_before_upload: bool = True
@@ -499,6 +518,73 @@ class TaskRow:
 
 
 @dataclass(frozen=True)
+class EarthEngineOperation:
+    """Normalized Earth Engine ingestion operation for one destination asset."""
+
+    asset_id: str
+    operation_name: str
+    state: str
+    done: bool
+    error_message: str = ""
+
+
+def operation_asset_id(operation: Dict[str, Any]) -> str:
+    """Extract an Earth Engine destination asset ID from an operation response."""
+    metadata = operation.get("metadata", {}) or {}
+    for uri in metadata.get("destinationUris", []) or []:
+        parsed = urlparse(str(uri))
+        values = parse_qs(parsed.query).get("asset", [])
+        if values:
+            return unquote(values[0]).strip()
+    description = str(metadata.get("description", "") or "")
+    match = re.search(r'Ingest image:\s*"([^"]+)"', description, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def normalize_ee_operation(operation: Dict[str, Any]) -> Optional[EarthEngineOperation]:
+    """Return a normalized image-ingestion operation, or None when unrelated."""
+    asset_id = operation_asset_id(operation)
+    if not asset_id:
+        return None
+    metadata = operation.get("metadata", {}) or {}
+    operation_type = str(metadata.get("type", "") or "").upper()
+    if operation_type and "INGEST" not in operation_type:
+        return None
+    error = operation.get("error", {}) or {}
+    error_message = str(error.get("message", "") or "")
+    state = str(metadata.get("state", "") or "").upper()
+    if not state:
+        if error_message:
+            state = "FAILED"
+        elif bool(operation.get("done", False)):
+            state = "SUCCEEDED"
+        else:
+            state = "RUNNING"
+    return EarthEngineOperation(
+        asset_id=asset_id,
+        operation_name=str(operation.get("name", "") or ""),
+        state=state,
+        done=bool(operation.get("done", False)),
+        error_message=error_message,
+    )
+
+
+def submission_age_seconds(submit_time: str, now: Optional[datetime] = None) -> Optional[float]:
+    """Return the age of an ISO submission timestamp, or None when unavailable."""
+    text = str(submit_time or "").strip()
+    if not text:
+        return None
+    try:
+        submitted = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    current = now or datetime.now().astimezone()
+    if submitted.tzinfo is None:
+        submitted = submitted.astimezone()
+    return max(0.0, (current - submitted).total_seconds())
+
+
+@dataclass(frozen=True)
 class SubmissionOutcome:
     """Immediate browser-side result after clicking the upload dialog."""
 
@@ -511,6 +597,7 @@ class ReportManager:
 
     def __init__(self, report_path: Path) -> None:
         self.report_path = report_path
+        self.events_path = report_path.with_name("upload_events.csv")
         self.database = ProjectDatabase(database_path_for(report_path))
         self.rows: Dict[str, Dict[str, str]] = {}
 
@@ -522,6 +609,91 @@ class ReportManager:
                 continue
             normalized = {column: row.get(column, "") for column in REPORT_COLUMNS}
             self.rows[asset_id] = normalized
+        self.record_current_issue_snapshots()
+
+    def event_row(
+        self,
+        row: Dict[str, str],
+        *,
+        previous_status: str,
+        event_id: str = "",
+        event_time: str = "",
+    ) -> Dict[str, str]:
+        """Return one append-only upload status event."""
+        return {
+            "event_id": event_id or uuid.uuid4().hex,
+            "event_time": event_time or now_iso(),
+            "asset_id": row.get("asset_id", ""),
+            "local_file": row.get("local_file", ""),
+            "previous_status": previous_status,
+            "new_status": row.get("final_status", ""),
+            "detected_task_name": row.get("detected_task_name", ""),
+            "message": row.get("error_message", ""),
+            "submit_time": row.get("submit_time", ""),
+        }
+
+    def write_events(self, events: Iterable[Dict[str, str]]) -> None:
+        """Persist upload status events without replacing earlier history."""
+        rows = list(events)
+        if not rows:
+            return
+        upsert_project_rows(
+            self.events_path,
+            rows,
+            dataset="upload_events",
+        )
+
+    def record_current_issue_snapshots(self) -> None:
+        """Seed history for unresolved rows created before event tracking existed."""
+        issue_statuses = {
+            SUBMITTED_PENDING_VERIFICATION_STATUS,
+            UNKNOWN_AFTER_CLICK_STATUS,
+            "ERROR",
+            "FAILED",
+        }
+        with self.database.session() as connection:
+            existing_event_ids = {
+                str(stored["record_key"])
+                for stored in connection.execute(
+                    "SELECT record_key FROM records WHERE dataset = 'upload_events' "
+                    "AND record_key LIKE 'legacy-current:%'"
+                )
+            }
+        events: List[Dict[str, str]] = []
+        for asset_id, row in self.rows.items():
+            status = str(row.get("final_status", "") or "").upper()
+            if status not in issue_statuses:
+                continue
+            seed = f"legacy-current:{asset_id}:{status}:{row.get('submit_time', '')}"
+            if seed in existing_event_ids:
+                continue
+            events.append(
+                self.event_row(
+                    row,
+                    previous_status="",
+                    event_id=seed,
+                    event_time=str(row.get("submit_time", "") or ""),
+                )
+            )
+        self.write_events(events)
+
+    def transition_events(self, rows: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Return events for meaningful report status/message transitions."""
+        events: List[Dict[str, str]] = []
+        for row in rows:
+            asset_id = row.get("asset_id", "")
+            previous = self.rows.get(asset_id, {})
+            previous_status = str(previous.get("final_status", "") or "")
+            changed = (
+                previous_status != str(row.get("final_status", "") or "")
+                or str(previous.get("error_message", "") or "")
+                != str(row.get("error_message", "") or "")
+                or str(previous.get("detected_task_name", "") or "")
+                != str(row.get("detected_task_name", "") or "")
+            )
+            if changed:
+                events.append(self.event_row(row, previous_status=previous_status))
+        return events
 
     def get_status(self, asset_id: str) -> str:
         """Return the recorded status for an asset ID."""
@@ -537,6 +709,7 @@ class ReportManager:
 
     def upsert(self, row: Dict[str, str]) -> None:
         """Insert or replace a report row."""
+        events = self.transition_events([row])
         existing = self.merge_row(row)
         upsert_project_rows(
             self.report_path,
@@ -544,10 +717,13 @@ class ReportManager:
             dataset="upload_report",
         )
         self.write_workflow_rows([existing])
+        self.write_events(events)
 
     def upsert_many(self, rows: Iterable[Dict[str, str]]) -> None:
         """Insert or replace multiple rows, then write reports once."""
-        existing_rows = [self.merge_row(row) for row in rows]
+        incoming_rows = list(rows)
+        events = self.transition_events(incoming_rows)
+        existing_rows = [self.merge_row(row) for row in incoming_rows]
         if not existing_rows:
             return
         upsert_project_rows(
@@ -556,6 +732,7 @@ class ReportManager:
             dataset="upload_report",
         )
         self.write_workflow_rows(existing_rows)
+        self.write_events(events)
 
     def workflow_row(self, row: Dict[str, str]) -> Dict[str, str]:
         """Return the shared workflow manifest row for one upload report row."""
@@ -593,6 +770,11 @@ class ReportManager:
             self.report_path,
             dataset="upload_report",
             fieldnames=REPORT_COLUMNS,
+        )
+        export_project_dataset(
+            self.events_path,
+            dataset="upload_events",
+            fieldnames=UPLOAD_EVENT_COLUMNS,
         )
 
     def counts(self, asset_ids: Optional[Iterable[str]] = None) -> Dict[str, int]:
@@ -776,6 +958,10 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
         upload=UploadConfig(
             batch_size=int(upload_data.get("batch_size", 50)),
             max_active_ingestions=int(upload_data.get("max_active_ingestions", 2)),
+            max_pending_browser_uploads=max(
+                1,
+                int(upload_data.get("max_pending_browser_uploads", 3)),
+            ),
             scope=upload_scope,
             utm_tiles=normalize_utm_tile_list(upload_data.get("utm_tiles", [])),
             ee_sync_before_upload=bool(upload_data.get("ee_sync_before_upload", True)),
@@ -857,6 +1043,8 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("batch_size must be 1 or greater.")
     if config.upload.max_active_ingestions < 0:
         raise ValueError("max_active_ingestions cannot be negative.")
+    if config.upload.max_pending_browser_uploads < 1:
+        raise ValueError("max_pending_browser_uploads must be 1 or greater.")
     if config.upload.scope not in VALID_UPLOAD_SCOPES:
         raise ValueError(f"upload.scope must be one of: {', '.join(sorted(VALID_UPLOAD_SCOPES))}.")
     if config.upload.scope == UPLOAD_SCOPE_SELECTED_UTM and not config.upload.utm_tiles:
@@ -1053,6 +1241,9 @@ class EarthEngineUIUploader:
         self.tracked_items: Dict[str, UploadItem] = {}
         self.ee_inventory_synced = False
         self.ee_existing_asset_ids: set[str] = set()
+        self.ee_operations_by_asset: Dict[str, EarthEngineOperation] = {}
+        self.ee_client: Any = None
+        self.browser_transfer_backlog_stalled = False
         self._current_dialog_asset_trailer = ""
 
         self.config.artifacts.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -1091,7 +1282,9 @@ class EarthEngineUIUploader:
             self.open_earth_engine()
             self.ensure_logged_in()
             self.process_batches(planned_items)
-            if self.config.upload.completion_mode == UPLOAD_COMPLETION_WAIT_FOR_EE:
+            if self.browser_transfer_backlog_stalled:
+                self.reconcile_submit_and_continue_uploads()
+            elif self.config.upload.completion_mode == UPLOAD_COMPLETION_WAIT_FOR_EE:
                 self.wait_for_all_tracked_tasks()
             else:
                 self.reconcile_submit_and_continue_uploads()
@@ -1128,6 +1321,8 @@ class EarthEngineUIUploader:
             self.config.upload.completion_mode == UPLOAD_COMPLETION_WAIT_FOR_EE
             and counts.get(SUBMITTED_PENDING_VERIFICATION_STATUS)
         ):
+            return 2
+        if self.browser_transfer_backlog_stalled:
             return 2
         return 0
 
@@ -1246,7 +1441,7 @@ class EarthEngineUIUploader:
                 self.resume_skipped_assets.append(item.asset_id)
                 self.logger.info("Earth Engine verified skip: %s", item.asset_id)
                 continue
-            if self.should_resume_skip_existing_status(existing_status):
+            if self.should_resume_skip_existing_status(existing_status, item.asset_id):
                 self.resume_skipped_assets.append(item.asset_id)
                 self.logger.info("Resume skip: %s (%s)", item.asset_id, existing_status)
                 continue
@@ -1364,7 +1559,11 @@ class EarthEngineUIUploader:
             self.report.upsert_many(report_rows)
         return planned
 
-    def should_resume_skip_existing_status(self, existing_status: str) -> bool:
+    def should_resume_skip_existing_status(
+        self,
+        existing_status: str,
+        asset_id: str = "",
+    ) -> bool:
         """Return whether a previous report status should skip this upload."""
         status = str(existing_status or "").strip().upper()
         if not self.config.execution.resume or status not in RESUME_SKIP_STATUSES:
@@ -1374,6 +1573,16 @@ class EarthEngineUIUploader:
         if status in {"READY", "RUNNING"}:
             return True
         if status in {"SUBMITTED", SUBMITTED_PENDING_VERIFICATION_STATUS}:
+            if asset_id and asset_id in self.ee_operations_by_asset:
+                return True
+            existing = self.report.rows.get(asset_id, {})
+            age = submission_age_seconds(existing.get("submit_time", ""))
+            grace = max(
+                60,
+                int(self.config.upload.submission_confirmation_timeout_seconds),
+            )
+            if age is not None and age < grace:
+                return True
             return False
         if status == EE_VERIFIED_EXISTS_STATUS:
             return True
@@ -1385,17 +1594,233 @@ class EarthEngineUIUploader:
             return
         ee = import_ee()
         initialize_earth_engine(ee, self.config.destination_parent)
+        self.ee_client = ee
         records = self.list_earth_engine_assets(ee)
         self.write_asset_inventory(records)
         self.ee_inventory_synced = True
         self.ee_existing_asset_ids = {
             record.asset_id for record in records if record.asset_type in {"IMAGE", ""}
         }
+        self.ee_operations_by_asset = self.list_earth_engine_operations(ee)
+        self.reconcile_unconfirmed_report_rows()
         self.logger.info(
-            "Earth Engine inventory sync listed %s asset(s) under %s.",
+            "Earth Engine inventory sync listed %s asset(s) and %s recent ingestion operation(s) under %s.",
             len(records),
+            len(self.ee_operations_by_asset),
             self.config.destination_parent,
         )
+
+    def earth_engine_client(self) -> Any:
+        """Return one initialized Earth Engine client for this uploader run."""
+        if self.ee_client is None:
+            ee = import_ee()
+            initialize_earth_engine(ee, self.config.destination_parent)
+            self.ee_client = ee
+        return self.ee_client
+
+    def refresh_earth_engine_operations(self) -> Dict[str, EarthEngineOperation]:
+        """Refresh recent ingestion operations without relisting the full collection."""
+        operations = self.list_earth_engine_operations(self.earth_engine_client())
+        self.ee_operations_by_asset.update(operations)
+        return operations
+
+    def reconcile_tracked_operations(self) -> None:
+        """Apply recent EE operation states to items planned by this uploader run."""
+        changed_rows: List[Dict[str, str]] = []
+        for asset_id, item in self.tracked_items.items():
+            operation = self.ee_operations_by_asset.get(asset_id)
+            if operation is None:
+                continue
+            current = self.report.rows.get(asset_id, {})
+            current_status = str(current.get("final_status", "") or "").upper()
+            if current_status in TERMINAL_STATUSES and current_status != UNKNOWN_AFTER_CLICK_STATUS:
+                continue
+            if operation.state in {"FAILED", "CANCELLED", "CANCELLING"}:
+                new_status = "ERROR"
+                message = (
+                    operation.error_message
+                    or f"Earth Engine ingestion operation ended with state {operation.state}."
+                )
+            elif operation.state in {"PENDING", "RUNNING", "READY"} or not operation.done:
+                new_status = "RUNNING"
+                message = f"Earth Engine ingestion operation is {operation.state.lower()}."
+            else:
+                new_status = SUBMITTED_PENDING_VERIFICATION_STATUS
+                message = (
+                    "Earth Engine ingestion operation succeeded; awaiting asset inventory verification."
+                )
+            if (
+                current_status == new_status
+                and str(current.get("detected_task_name", "") or "")
+                == operation.operation_name
+            ):
+                continue
+            changed_rows.append(
+                self.make_report_row(
+                    item=item,
+                    submit_time=str(current.get("submit_time", "") or ""),
+                    detected_task_name=operation.operation_name,
+                    final_status=new_status,
+                    error_message=message,
+                )
+            )
+        self.report.upsert_many(changed_rows)
+
+    def pending_browser_upload_asset_ids(self) -> set[str]:
+        """Return clicked uploads that have not reached an EE ingestion operation."""
+        provisional_statuses = {
+            "SUBMITTED",
+            SUBMITTED_PENDING_VERIFICATION_STATUS,
+        }
+        return {
+            asset_id
+            for asset_id in self.tracked_items
+            if self.report.get_status(asset_id) in provisional_statuses
+            and asset_id not in self.ee_operations_by_asset
+            and asset_id not in self.ee_existing_asset_ids
+        }
+
+    def wait_for_browser_upload_capacity(self, *, target_pending: int) -> bool:
+        """Wait until browser-side transfers fall to the requested safe count.
+
+        Dialog closure only means Chrome accepted a local transfer. An Earth
+        Engine ingestion operation is the first durable remote acknowledgement.
+        This gate prevents slow links from accumulating a large volatile queue.
+        """
+        pending = self.pending_browser_upload_asset_ids()
+        if len(pending) <= target_pending:
+            return True
+
+        timeout_seconds = self.config.upload.submission_transfer_timeout_minutes * 60
+        deadline = time.monotonic() + timeout_seconds
+        poll_seconds = max(2, min(10, self.config.execution.task_poll_seconds))
+        self.logger.info(
+            "Browser-transfer backpressure: waiting for %s pending local transfer(s) "
+            "to reach Earth Engine operations (target %s).",
+            len(pending),
+            target_pending,
+        )
+        while len(pending) > target_pending:
+            if time.monotonic() > deadline:
+                self.browser_transfer_backlog_stalled = True
+                self.logger.error(
+                    "Browser-transfer queue did not drain within %s minute(s). "
+                    "No additional files will be submitted in this run; unresolved mosaics remain retryable.",
+                    self.config.upload.submission_transfer_timeout_minutes,
+                )
+                return False
+            time.sleep(poll_seconds)
+            try:
+                self.refresh_earth_engine_operations()
+                self.reconcile_tracked_operations()
+            except Exception as exc:  # noqa: BLE001 - retry until the bounded wait expires.
+                self.logger.warning(
+                    "Could not refresh Earth Engine operations while throttling browser uploads: %s",
+                    exc,
+                )
+            pending = self.pending_browser_upload_asset_ids()
+            self.logger.info(
+                "Browser-transfer queue: %s pending local transfer(s); cap %s.",
+                len(pending),
+                self.config.upload.max_pending_browser_uploads,
+            )
+        return True
+
+    def list_earth_engine_operations(self, ee: Any) -> Dict[str, EarthEngineOperation]:
+        """Return recent ingestion operations indexed by destination asset ID."""
+        try:
+            response = ee.data.listOperations()
+        except Exception as exc:  # noqa: BLE001 - inventory remains useful without operations.
+            self.logger.warning("Could not list recent Earth Engine operations: %s", exc)
+            return {}
+        raw_operations = response.get("operations", []) if isinstance(response, dict) else response
+        indexed: Dict[str, EarthEngineOperation] = {}
+        for raw in raw_operations or []:
+            if not isinstance(raw, dict):
+                continue
+            operation = normalize_ee_operation(raw)
+            if operation is None or not operation.asset_id.startswith(
+                f"{self.config.destination_parent}/"
+            ):
+                continue
+            indexed.setdefault(operation.asset_id, operation)
+        return indexed
+
+    def reconcile_unconfirmed_report_rows(self) -> None:
+        """Resolve provisional browser submissions using EE assets and operations.
+
+        A closed browser dialog is only provisional evidence. If no asset or
+        ingestion operation appears after a short grace period, the row becomes
+        retryable instead of remaining pending indefinitely.
+        """
+        pending_statuses = {
+            "SUBMITTED",
+            SUBMITTED_PENDING_VERIFICATION_STATUS,
+            "READY",
+            "RUNNING",
+        }
+        stale_after = max(
+            60,
+            int(self.config.upload.submission_confirmation_timeout_seconds),
+        )
+        changed_rows: List[Dict[str, str]] = []
+        verified_at = now_iso()
+        for asset_id, existing in list(self.report.rows.items()):
+            status = str(existing.get("final_status", "") or "").upper()
+            if status not in pending_statuses:
+                continue
+            row = dict(existing)
+            if asset_id in self.ee_existing_asset_ids:
+                row.update(
+                    {
+                        "ee_asset_exists": "yes",
+                        "ee_verified_at": verified_at,
+                        "verification_source": "ee.data.listAssets",
+                        "final_status": EE_VERIFIED_EXISTS_STATUS,
+                        "error_message": "Asset exists in the target Earth Engine collection.",
+                    }
+                )
+                changed_rows.append(row)
+                continue
+
+            operation = self.ee_operations_by_asset.get(asset_id)
+            if operation is not None:
+                row["detected_task_name"] = operation.operation_name
+                if operation.state in {"FAILED", "CANCELLED", "CANCELLING"}:
+                    row["final_status"] = "ERROR"
+                    row["error_message"] = (
+                        operation.error_message
+                        or f"Earth Engine ingestion operation ended with state {operation.state}."
+                    )
+                elif operation.state in {"PENDING", "RUNNING", "READY"} or not operation.done:
+                    row["final_status"] = "RUNNING"
+                    row["error_message"] = (
+                        f"Earth Engine ingestion operation is {operation.state.lower()}."
+                    )
+                else:
+                    row["final_status"] = SUBMITTED_PENDING_VERIFICATION_STATUS
+                    row["error_message"] = (
+                        "Earth Engine ingestion operation succeeded; awaiting asset inventory verification."
+                    )
+                changed_rows.append(row)
+                continue
+
+            age = submission_age_seconds(existing.get("submit_time", ""))
+            if age is not None and age >= stale_after:
+                row["final_status"] = UNKNOWN_AFTER_CLICK_STATUS
+                row["error_message"] = (
+                    "Upload dialog closed, but no Earth Engine asset or ingestion operation "
+                    "was found after the confirmation grace period. The local mosaic is retryable."
+                )
+                changed_rows.append(row)
+
+        if changed_rows:
+            self.report.upsert_many(changed_rows)
+            counts: Dict[str, int] = {}
+            for row in changed_rows:
+                status = row.get("final_status", "UNKNOWN") or "UNKNOWN"
+                counts[status] = counts.get(status, 0) + 1
+            self.logger.info("Reconciled provisional upload rows from EE operations/assets: %s", counts)
 
     def sync_existing_assets_to_report(self) -> int:
         """Sync EE inventory and mark matching local files as verified existing."""
@@ -1928,6 +2353,14 @@ class EarthEngineUIUploader:
                 self.submit_with_retries(item)
                 if self.config.upload.fail_fast and self.report.get_status(item.asset_id) in {"FAILED", "ERROR"}:
                     raise RuntimeError(f"Fail-fast stopping after a failure on {item.asset_id}")
+                pending = self.pending_browser_upload_asset_ids()
+                if len(pending) >= self.config.upload.max_pending_browser_uploads:
+                    if not self.wait_for_browser_upload_capacity(
+                        target_pending=self.config.upload.max_pending_browser_uploads - 1
+                    ):
+                        return
+            if not self.wait_for_browser_upload_capacity(target_pending=0):
+                return
             if self.config.upload.completion_mode == UPLOAD_COMPLETION_WAIT_FOR_EE:
                 self.wait_for_batch_gate(batch)
             else:
@@ -2130,6 +2563,7 @@ class EarthEngineUIUploader:
 
     def open_image_upload_dialog(self) -> None:
         """Open the Earth Engine image upload dialog using fallback navigation."""
+        self.ensure_upload_page_rendering()
         attempts = [
             self._open_upload_via_assets_panel_menu,
             self._open_upload_via_new_menu,
@@ -2148,6 +2582,19 @@ class EarthEngineUIUploader:
                 last_error = exc
                 self.close_dialog_if_possible()
         raise RetryableUIError("Could not open the Earth Engine image upload dialog.") from last_error
+
+    def ensure_upload_page_rendering(self) -> None:
+        """Keep Chrome's upload controls rendering when its window is occluded."""
+        if self.execute_script("return document.visibilityState;") != "hidden":
+            return
+        assert self.driver is not None
+        try:
+            self.driver.execute_cdp_cmd("Emulation.setFocusEmulationEnabled", {"enabled": True})
+            self.driver.execute_cdp_cmd("Page.setWebLifecycleState", {"state": "active"})
+            self.logger.info("Restored rendering for the background upload page.")
+        except WebDriverException as exc:
+            raise_if_invalid_browser_session(exc)
+            raise RetryableUIError("Chrome's upload page is hidden and could not be reactivated. Restore the dedicated Chrome window and retry.") from exc
 
     def _open_upload_via_assets_panel_menu(self) -> None:
         """Use the Assets-side NEW control in the current Earth Engine UI."""
