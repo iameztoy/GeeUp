@@ -124,6 +124,7 @@ from project_database import (
 )
 from project_relocation import RelocationRequired
 from project_transfer_dialog import ProjectTransferDialog
+from project_diagnostics_dialog import DiagnosticCleanupDialog
 from project_updates import campaign_is_archived, set_campaign_archived
 from swotflow_project import (
     SWOTFlowProject,
@@ -2644,7 +2645,7 @@ class LauncherApp:
     def build_cleanup_tab(self, parent: ttk.Frame) -> None:
         """Create conservative intermediate-file cleanup controls."""
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(3, weight=1)
+        parent.rowconfigure(4, weight=1)
 
         ttk.Label(
             parent,
@@ -2677,6 +2678,10 @@ class LauncherApp:
             command=self.delete_all_cleanup_files,
         ).grid(row=0, column=3, sticky="w", padx=(8, 0))
 
+        ttk.Button(parent, text="Diagnostic Cleanup...", command=self.show_diagnostic_cleanup).grid(
+            row=2, column=0, sticky="w", pady=(0, 8)
+        )
+
         ttk.Label(
             parent,
             text=(
@@ -2687,10 +2692,10 @@ class LauncherApp:
             foreground="#555555",
             justify="left",
             wraplength=780,
-        ).grid(row=2, column=0, sticky="w", pady=(0, 8))
+        ).grid(row=3, column=0, sticky="w", pady=(0, 8))
 
         table_frame = ttk.Frame(parent)
-        table_frame.grid(row=3, column=0, sticky="nsew")
+        table_frame.grid(row=4, column=0, sticky="nsew")
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
         self.cleanup_tree = ttk.Treeview(
@@ -2716,6 +2721,15 @@ class LauncherApp:
         )
         cleanup_scroll.grid(row=0, column=1, sticky="ns")
         self.cleanup_tree.configure(yscrollcommand=cleanup_scroll.set)
+
+    def show_diagnostic_cleanup(self) -> None:
+        """Inspect optional diagnostics separately from proof-based raster cleanup."""
+        if not self.require_active_project("preview diagnostic cleanup"):
+            return
+        DiagnosticCleanupDialog(
+            self.root, Path(self.current_project_root_var.get()),
+            project_busy=lambda: self.automation_running or self.automation_preflight_running or self.cleanup_delete_running,
+        )
 
     def build_mosaic_tab(self, parent: ttk.Frame) -> None:
         """Create the SWOT GeoTIFF mosaic controls."""

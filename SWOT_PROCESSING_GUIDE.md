@@ -349,6 +349,16 @@ Default behavior:
 
 Use `--count-only` from a second PowerShell window to check how many child assets currently remain. The deletion run shows a compact progress bar by default; use `--verbose` only if you want one console line per asset. Use `--limit 10` for a small deletion test before deleting thousands of assets. Use `--delete-parent` only if the parent ImageCollection itself should also be removed.
 
+## Diagnostic Storage Cleanup
+
+**Cleanup > Diagnostic Cleanup...** is separate from downstream-proof raster cleanup. Its allowlist covers only timestamped uploader `.png`/`.html` debug captures directly in `<project_root>/00_logs/upload_artifacts`, and optional `ee_ui_uploader_YYYYMMDD_HHMMSS.log` files directly in `<project_root>/00_logs`. It does not recursively delete directories or follow configured external diagnostic folders. Unknown files and nested folders are retained.
+
+These files contain debugging evidence, not authoritative completion state. Removing them does not alter SQLite, mosaic lineage, update expectations, upload events, statistics snapshots or automation checkpoints. Old log messages may still reference removed diagnostic paths; preserve the relevant diagnostics before investigating an unresolved error. Automation stage logs and run folders remain protected, including any legacy Chrome profiles inside them. Recovery and relocation backups are intentionally excluded: review them separately only after a successful continuation and a verified backup.
+
+Preview and deletion run off the Tkinter thread. The default retention is seven days, with a minimum of one day. The deletion backend rechecks project location, allowed filename/location, retention, file identity/size/timestamps, and link/hard-link status before unlinking each selected file. It acquires the project Automation lock and refuses an active preflight/run. Manual upload terminals do not share that lock, so the user must also stop them and explicitly confirm. Close old application instances before maintenance.
+
+The append-only `00_logs/diagnostic_cleanup.jsonl` records requests, deletions and failures. A request without a final result after interruption is not proof of deletion: preview again. Space totals are logical file sizes, not a disk-allocation or database-compaction guarantee. The complete user procedure is in [Optional Diagnostic Cleanup](./GETTING_STARTED.md#optional-diagnostic-cleanup).
+
 ## Project Relocation And Recovery
 
 Relocation is an offline metadata operation on an already copied project, not a new processing run or an archive/export feature. The normal external-drive procedure is in [Getting Started](./GETTING_STARTED.md#move-a-project-to-another-computer).

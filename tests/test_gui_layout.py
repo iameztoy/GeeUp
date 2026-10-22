@@ -238,6 +238,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Preview Cleanup", collect_button_texts(cleanup_tab))
             self.assertIn("Delete Selected Cleanup Files", collect_button_texts(cleanup_tab))
             self.assertIn("Delete All Cleanup Candidates", collect_button_texts(cleanup_tab))
+            self.assertIn("Diagnostic Cleanup...", collect_button_texts(cleanup_tab))
             self.assertGreaterEqual(len(collect_widgets(extract_tab, ttk.Progressbar)), 1)
             self.assertGreaterEqual(len(collect_widgets(mosaic_tab, ttk.Progressbar)), 1)
             self.assertGreaterEqual(len(collect_widgets(statistics_tab, ttk.Treeview)), 3)

@@ -150,6 +150,8 @@ The repository is still named `GeeUp`; the application is SWOTFlow. Alternativel
 
 For a project such as `D:\SWOT_e2e`:
 
+To reduce the copy size first, use [Diagnostic Cleanup](#optional-diagnostic-cleanup) for old uploader screenshots/HTML and optional text logs. Use the normal proof-based Cleanup preview for intermediate rasters. Do not remove the entire `00_logs` folder: it also contains essential update/resume records and recovery backups.
+
 1. Stop Automation with **Stop After Current Stage**, and wait for it to stop. Finish or stop other processing and upload processes. Browser-side file transfers cannot move between computers; let them finish if possible, then use **Sync EE Assets**. Keep any unverified mosaics.
 2. Save the project and close SWOTFlow and its separate processing/upload terminals. Copy the **entire project folder** to your external drive, including `project.yaml`, `swotflow.sqlite3`, `00_logs`, `profiles`, and all remaining raw/extracted/mosaic files and sidecars. Do not copy an actively changing database. If SQLite `-wal`/`-shm` companion files remain, keep them with the database; never discard a WAL file manually.
 3. Install the same updated SWOTFlow code on the other computer and recreate its Python and GDAL environments as described above. Do not copy `.venv`, the conda environment, Chrome profiles, or credentials. Do not reuse the old application's `config.yaml`; open the transferred project explicitly. With Git, compare `git rev-parse HEAD` on both computers to confirm they have the same code revision before continuing. Include any local fixes that have not yet been pushed to GitHub.
@@ -322,6 +324,19 @@ A different date window creates a separate campaign. Reusing the exact dates of 
 ### 7. Cleanup
 
 Cleanup is a separate tab because it can delete local intermediate files. Click `Preview Cleanup` first; SWOTFlow only offers files with downstream project-record proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine. Then delete selected rows, or delete all previewed candidates when you are sure the project stage is complete.
+
+#### Optional Diagnostic Cleanup
+
+Use **Cleanup > Diagnostic Cleanup...** to reclaim space from old uploader debug files without changing processing history:
+
+1. Choose **Upload screenshots**, **Upload HTML snapshots**, and optionally **Uploader text logs**. Screenshots and HTML are selected by default; text logs are not.
+2. Set **Keep most recent days** (default `7`, minimum `1`), then click **Preview Diagnostics**. The preview shows eligible file counts and size by category, total potentially reclaimable size, and recent diagnostics that will be retained. Scanning is read-only and runs in the background.
+3. Inspect the paginated file list. Select individual rows to see their combined size, or use all previewed files in the chosen categories. Changing filters requires a fresh preview; changing pages clears the current row selection.
+4. Stop project processing and uploads, including separate terminals, then check the stopped confirmation. Click **Delete Selected** or **Delete All Previewed**, and confirm. Deletion is permanent, not a move to the Recycle Bin.
+
+These diagnostics help investigate old browser errors; deleting them loses that evidence, not the record of which products were processed/uploaded. Files changed since preview are skipped. The result reports actual deleted bytes and any skipped/failed files; run Preview again to check what remains. Logical file sizes are estimates of space savings, which can differ from allocated disk space on compressed/deduplicated filesystems.
+
+This option never deletes SQLite files or WAL/SHM files, manifests/CSV reports, update history, automation run folders/configurations, statistics snapshots, profiles, recovery backups, browser profiles, or raw/extracted/mosaic rasters. It does not compact the database. Cleanup decisions are recorded in `00_logs/diagnostic_cleanup.jsonl`. No diagnostics are deleted automatically during processing or relocation.
 
 ## Manual CLI Commands
 

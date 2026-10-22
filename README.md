@@ -22,7 +22,7 @@ python swotflow_gui.py
 - **Mosaic:** reduces GeoTIFF counts before upload, while keeping SWOT-compatible naming and metadata parsing, with optional cautious group parallelism.
 - **Upload:** uploads GeoTIFFs to Google Earth Engine through Chrome/Selenium, with optional UTM/source-tile filtering and Earth Engine asset verification.
 - **Statistics:** summarizes project coverage, saved update windows, processing status, file counts, dates, UTM tiles, uploads, and QA tables. See [returning to an update](./GETTING_STARTED.md#return-to-an-unfinished-or-mistaken-update).
-- **Cleanup:** previews and deletes safe intermediate-file cleanup candidates with downstream project-record proof.
+- **Cleanup:** previews intermediate files with downstream proof, plus optional [old uploader diagnostics](./GETTING_STARTED.md#optional-diagnostic-cleanup), with space estimates and file selection.
 
 ## Basic Workflow
 
