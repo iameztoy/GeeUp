@@ -1130,7 +1130,7 @@ def cleanup_stage(
     currently verified mosaics.
     """
     candidates = []
-    for candidate in plan_cleanup_candidates(config):
+    for candidate in plan_cleanup_candidates(config, include_partial_downloads=False):
         if candidate.stage != stage:
             continue
         if stage != "mosaic" and not path_mentions_tile(candidate.path, tile):
@@ -1388,7 +1388,9 @@ def execute_final_verified_mosaic_cleanup_if_needed(
     """Run one final global mosaic cleanup sweep for delayed EE verification."""
     if not normalized.include_upload or not normalized.cleanup_enabled or state.stopped:
         return None
-    if not any(candidate.stage == "mosaic" for candidate in plan_cleanup_candidates(normalized.base_config)):
+    if not any(candidate.stage == "mosaic" for candidate in plan_cleanup_candidates(
+        normalized.base_config, include_partial_downloads=False,
+    )):
         return None
     return execute_cleanup_result(state, normalized.base_config, "ALL", "mosaic_cleanup")
 

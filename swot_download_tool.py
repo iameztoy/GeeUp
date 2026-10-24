@@ -16,6 +16,7 @@ from urllib.parse import unquote, urlparse
 import yaml
 
 from project_database import read_project_rows, upsert_project_rows
+from project_operation_lock import download_folder_lock
 from project_updates import record_update_preview
 from swot_metadata import parse_swot_l2_hr_raster_metadata, product_identity_parts, swot_product_rank
 from workflow_manifest import upsert_workflow_manifest, workflow_manifest_path
@@ -89,6 +90,7 @@ class DownloadConfig:
     batch_size: int = 25
     product_version_filter: str = DEFAULT_PRODUCT_VERSION_FILTER
     search_request_timeout_seconds: int = DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS
+    catalog_history_enabled: bool = False
     base_dir: Path = Path.cwd()
 
 
@@ -126,6 +128,7 @@ class DownloadPreview:
 
     query: DownloadQuery
     granules: List[DownloadGranule] = field(default_factory=list)
+    history_scan_id: str = ""
 
     @property
     def total_known_size_mb(self) -> float:
@@ -357,6 +360,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> DownloadConfig:
         product_version_filter=normalize_product_version_filter(
             download_data.get("product_version_filter", DEFAULT_PRODUCT_VERSION_FILTER)
         ),
+        catalog_history_enabled=bool(download_data.get("catalog_history_enabled", False)),
         search_request_timeout_seconds=max(
             5,
             int(
@@ -984,6 +988,9 @@ def build_download_preview(
     progress_callback: Optional[ProgressCallback] = None,
 ) -> DownloadPreview:
     """Search CMR and normalize matching granules for display/reporting."""
+    if config.catalog_history_enabled:
+        from nasa_catalog_history import search_with_history
+        return search_with_history(config, earthaccess_module, progress_callback)
     query = build_download_query(config)
     raw_granules = search_matching_granules(
         config,
@@ -1363,12 +1370,27 @@ def run_download(
     stop_event: Any = None,
 ) -> DownloadResult:
     """Search for matching granules and download missing files."""
+    with download_folder_lock(config.output_folder):
+        return _run_download(config, earthaccess_module, progress_callback, stop_event)
+
+
+def _run_download(
+    config: DownloadConfig,
+    earthaccess_module: Any,
+    progress_callback: Optional[ProgressCallback],
+    stop_event: Any,
+) -> DownloadResult:
+    """Run a download while owning its output-folder lock."""
     earthaccess = earthaccess_module or import_earthaccess()
     preview = build_download_preview(
         config,
         earthaccess_module=earthaccess,
         progress_callback=progress_callback,
     )
+    history = None
+    if config.catalog_history_enabled:
+        from nasa_catalog_history import CatalogHistory, history_path
+        history = CatalogHistory(history_path(config.manifest_csv))
     config.output_folder.mkdir(parents=True, exist_ok=True)
     if progress_callback is not None:
         progress_callback(0, 0, "Step 2/4: checking local files and project download manifest")
@@ -1396,6 +1418,8 @@ def run_download(
         else:
             to_download.append(granule)
 
+    if history:
+        history.transfer(preview.history_scan_id, preview.granules, statuses, "download_plan")
     if to_download:
         if progress_callback is not None:
             progress_callback(
@@ -1435,6 +1459,8 @@ def run_download(
             break
         for granule in batch:
             move_incomplete_download(config, granule)
+        if history:
+            history.transfer(preview.history_scan_id, batch, {}, "batch_started")
         if progress_callback is not None:
             if len(batch) == 1:
                 message = f"Step 4/4: downloading {batch[0].file_name}"
@@ -1474,11 +1500,15 @@ def run_download(
                 if len(batch) == 1
                 else f"Step 4/4: FAILED batch of {len(batch)} files"
             )
+        if history:
+            history.transfer(preview.history_scan_id, batch, statuses, "batch_finished")
         completed_attempts += len(batch)
         if progress_callback is not None:
             progress_callback(completed_attempts, total, message)
 
     missing_granules = update_statuses_from_local_files(config, preview, statuses)
+    if history:
+        history.transfer(preview.history_scan_id, preview.granules, statuses, "download_stopped" if stopped else "download_finished")
     report_csv = write_download_report(config, preview, statuses)
     write_download_manifest(config, preview, statuses)
     write_download_workflow_manifest(config, preview, statuses)

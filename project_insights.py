@@ -13,6 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
+from partial_download_cleanup import PartialDownloadProof, delete_partial_downloads, plan_partial_downloads
 from project_database import (
     ProjectDatabase,
     database_path_from_config,
@@ -94,6 +95,7 @@ class CleanupCandidate:
     reason: str
     protected_by: str
     size_bytes: int = 0
+    partial_proof: PartialDownloadProof | None = None
 
 
 @dataclass
@@ -1682,7 +1684,9 @@ def raw_path_for_extracted_source(source: Path, raw_folder: Path) -> Path:
     return raw_folder / f"{stem}.nc"
 
 
-def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]:
+def plan_cleanup_candidates(
+    config: Mapping[str, Any], *, include_partial_downloads: bool = True,
+) -> List[CleanupCandidate]:
     """Return local intermediate files that downstream manifests prove safe to remove."""
     extract_manifest = config_path(config, "extract", "manifest_csv")
     mosaic_manifest = config_path(config, "mosaic", "manifest_csv")
@@ -1770,6 +1774,19 @@ def plan_cleanup_candidates(config: Mapping[str, Any]) -> List[CleanupCandidate]
             path=path,
             reason="Orphaned temporary mosaic sidecar; matching .part GeoTIFF no longer exists.",
             protected_by=str(mosaic_folder),
+        )
+
+    download_folder = config_path(config, "download", "output_folder", str(raw_folder))
+    partials = plan_partial_downloads(
+        download_folder, config_path(config, "download", "manifest_csv"),
+        extract_manifest, COMPLETED_EXTRACT_STATUSES,
+    ) if include_partial_downloads else []
+    for proof in partials:
+        candidates[proof.path] = CleanupCandidate(
+            stage="partial", path=proof.path,
+            reason=f"Later download and extraction confirmed: {proof.product_name}",
+            protected_by=f"{proof.download_manifest}; {proof.extract_manifest}",
+            size_bytes=proof.signature[0], partial_proof=proof,
         )
 
     return sorted(candidates.values(), key=lambda item: (item.stage, str(item.path).lower()))
@@ -2298,7 +2315,14 @@ def delete_cleanup_candidates(candidates: Iterable[CleanupCandidate]) -> tuple[i
     deleted = 0
     bytes_deleted = 0
     errors: List[str] = []
+    partials: List[PartialDownloadProof] = []
     for candidate in candidates:
+        if candidate.stage == "partial" or candidate.path.name.startswith("partial_"):
+            if candidate.partial_proof is None or candidate.partial_proof.path != candidate.path:
+                errors.append(f"{candidate.path}: Missing partial-download proof; preview again.")
+            else:
+                partials.append(candidate.partial_proof)
+            continue
         last_error: OSError | None = None
         for attempt in range(1, 4):
             try:
@@ -2322,6 +2346,11 @@ def delete_cleanup_candidates(candidates: Iterable[CleanupCandidate]) -> tuple[i
                 break
         if last_error is not None:
             errors.append(f"{candidate.path}: {last_error}")
+    if partials:
+        count, freed, partial_errors = delete_partial_downloads(partials, COMPLETED_EXTRACT_STATUSES)
+        deleted += count
+        bytes_deleted += freed
+        errors.extend(partial_errors)
     return deleted, bytes_deleted, errors
 
 
