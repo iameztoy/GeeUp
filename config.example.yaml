@@ -55,6 +55,10 @@ download:
   # - all: download every matching remote file.
   product_version_filter: best
 
+  # Optional persistent filename/version history for future searches and downloads.
+  # This writes nasa_catalog_history.sqlite3 beside manifest_csv; never credentials.
+  catalog_history_enabled: false
+
   # Preview and final download status report.
   report_csv: "C:/path/to/SWOT_Processing/00_logs/download_preview.csv"
 

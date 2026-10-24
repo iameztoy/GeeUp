@@ -1,5 +1,13 @@
 # SWOTFlow
 
+Current application version: **v0.6.1** (24 October 2026). The Home page displays this version on the next normal launch.
+
+New in v0.6.1: application source and regression tests are separated from local investigations. New consolidation histories use the user data folder; existing histories remain discoverable. See [development and storage rules](DEVELOPMENT.md).
+
+Added in v0.6.0: **Statistics → NASA History** preserves catalogue filenames, processing versions and query history, and checks historical dates for versions newer than the inputs recorded in EE. It includes transfer-batch checkpoints and a read-only legacy-history import. Existing runs keep their behaviour; future automatic recording is enabled explicitly. See [NASA history and version checks](NASA_HISTORY.md) and [release history](CHANGELOG.md).
+
+New: **Statistics → Consolidation** and **Status Map → Consolidation Coverage** use a separate local replacement register, with original-observation duplicate checks and explicit comparison/approval records. No cloud deletion or automatic analysis switch. See [the replacement register guide](EE_REPLACEMENT_REGISTER.md).
+
 ![SWOTFlow workflow banner](assets/swotflow_home_banner.png)
 
 SWOTFlow is a local desktop workflow for SWOT L2 HR Raster 100 m data. It helps you download SWOT raster NetCDF files from NASA Earthdata / PO.DAAC, clean repeated product versions, extract GeoTIFFs, optionally build mosaics, upload outputs to Google Earth Engine, and audit the project afterwards.
@@ -9,6 +17,16 @@ The main entry point is:
 ```powershell
 python swotflow_gui.py
 ```
+
+## Versioning
+
+Use all three components of `MAJOR.MINOR.PATCH`, with changes grouped into releases rather than a version bump for every edit:
+
+- **Patch**, for example `0.5.0` → `0.5.1`: compatible bug fixes, small UI adjustments such as tab ordering, and maintenance without new functionality.
+- **Minor**, for example `0.4.x` → `0.5.0`: new functionality, resetting the patch number. The replacement register and consolidation coverage justified the `0.5.0` increment.
+- **Major**, once a stable `1.0.0` contract exists: incompatible changes to supported behaviour or data formats. During `0.x` development, incompatible changes require a minor increment and explicit compatibility/migration notes; they must not be hidden in a patch release.
+
+For each release, keep the Home-page version, README and relevant release documentation consistent, include `vMAJOR.MINOR.PATCH` in both the GitHub release title and description, describe the changes and validation, and preserve earlier release history. Documentation-only edits need not increment the application version. Do not restart an ongoing processing run merely to display a new version.
 
 ## What SWOTFlow Does
 
@@ -22,6 +40,7 @@ python swotflow_gui.py
 - **Mosaic:** reduces GeoTIFF counts before upload, while keeping SWOT-compatible naming and metadata parsing, with optional cautious group parallelism.
 - **Upload:** uploads GeoTIFFs to Google Earth Engine through Chrome/Selenium, with optional UTM/source-tile filtering and Earth Engine asset verification.
 - **Statistics:** summarizes project coverage, saved update windows, processing status, file counts, dates, UTM tiles, uploads, and QA tables. See [returning to an update](./GETTING_STARTED.md#return-to-an-unfinished-or-mistaken-update).
+- **EE Consolidation:** previews asset savings, creates date/pass/grid mosaics, and extends existing consolidated mosaics with later inputs while preserving paired elevation/quality and processing history. Exports create new revisions; originals remain. See [consolidation and incremental updates](./EE_CONSOLIDATION.md).
 - **Cleanup:** previews intermediate files with downstream proof, plus optional [old uploader diagnostics](./GETTING_STARTED.md#optional-diagnostic-cleanup), with space estimates and file selection.
 
 ## Basic Workflow
@@ -98,7 +117,7 @@ A SWOTFlow project keeps settings and intermediate files together:
 
 ## Repository Map
 
-- `swotflow_gui.py`: desktop launcher with Home, Automation, Download, Duplicate Removal, Extraction, Mosaic, Upload, Statistics, and Cleanup tools.
+- `swotflow_gui.py`: desktop launcher with Home, Automation, Download, Duplicate Removal, Extraction, Mosaic, Upload, EE Consolidation, Statistics, and Cleanup tools.
 - `swotflow_automation.py`: tile-by-tile unattended workflow orchestration.
 - `swotflow_project.py`: project metadata, project folders, history, and tile profile helpers.
 - `project_relocation.py` and `project_transfer_dialog.py`: copied-project path relocation, validation, and recovery.

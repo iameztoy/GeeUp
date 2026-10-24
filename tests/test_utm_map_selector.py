@@ -11,10 +11,37 @@ from utm_map_selector import (
     pipeline_status_from_qa_row,
     pipeline_status_key,
     update_coverage_status_from_row,
+    CONSOLIDATION_STYLES,
 )
 
 
 class UTMMapSelectorTests(unittest.TestCase):
+    def test_consolidation_map_reports_source_lineage_pending_and_unknown(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            widget = UTMPipelineStatusMap(root, self.geometry)
+            base = {"expected": 2, "uploaded": 2, "active": 2, "pending": 0, "awaiting": 0,
+                    "missing": 0, "unknown": 0, "conflicts": 0, "outdated": 0, "unresolved_assets": 0}
+            widget.set_consolidation_coverage([base | {"tile": "UTM31P", "status": "complete"},
+                                               base | {"tile": "UTM31R", "status": "pending", "active": 1, "pending": 1}],
+                                              "Registered input coverage; inventory UTC 2026-10-24")
+            widget.map_mode_var.set("Consolidation Coverage")
+            widget.on_mode_changed()
+            self.assertEqual(widget.current_mode_key(), "consolidation")
+            self.assertIn("inventory UTC", widget.status_var.get())
+            widget.update_tile_status("UTM31R")
+            self.assertIn("pending 1", widget.status_var.get())
+            widget.update_tile_status("UTM32P")
+            self.assertIn("unknown", widget.status_var.get())
+            fills = {widget.canvas.itemcget(i, "fill") for i in widget.canvas.find_all() if widget.canvas.type(i) == "polygon"}
+            self.assertTrue({CONSOLIDATION_STYLES[k]["fill"] for k in ("complete", "pending", "unknown")} <= fills)
+            widget.clear_statuses()
+            self.assertFalse(widget.consolidation_rows)
+        finally:
+            root.update_idletasks()
+            root.destroy()
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.geometry = load_display_geometry()

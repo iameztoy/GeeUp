@@ -20,6 +20,17 @@ Point = Tuple[float, float]
 Bounds = Tuple[float, float, float, float]
 Ring = List[Point]
 
+# Fixed categories: grey must never imply verified completeness. Counts are
+# registered source observations, not water pixels or catalogue completeness.
+CONSOLIDATION_STYLES = {
+    "complete": {"fill": "#78b89d", "outline": "#215e47", "label": "Approved current"},
+    "pending": {"fill": "#f4cc79", "outline": "#876018", "label": "Pending additions"},
+    "awaiting": {"fill": "#9cc4e4", "outline": "#325c80", "label": "Awaiting approval"},
+    "missing": {"fill": "#df9c7d", "outline": "#8a3821", "label": "Missing"},
+    "conflict": {"fill": "#be9ace", "outline": "#634070", "label": "Conflict / lineage"},
+    "unknown": {"fill": "#d5d5d5", "outline": "#777777", "label": "Unknown / stale"},
+}
+
 
 @dataclass
 class DisplayTile:
@@ -407,6 +418,8 @@ class UTMPipelineStatusMap(ttk.Frame):
         super().__init__(master)
         self.geometry_data = geometry
         self.tile_statuses: Dict[str, TilePipelineStatus] = {}
+        self.consolidation_rows: dict[str, dict] = {}
+        self.consolidation_caption = "No consolidation register loaded."
         self.update_coverage_statuses: Dict[str, TileUpdateCoverageStatus] = {}
         self.update_coverage_campaign_rows: Dict[str, Sequence[Sequence[object]]] = {}
         self.update_campaign_label_by_id: Dict[str, str] = {}
@@ -449,7 +462,7 @@ class UTMPipelineStatusMap(ttk.Frame):
         self.map_mode_combo = ttk.Combobox(
             controls,
             textvariable=self.map_mode_var,
-            values=("Pipeline Status", "Update Coverage"),
+            values=("Pipeline Status", "Update Coverage", "Consolidation Coverage"),
             state="readonly",
             width=18,
         )
@@ -528,6 +541,8 @@ class UTMPipelineStatusMap(ttk.Frame):
 
     def current_mode_key(self) -> str:
         """Return the selected status-map mode key."""
+        if self.map_mode_var.get() == "Consolidation Coverage":
+            return "consolidation"
         return "update" if self.map_mode_var.get() == "Update Coverage" else "pipeline"
 
     def on_mode_changed(self) -> None:
@@ -557,7 +572,10 @@ class UTMPipelineStatusMap(ttk.Frame):
             return
         for child in self.legend_frame.winfo_children():
             child.destroy()
-        if self.current_mode_key() == "update":
+        if self.current_mode_key() == "consolidation":
+            styles = CONSOLIDATION_STYLES
+            keys = tuple(styles)
+        elif self.current_mode_key() == "update":
             styles = UPDATE_COVERAGE_STATUS_STYLES
             keys = (
                 "not_started",
@@ -605,6 +623,13 @@ class UTMPipelineStatusMap(ttk.Frame):
             status = pipeline_status_from_qa_row(row)
             statuses[status.token] = status
         self.tile_statuses = statuses
+        self.draw_map()
+        self.update_summary_status()
+
+    def set_consolidation_coverage(self, rows: Sequence[dict], caption: str) -> None:
+        """Use flattened source-tile lineage supplied by the replacement register."""
+        self.consolidation_rows = {row["tile"]: dict(row) for row in rows}
+        self.consolidation_caption = caption
         self.draw_map()
         self.update_summary_status()
 
@@ -698,6 +723,8 @@ class UTMPipelineStatusMap(ttk.Frame):
     def clear_statuses(self) -> None:
         """Clear all project status data from the map."""
         self.tile_statuses = {}
+        self.consolidation_rows = {}
+        self.consolidation_caption = "No consolidation register loaded."
         self.update_coverage_statuses = {}
         self.update_coverage_campaign_rows = {}
         self.update_campaign_label_by_id = {}
@@ -736,7 +763,11 @@ class UTMPipelineStatusMap(ttk.Frame):
 
         self.draw_continents(fill="#e1e5dc", outline="#b8beb2", width=0.7)
         for token, tile in self.geometry_data.tiles.items():
-            if self.current_mode_key() == "update":
+            if self.current_mode_key() == "consolidation":
+                row = self.consolidation_rows.get(token, {})
+                style = CONSOLIDATION_STYLES.get(row.get("status", "unknown"), CONSOLIDATION_STYLES["unknown"])
+                width = 1.1 if row else 0.5
+            elif self.current_mode_key() == "update":
                 status = self.tile_update_coverage_status(token)
                 style = UPDATE_COVERAGE_STATUS_STYLES.get(
                     status.status,
@@ -874,6 +905,18 @@ class UTMPipelineStatusMap(ttk.Frame):
 
     def update_tile_status(self, token: str) -> None:
         """Show a detailed status message for one tile."""
+        if self.current_mode_key() == "consolidation":
+            row = self.consolidation_rows.get(token)
+            if row is None:
+                self.status_var.set(f"{token}: no registered source history for this date window; coverage is unknown.")
+            else:
+                self.status_var.set(f"{token}: {CONSOLIDATION_STYLES[row['status']]['label']}. "
+                                    f"Registered {row['expected']}; original in EE {row['uploaded']}; approved current {row['active']}; "
+                                    f"pending {row['pending']}; awaiting approval {row['awaiting']}; missing {row['missing']}; "
+                                    f"unknown/stale {row['unknown']}; conflicts {row['conflicts']}; "
+                                    f"older version active {row['outdated']}; unresolved assets {row['unresolved_assets']}. "
+                                    "Full history: Statistics > Consolidation.")
+            return
         if self.current_mode_key() == "update":
             self.update_tile_coverage_status(token)
             return
@@ -920,6 +963,9 @@ class UTMPipelineStatusMap(ttk.Frame):
 
     def update_summary_status(self) -> None:
         """Show a compact project status summary."""
+        if self.current_mode_key() == "consolidation":
+            self.status_var.set(self.consolidation_caption)
+            return
         if self.current_mode_key() == "update":
             self.update_coverage_summary_status()
             return

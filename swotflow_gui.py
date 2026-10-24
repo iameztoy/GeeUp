@@ -34,7 +34,7 @@ MOSAIC_SCRIPT = PROJECT_ROOT / "ee_mosaic_tool.py"
 DUPLICATE_SCRIPT = PROJECT_ROOT / "swot_duplicate_remover.py"
 PROGRESS_PREFIX = "GEEUP_PROGRESS\t"
 APP_NAME = "SWOTFlow"
-APP_VERSION = "v0.3.0+"
+APP_VERSION = "v0.6.1"
 GITHUB_URL = "https://github.com/iameztoy/GeeUp"
 DEFAULT_PROCESSING_ROOT = "./SWOT_Processing"
 DEFAULT_PROCESSING_PATHS = {
@@ -116,6 +116,9 @@ ensure_isolated_python_environment()
 import yaml
 
 from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env
+from ee_consolidation_tab import ConsolidationTab
+from ee_consolidation_coverage_ui import ConsolidationCoveragePanel
+from nasa_catalog_ui import NasaHistoryPanel
 from project_database import (
     ProjectDatabase,
     database_path_for,
@@ -263,6 +266,7 @@ class LauncherApp:
             selected_tiles = []
         self.download_collection_var = tk.StringVar(value=download_label)
         self.download_product_filter_var = tk.StringVar(value=download_product_filter_label)
+        self.catalog_history_enabled_var = tk.BooleanVar(value=bool(download_data.get("catalog_history_enabled", False)))
         self.download_start_date_var = tk.StringVar(
             value=str(download_data.get("start_date", ""))
         )
@@ -655,6 +659,7 @@ class LauncherApp:
         extract_tab = ttk.Frame(self.notebook, padding=12)
         mosaic_tab = ttk.Frame(self.notebook, padding=12)
         upload_tab = ttk.Frame(self.notebook, padding=12)
+        consolidation_tab = ttk.Frame(self.notebook, padding=12)
         statistics_tab = ttk.Frame(self.notebook, padding=12)
         cleanup_tab = ttk.Frame(self.notebook, padding=12)
         self.tabs_by_name = {
@@ -665,6 +670,7 @@ class LauncherApp:
             "Extraction": extract_tab,
             "Mosaic": mosaic_tab,
             "Upload": upload_tab,
+            "EE Consolidation": consolidation_tab,
             "Statistics": statistics_tab,
             "Cleanup": cleanup_tab,
         }
@@ -675,6 +681,7 @@ class LauncherApp:
         self.notebook.add(extract_tab, text="Extraction")
         self.notebook.add(mosaic_tab, text="Mosaic")
         self.notebook.add(upload_tab, text="Upload")
+        self.notebook.add(consolidation_tab, text="EE Consolidation")
         self.notebook.add(statistics_tab, text="Statistics")
         self.notebook.add(cleanup_tab, text="Cleanup")
 
@@ -686,6 +693,7 @@ class LauncherApp:
         self.build_mosaic_tab(mosaic_tab)
         self.build_upload_tab(upload_tab)
         self.build_statistics_tab(statistics_tab)
+        self.consolidation_tab = ConsolidationTab(consolidation_tab, self)
         self.build_cleanup_tab(cleanup_tab)
         self.refresh_home_summary()
 
@@ -882,7 +890,7 @@ class LauncherApp:
         workflow.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
         ttk.Label(
             workflow,
-            text="Automation, or manual: Download > Duplicate Removal > Extraction > Mosaic > Upload > Statistics > Cleanup",
+            text="Automation, or manual: Download > Duplicate Removal > Extraction > Mosaic > Upload > EE Consolidation > Statistics > Cleanup",
             wraplength=470,
             justify="left",
         ).grid(row=0, column=0, sticky="w")
@@ -2096,6 +2104,12 @@ class LauncherApp:
         inner.add(mosaics, text="Mosaics")
         inner.add(lineage, text="Lineage")
         inner.add(uploaded, text="Uploaded")
+        consolidation_coverage = ttk.Frame(inner)
+        inner.add(consolidation_coverage, text="Consolidation")
+        self.consolidation_coverage_panel = ConsolidationCoveragePanel(consolidation_coverage, self)
+        nasa_history = ttk.Frame(inner)
+        inner.add(nasa_history, text="NASA History")
+        self.nasa_history_panel = NasaHistoryPanel(nasa_history, self)
 
         overview.columnconfigure(0, weight=1)
         overview.rowconfigure(0, weight=1)
@@ -3302,6 +3316,7 @@ class LauncherApp:
             selected_tiles = []
         self.download_collection_var.set(download_label)
         self.download_product_filter_var.set(download_product_filter_label)
+        self.catalog_history_enabled_var.set(bool(download_data.get("catalog_history_enabled", False)))
         self.download_start_date_var.set(str(download_data.get("start_date", "")))
         self.download_end_date_var.set(str(download_data.get("end_date", "")))
         self.download_output_var.set(download_data.get("output_folder", raw_downloads))
@@ -4374,6 +4389,7 @@ class LauncherApp:
             threads=threads,
             batch_size=batch_size,
             product_version_filter=self.selected_download_product_filter(),
+            catalog_history_enabled=self.catalog_history_enabled_var.get(),
             base_dir=PROJECT_ROOT,
         )
 
@@ -4777,6 +4793,7 @@ class LauncherApp:
                 "collection_short_name": self.selected_download_collection_short_name(),
                 "collection_version_label": self.download_collection_var.get(),
                 "product_version_filter": self.selected_download_product_filter(),
+                "catalog_history_enabled": self.catalog_history_enabled_var.get(),
                 "output_folder": self.download_output_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["raw_downloads"],
                 "start_date": self.download_start_date_var.get().strip(),
@@ -6378,6 +6395,8 @@ class LauncherApp:
         )
         self.draw_bar_chart(self.stats_tile_chart_canvas, [], "Top UTM tiles by recorded files")
         self.stats_status_map.clear_statuses()
+        self.consolidation_coverage_panel.clear()
+        self.nasa_history_panel.clear()
         self.update_window_details = {}
         self.populate_update_windows()
         self.statistics_summary_var.set("")
@@ -6411,6 +6430,7 @@ class LauncherApp:
         self.update_window_details = {str(row["campaign_id"]): dict(row) for row in getattr(insights, "update_campaign_details", [])}
         self.populate_update_windows()
         self.stats_status_map.set_missing_upload_rows(insights.ready_not_uploaded_rows)
+        self.consolidation_coverage_panel.refresh(self.destination_var.get().strip())
 
     def display_project_statistics(
         self,
@@ -7022,6 +7042,16 @@ class LauncherApp:
             messagebox.showinfo(
                 "Cleanup already running",
                 "A cleanup deletion is already running. Wait for it to finish before starting another one.",
+            )
+            return
+        if any(candidate.stage == "partial" for candidate in candidates) and (
+            self.automation_running or self.automation_preflight_running
+            or self.download_stop_event is not None
+        ):
+            messagebox.showinfo(
+                "Partial downloads protected",
+                "Stop downloads/Automation, wait for them to finish, then preview cleanup again. "
+                "Partial downloads cannot be removed during an active run.",
             )
             return
         total_size = sum(candidate.size_bytes for candidate in candidates)

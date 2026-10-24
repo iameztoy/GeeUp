@@ -90,6 +90,111 @@ def swot_tif_name(tile: str) -> str:
 
 
 class GuiLayoutTests(unittest.TestCase):
+    def test_nasa_history_preview_compare_and_future_run_setting_are_isolated(self) -> None:
+        import json
+        from tests.test_download_tool import FakeGranule, FakePagedEarthaccess, granule_name
+        from tests.test_ee_consolidation import asset, manifest, COLLECTION
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            with tempfile.TemporaryDirectory() as folder:
+                project = Path(folder)
+                app.current_project_root_var.set(str(project))
+                app.download_manifest_var.set(str(project / "00_logs/download_manifest.csv"))
+                app.download_output_var.set(str(project / "raw"))
+                app.destination_var.set(COLLECTION)
+                app.download_start_date_var.set("2026-10-01")
+                app.download_end_date_var.set("2026-10-24")
+                panel = app.nasa_history_panel
+                panel.start.set("2026-01-01")
+                panel.end.set("2026-01-31")
+                panel.tiles.set("UTM30R")
+                panel.collections.set("SWOT_L2_HR_Raster_100m_D, SWOT_L2_HR_Raster_D")
+                a = asset(tile="UTM30R", crs="EPSG:32630", cycle="044", pass_id="387",
+                          start="20260117T052508", end="20260117T052529")
+                rows = [{"output_file": name + ".tif", **row} for name, row in manifest(a).items()]
+                write_csv(project / "00_logs/mosaic_manifest.csv", rows)
+                old = Path(json.loads(rows[0]["input_files"])[0]).stem + ".nc"
+                new = old.replace("_PGD0_01.nc", "_PGD0_02.nc")
+                fake = FakePagedEarthaccess([FakeGranule(old, concept_id="old"), FakeGranule(new, concept_id="new")])
+                with mock.patch.object(panel, "work", side_effect=lambda label, job, done: done(job())), \
+                     mock.patch("swot_download_tool.import_earthaccess", return_value=fake):
+                    panel.scan()
+                    self.assertEqual(len(panel.scan_rows), 1)
+                    from nasa_catalog_history import utc_now
+                    panel.inventory_ready({"collection": COLLECTION, "assets": [a], "finished_utc": utc_now()})
+                    panel.compare()
+                    self.assertEqual(panel.report["summary"], {"newer_version_available": 1})
+                    self.assertEqual(len(panel.versions.get_children()), 1)
+                    self.assertFalse((project / "swotflow.sqlite3").exists())
+                    self.assertFalse((project / "raw").exists())
+                    self.assertEqual(app.download_start_date_var.get(), "2026-10-01")
+                    self.assertEqual(app.download_end_date_var.get(), "2026-10-24")
+                    self.assertFalse(app.catalog_history_enabled_var.get())
+                    app.catalog_history_enabled_var.set(True)
+                    self.assertTrue(app.build_config()["download"]["catalog_history_enabled"])
+                    self.assertTrue(app.download_config_from_ui().catalog_history_enabled)
+                panel.clear()
+                self.assertFalse(panel.inventory)
+                self.assertFalse(panel.report)
+                self.assertFalse(panel.searches.get_children())
+        finally:
+            root.update_idletasks()
+            root.destroy()
+
+    def test_consolidation_register_to_statistics_map_and_local_approval(self) -> None:
+        from tests.test_ee_replacement_register import inventory, receipt
+        from tests.test_ee_consolidation import asset, manifest, COLLECTION, DESTINATION, local_temp
+        from tests.test_ee_consolidation_update import stored
+        import ee_consolidation as c
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            tab = app.consolidation_tab
+            panel = app.consolidation_coverage_panel
+            a, b = asset(), asset(tile="UTM31Q")
+            lineage = {**manifest(a), **manifest(b)}
+            plan = c.plan_assets([a, b], COLLECTION, c.Options(), lineage)
+            output = stored(plan["groups"][0], plan)
+            with local_temp() as temp:
+                path = Path(temp) / "coverage.sqlite3"
+                tab.source.set(COLLECTION)
+                tab.destination.set(DESTINATION)
+                tab.existing_collection.set(DESTINATION)
+                tab.previous_plans.set(str(Path(temp) / "plans"))
+                tab.inventory = inventory(COLLECTION, [a, b])
+                tab.existing_inventory = inventory(DESTINATION, [output])
+                tab.plan = plan
+                tab.plan_settings = tab.settings()
+                with mock.patch.object(tab, "work", side_effect=lambda label, job, done: done(job())), \
+                     mock.patch.object(panel, "work", side_effect=lambda job, done: done(job())), \
+                     mock.patch("ee_consolidation_tab.registry.default_path", return_value=path), \
+                     mock.patch("ee_consolidation_tab.engine.read_lineage", return_value=lineage), \
+                     mock.patch("ee_consolidation_tab.engine.connect", side_effect=AssertionError("No EE calls allowed")):
+                    tab.update_register()
+                    self.assertEqual(panel.report["summary"]["awaiting"], 2)
+                    self.assertEqual(len(panel.tiles.get_children()), 2)
+                    self.assertEqual(app.stats_status_map.consolidation_rows["UTM31Q"]["awaiting"], 1)
+                    from ee_replacement_register import ReplacementRegister
+                    register = ReplacementRegister(path, COLLECTION)
+                    register.record_verification(receipt(output, plan))
+                    panel.refresh()
+                    row = next(i for i in panel.products.get_children() if panel.products.item(i, "values")[0] == output["id"])
+                    panel.products.selection_set(row)
+                    with mock.patch("ee_consolidation_coverage_ui.messagebox.askyesno", return_value=True):
+                        panel.approve()
+                    self.assertEqual(panel.report["summary"]["active"], 2)
+                    self.assertEqual(app.stats_status_map.consolidation_rows["UTM31P"]["status"], "complete")
+                    panel.start.set("2024-01-02")
+                    panel.refresh()
+                    self.assertFalse(app.stats_status_map.consolidation_rows)
+                    self.assertFalse(panel.tiles.get_children())
+        finally:
+            root.update_idletasks()
+            root.destroy()
+
     def setUp(self) -> None:
         # GUI constructors auto-open config.yaml; tests must never touch a user's project.
         folder = tempfile.TemporaryDirectory()
@@ -120,6 +225,38 @@ class GuiLayoutTests(unittest.TestCase):
             },
         }
 
+    def test_incremental_consolidation_preview_without_cloud_or_project_writes(self) -> None:
+        from tests.test_ee_consolidation import asset, manifest, COLLECTION, DESTINATION, local_temp
+        from tests.test_ee_consolidation_update import stored
+        import ee_consolidation as consolidation
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            tab = app.consolidation_tab
+            a, b, new = asset(), asset(tile="UTM31Q"), asset(tile="UTM31R")
+            lineage = {**manifest(a), **manifest(b), **manifest(new)}
+            old = consolidation.plan_assets([a, b], COLLECTION, consolidation.Options(), lineage)
+            previous = stored(old["groups"][0], old)
+            with local_temp() as temp:
+                consolidation.save_plan(Path(temp) / "old", old)
+                tab.operation.set("Update existing mosaics")
+                tab.previous_plans.set(temp)
+                tab.inventory_ready({"collection": COLLECTION, "assets": [new],
+                                     "existing_inventory": {"collection": DESTINATION, "assets": [previous]}})
+                with mock.patch.object(tab, "work", side_effect=lambda label, job, done: done(job())), \
+                     mock.patch("ee_consolidation_tab.engine.read_lineage", return_value=lineage):
+                    tab.preview()
+                self.assertEqual(tab.plan["summary"]["extended_groups"], 1)
+                self.assertEqual(len(tab.tree.get_children()), 1)
+                self.assertIn("Extend 1 groups", tab.comparison.get())
+                self.assertEqual(tab.current_plan(), tab.plan)
+                tab.quality.set("1")
+                with self.assertRaises(ValueError):
+                    tab.current_plan()
+        finally:
+            root.destroy()
+
     def test_tab_order_and_gdal_field_placement(self) -> None:
         root = tk.Tk()
         root.withdraw()
@@ -139,6 +276,7 @@ class GuiLayoutTests(unittest.TestCase):
                     "Extraction",
                     "Mosaic",
                     "Upload",
+                    "EE Consolidation",
                     "Statistics",
                     "Cleanup",
                 ],
@@ -163,10 +301,13 @@ class GuiLayoutTests(unittest.TestCase):
                 extract_tab,
                 mosaic_tab,
                 upload_tab,
+                consolidation_tab,
                 statistics_tab,
                 cleanup_tab,
             ) = notebook.winfo_children()
             self.assertIn("Current Project", collect_label_texts(home_tab))
+            self.assertIn("v0.6.1", {app.home_banner_canvas.itemcget(item, "text") for item in app.home_banner_canvas.find_all()
+                                      if app.home_banner_canvas.type(item) == "text"})
             self.assertIn("Project And Documentation", collect_label_texts(home_tab))
             self.assertIn("Workflow Shortcuts", collect_label_texts(home_tab))
             self.assertIn("Selected Download Tiles", collect_label_texts(home_tab))
@@ -233,6 +374,17 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("Run Real Upload", collect_button_texts(upload_tab))
             self.assertGreaterEqual(len(collect_widgets(upload_tab, ttk.Progressbar)), 1)
             self.assertIn("Refresh Statistics", collect_button_texts(statistics_tab))
+            self.assertIn("Calculate preview", collect_button_texts(consolidation_tab))
+            self.assertIn("Export selected (max 10)", collect_button_texts(consolidation_tab))
+            self.assertIn("Estimated asset reduction", collect_label_texts(consolidation_tab))
+            self.assertIn("Existing mosaic collection", collect_label_texts(consolidation_tab))
+            self.assertIn("Previous plans folder", collect_label_texts(consolidation_tab))
+            self.assertIn("Preview accounting / blocked groups", collect_button_texts(consolidation_tab))
+            self.assertIn("Update coverage register", collect_button_texts(consolidation_tab))
+            self.assertIn("Read consolidated inventory", collect_button_texts(consolidation_tab))
+            self.assertIn("Refresh register", collect_button_texts(statistics_tab))
+            self.assertIn("Approve selected revision locally", collect_button_texts(statistics_tab))
+            self.assertTrue(any("Update existing mosaics" in widget.cget("values") for widget in collect_widgets(consolidation_tab, ttk.Combobox)))
             self.assertNotIn("Preview Cleanup", collect_button_texts(statistics_tab))
             self.assertIn("Sync EE Assets + Preview Cleanup", collect_button_texts(cleanup_tab))
             self.assertIn("Preview Cleanup", collect_button_texts(cleanup_tab))
