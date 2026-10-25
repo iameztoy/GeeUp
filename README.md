@@ -1,8 +1,14 @@
 # SWOTFlow
 
-Current application version: **v0.6.1** (24 October 2026). The Home page displays this version on the next normal launch.
+Current application version: **v0.7.3** (25 October 2026). The Home page displays this version on the next normal launch.
 
-New in v0.6.1: application source and regression tests are separated from local investigations. New consolidation histories use the user data folder; existing histories remain discoverable. See [development and storage rules](DEVELOPMENT.md).
+New in v0.7.3: select preferred processing versions before mosaicking; bind Automation mosaics to the retained NASA selection; require revision evidence when reusing an existing EE asset; detect duplicate acquisitions across processing versions; use indexed per-file verification lookups; preserve verification receipts through project relocation; and clean raw, extracted and mosaic files in dependency order. These safeguards do not automatically replace cloud assets or start a rebuild. See [workflow verification](WORKFLOW_VERIFICATION.md).
+
+New in v0.7.1: durable download-to-mosaic evidence, exact-input reconciliation and a repair queue in Statistics, guarded resume/cleanup, and manually launched original-source and EE pixel checks. Paired mosaics now preserve both no-data masks in a standalone GeoTIFF. See [the verification guide](WORKFLOW_VERIFICATION.md) and [rebuild gates](WORKFLOW_VALIDATION.md). A small acceptance pilot is required before choosing a large rebuild scope.
+
+Added in v0.7.0: verified dual-catalogue downloads with exact NASA checksums, mandatory history in verified mode, reset-project protection, and paired lowest-quality local mosaics. New projects retain source files during validation.
+
+Added in v0.6.1: application source and regression tests are separated from local investigations. New consolidation histories use the user data folder; existing histories remain discoverable. See [development and storage rules](DEVELOPMENT.md).
 
 Added in v0.6.0: **Statistics → NASA History** preserves catalogue filenames, processing versions and query history, and checks historical dates for versions newer than the inputs recorded in EE. It includes transfer-batch checkpoints and a read-only legacy-history import. Existing runs keep their behaviour; future automatic recording is enabled explicitly. See [NASA history and version checks](NASA_HISTORY.md) and [release history](CHANGELOG.md).
 

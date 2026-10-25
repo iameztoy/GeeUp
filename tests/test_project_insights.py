@@ -218,7 +218,7 @@ class ProjectInsightsTests(unittest.TestCase):
             self.assertIn("remote_excluded_older_version", {row["lineage_status"] for row in insights.mosaic_lineage_rows})
             self.assertEqual(
                 [candidate.stage for candidate in candidates],
-                ["extracted", "extracted", "extracted", "mosaic", "mosaic", "mosaic", "raw"],
+                ["raw", "extracted", "extracted", "extracted", "mosaic", "mosaic", "mosaic"],
             )
             self.assertIn(extracted.with_suffix(".tfw"), [candidate.path for candidate in candidates])
             self.assertIn(mosaic.with_suffix(".tif.aux.xml"), [candidate.path for candidate in candidates])

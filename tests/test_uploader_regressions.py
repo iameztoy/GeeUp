@@ -31,6 +31,87 @@ from project_database import read_project_rows
 
 
 class UploaderDialogRegressionTests(unittest.TestCase):
+    def test_existing_asset_with_unbound_revision_cannot_skip_verified_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            uploader = self.uploader(self.uploader_config(root))
+            uploader.config.verified_workflow = True
+            local = root / "inputs" / "test.tif"
+            local.write_bytes(b"new revision")
+            aid = uploader.config.destination_parent + "/test"
+            uploader.ee_inventory_synced = True
+            uploader.ee_existing_asset_ids.add(aid)
+            uploader._verified_inventory = {aid: {"id": aid}}
+            proof = {"stage": "mosaic", "sources": {}, "sha256": "new"}
+            with mock.patch.object(uploader, "sync_earth_engine_inventory"), \
+                 mock.patch("pipeline_verification.VerificationStore.artifact", return_value=proof), \
+                 mock.patch("pipeline_verification.artifact_current", return_value=True):
+                with self.assertRaisesRegex(ValueError, "Existing EE revision is unverified"):
+                    uploader.build_upload_plan()
+                self.assertEqual(uploader.existing_revision_status(local, aid), "EXISTING_REVISION_UNVERIFIED")
+
+    def test_upload_properties_bind_prepared_revision(self) -> None:
+        from pipeline_verification import ingestion_properties
+        from tests.test_download_tool import granule_name
+        with tempfile.TemporaryDirectory() as temp:
+            uploader = self.uploader(self.uploader_config(Path(temp)))
+            uploader.config.verified_workflow = True
+            local = Path(temp) / Path(granule_name()).with_suffix(".tif")
+            item = UploadItem(local, local.stem, "asset")
+            item.ingestion_revision = {"token": "unique", "local_sha256": "hash", "sources": {"source": "checksum"}}
+            with mock.patch.object(uploader, "is_current_upload_dialog_open", return_value=True), \
+                 mock.patch.object(uploader, "_apply_current_ui_metadata_properties") as apply:
+                uploader.apply_metadata_properties(item)
+                self.assertEqual({k: apply.call_args.args[0].properties[k] for k in ingestion_properties(item.ingestion_revision)},
+                                 ingestion_properties(item.ingestion_revision))
+
+    def test_pyramiding_javascript_is_constructed_and_conflicting_bands_are_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            uploader = self.uploader(self.uploader_config(Path(temp)))
+            uploader.config.upload.pyramiding_policy.default = "SAMPLE"
+            uploader.config.upload.pyramiding_policy.per_band = {"b1":"SAMPLE","b2":"SAMPLE"}
+            with mock.patch.object(uploader,"is_current_upload_dialog_open",return_value=True), \
+                 mock.patch.object(uploader,"execute_script",return_value={"ok":True}) as script:
+                self.assertTrue(uploader._apply_current_ui_pyramiding_policy())
+                self.assertIn("${arguments[0]}",script.call_args.args[0])
+                uploader.config.upload.pyramiding_policy.per_band["b1"] = "MEAN"
+                with self.assertRaisesRegex(ValueError,"different per-band"):
+                    uploader._apply_current_ui_pyramiding_policy()
+
+    def test_verified_resume_does_not_trust_historical_success_for_missing_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            uploader = self.uploader(self.uploader_config(Path(temp)))
+            uploader.config.verified_workflow = True
+            uploader.ee_inventory_synced = True
+            aid = uploader.config.destination_parent + "/missing"
+            for status in ("EE_VERIFIED_EXISTS", "READY", "RUNNING", "COMPLETED"):
+                self.assertFalse(uploader.should_resume_skip_existing_status(status,aid))
+            uploader.ee_existing_asset_ids.add(aid)
+            self.assertTrue(uploader.should_resume_skip_existing_status("EE_VERIFIED_EXISTS",aid))
+
+    def test_verified_upload_blocks_missing_proof_and_partial_duplicate(self) -> None:
+        from tests.test_download_tool import granule_name
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            uploader = self.uploader(self.uploader_config(root))
+            uploader.config.verified_workflow = True
+            (root/"inputs"/"test.tif").write_bytes(b"test")
+            first, second = granule_name(scene="001F"), granule_name(scene="002F")
+            proof = {"stage":"mosaic","sources":{first:{"hash":"a"},second:{"hash":"b"}}}
+            with mock.patch.object(uploader,"sync_earth_engine_inventory"), \
+                 mock.patch("pipeline_verification.VerificationStore.artifact",return_value=None):
+                with self.assertRaisesRegex(ValueError,"mosaic byte proof"):
+                    uploader.build_upload_plan()
+            with mock.patch.object(uploader,"sync_earth_engine_inventory"), \
+                 mock.patch("pipeline_verification.VerificationStore.artifact",return_value=proof), \
+                 mock.patch("pipeline_verification.artifact_current",return_value=True), \
+                 mock.patch("pipeline_verification.active_proofs",return_value={first:{"checksum":{"hash":"a"},"asset_id":"old"}}):
+                with self.assertRaisesRegex(ValueError,"partially duplicated mosaic"):
+                    uploader.build_upload_plan()
+                uploader._verified_active_inputs[second] = {"checksum":{"hash":"b"},"asset_id":"old"}
+                self.assertEqual(uploader.build_upload_plan(),[])
+                self.assertEqual(next(iter(uploader.report.rows.values()))["final_status"],"SKIPPED_VERIFIED_REPLACEMENT")
+
     def uploader_config(
         self,
         root: Path,

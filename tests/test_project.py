@@ -58,6 +58,9 @@ class ProjectTests(unittest.TestCase):
             loaded = load_project(root)
 
             self.assertEqual(loaded.name, "Okavango Delta")
+            self.assertTrue(loaded.config["download"]["verified_downloads"])
+            self.assertTrue(loaded.config["download"]["catalog_history_enabled"])
+            self.assertFalse(loaded.config["automation"]["cleanup_enabled"])
             self.assertEqual(loaded.config["extract"]["output_folder"], str(root / "02_extracted_geotiffs"))
 
     def test_config_for_project_repoints_workflow_folders(self) -> None:

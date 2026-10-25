@@ -91,6 +91,9 @@ class DownloadConfig:
     product_version_filter: str = DEFAULT_PRODUCT_VERSION_FILTER
     search_request_timeout_seconds: int = DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS
     catalog_history_enabled: bool = False
+    verified_downloads: bool = False
+    destination_parent: str = ""
+    _verification_cache: dict = field(default_factory=dict, repr=False, compare=False, init=False)
     base_dir: Path = Path.cwd()
 
 
@@ -212,6 +215,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "threads": 6,
         "batch_size": 25,
         "product_version_filter": DEFAULT_PRODUCT_VERSION_FILTER,
+        "verified_downloads": False,
     },
 }
 
@@ -361,6 +365,8 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> DownloadConfig:
             download_data.get("product_version_filter", DEFAULT_PRODUCT_VERSION_FILTER)
         ),
         catalog_history_enabled=bool(download_data.get("catalog_history_enabled", False)),
+        verified_downloads=bool(download_data.get("verified_downloads", False)),
+        destination_parent=str(data.get("destination_parent", "")),
         search_request_timeout_seconds=max(
             5,
             int(
@@ -400,6 +406,13 @@ def validate_config(config: DownloadConfig) -> None:
     if config.batch_size < 1:
         raise ValueError("download.batch_size must be at least 1.")
     normalize_product_version_filter(config.product_version_filter)
+    if config.verified_downloads:
+        if config.max_granules is not None:
+            raise ValueError("Verified downloads require a complete catalogue search; narrow dates/tiles instead of limiting results.")
+        if config.product_version_filter != DEFAULT_PRODUCT_VERSION_FILTER:
+            raise ValueError("Verified downloads require the preferred processing-version filter.")
+        if config.collection_short_name not in {"SWOT_L2_HR_Raster_100m_D", "SWOT_L2_HR_Raster_D"}:
+            raise ValueError("Verified dual-catalogue downloads currently support Version D only.")
 
 
 def build_granule_patterns(utm_tiles: Sequence[str]) -> List[str]:
@@ -988,9 +1001,18 @@ def build_download_preview(
     progress_callback: Optional[ProgressCallback] = None,
 ) -> DownloadPreview:
     """Search CMR and normalize matching granules for display/reporting."""
-    if config.catalog_history_enabled:
-        from nasa_catalog_history import search_with_history
-        return search_with_history(config, earthaccess_module, progress_callback)
+    if config.catalog_history_enabled or config.verified_downloads:
+        from nasa_catalog_history import CatalogHistory, history_path, search_with_history
+        collections = ["SWOT_L2_HR_Raster_100m_D", "SWOT_L2_HR_Raster_D"] if config.verified_downloads else None
+        preview = search_with_history(config, earthaccess_module, progress_callback, collections=collections)
+        if config.verified_downloads:
+            snapshot = CatalogHistory(history_path(config.manifest_csv)).snapshot(preview.history_scan_id)
+            if snapshot["status"] != "complete":
+                raise ValueError("NASA catalogue accounting is incomplete; no verified download may start.")
+            from download_integrity import provider_integrity
+            for granule in preview.selected_granules:
+                provider_integrity(granule)
+        return preview
     query = build_download_query(config)
     raw_granules = search_matching_granules(
         config,
@@ -1028,6 +1050,15 @@ def existing_download_path(config: DownloadConfig, granule: DownloadGranule) -> 
     candidate = config.output_folder / granule.file_name
     if not candidate.exists():
         return None
+    if config.verified_downloads:
+        from download_integrity import provider_integrity, verified_file
+        stat = candidate.stat()
+        key = (str(candidate.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, provider_integrity(granule))
+        cached = config._verification_cache.get(key[0])
+        if cached is None or cached[0] != key:
+            cached = (key, verified_file(candidate, granule, effective_manifest_csv(config).parent))
+            config._verification_cache[key[0]] = cached
+        return candidate if cached[1] else None
     return candidate if file_appears_complete(candidate, granule.size_mb) else None
 
 
@@ -1061,7 +1092,7 @@ def move_incomplete_download(config: DownloadConfig, granule: DownloadGranule) -
     if not granule.file_name:
         return None
     candidate = config.output_folder / granule.file_name
-    if not candidate.exists() or file_appears_complete(candidate, granule.size_mb):
+    if not candidate.exists() or existing_download_path(config, granule) is not None:
         return None
     target = next_incomplete_path(candidate)
     candidate.replace(target)
@@ -1237,6 +1268,8 @@ def update_statuses_from_local_files(
     """Mark every preview granule according to current local or manifest completeness."""
     missing: List[DownloadGranule] = []
     for granule in preview.granules:
+        if statuses.get(granule.identity, ("", ""))[0] == "SKIPPED_VERIFIED_EE":
+            continue
         complete_path = local_complete_path(config, granule)
         current_status, current_path = statuses.get(granule.identity, ("", ""))
         if not granule.selected_for_download or current_status == EXCLUDED_OLDER_VERSION_STATUS:
@@ -1248,7 +1281,7 @@ def update_statuses_from_local_files(
             else:
                 statuses[granule.identity] = ("LOCAL_COMPLETE", str(complete_path))
             continue
-        if current_status == "SKIPPED_MANIFEST":
+        if current_status == "SKIPPED_MANIFEST" and not config.verified_downloads:
             statuses[granule.identity] = (current_status, current_path)
             continue
         missing.append(granule)
@@ -1277,7 +1310,7 @@ def preview_statuses_from_existing(
             status = "SKIPPED_EXISTING" if config.skip_existing else "LOCAL_COMPLETE"
             statuses[granule.identity] = (status, str(existing))
             continue
-        if config.skip_manifest_existing and manifest_has_downloaded(manifest, granule):
+        if config.skip_manifest_existing and not config.verified_downloads and manifest_has_downloaded(manifest, granule):
             manifest_row = manifest.get(manifest_key(granule), {})
             statuses[granule.identity] = (
                 "SKIPPED_MANIFEST",
@@ -1370,6 +1403,8 @@ def run_download(
     stop_event: Any = None,
 ) -> DownloadResult:
     """Search for matching granules and download missing files."""
+    from download_integrity import assert_project_not_reset
+    assert_project_not_reset(effective_manifest_csv(config).parent)
     with download_folder_lock(config.output_folder):
         return _run_download(config, earthaccess_module, progress_callback, stop_event)
 
@@ -1381,6 +1416,7 @@ def _run_download(
     stop_event: Any,
 ) -> DownloadResult:
     """Run a download while owning its output-folder lock."""
+    config._verification_cache.clear()
     earthaccess = earthaccess_module or import_earthaccess()
     preview = build_download_preview(
         config,
@@ -1388,7 +1424,7 @@ def _run_download(
         progress_callback=progress_callback,
     )
     history = None
-    if config.catalog_history_enabled:
+    if config.catalog_history_enabled or config.verified_downloads:
         from nasa_catalog_history import CatalogHistory, history_path
         history = CatalogHistory(history_path(config.manifest_csv))
     config.output_folder.mkdir(parents=True, exist_ok=True)
@@ -1400,15 +1436,25 @@ def _run_download(
     skipped: List[Path] = []
     skipped_manifest: List[DownloadGranule] = []
     manifest = read_download_manifest(effective_manifest_csv(config))
+    reusable = set()
+    if config.verified_downloads:
+        from pipeline_verification import VerificationStore, reusable_download_groups
+        store = VerificationStore(effective_manifest_csv(config).parent)
+        store.begin_run("download", config)
+        reusable = reusable_download_groups(preview.selected_granules, store, config.destination_parent)
     for granule in preview.granules:
         if not granule.selected_for_download:
             statuses[granule.identity] = (EXCLUDED_OLDER_VERSION_STATUS, "")
+            continue
+        if granule.file_name in reusable:
+            statuses[granule.identity] = ("SKIPPED_VERIFIED_EE", "")
+            skipped_manifest.append(granule)
             continue
         existing = existing_download_path(config, granule)
         if config.skip_existing and existing is not None:
             skipped.append(existing)
             statuses[granule.identity] = ("SKIPPED_EXISTING", str(existing))
-        elif config.skip_manifest_existing and manifest_has_downloaded(manifest, granule):
+        elif config.skip_manifest_existing and not config.verified_downloads and manifest_has_downloaded(manifest, granule):
             skipped_manifest.append(granule)
             manifest_row = manifest.get(manifest_key(granule), {})
             statuses[granule.identity] = (
@@ -1476,6 +1522,8 @@ def _run_download(
             )
             normalized_paths = [Path(path) for path in paths or []]
             downloaded_files.extend(normalized_paths)
+            for granule in batch:  # A transfer may rewrite bytes without changing file timestamps.
+                config._verification_cache.pop(str((config.output_folder / granule.file_name).resolve()), None)
             for granule in batch:
                 complete_path = local_complete_path(config, granule)
                 if complete_path is not None:
@@ -1488,6 +1536,8 @@ def _run_download(
                 else f"Step 4/4: finished batch of {len(batch)} files"
             )
         except Exception as exc:
+            for granule in batch:
+                config._verification_cache.pop(str((config.output_folder / granule.file_name).resolve()), None)
             for granule in batch:
                 complete_path = local_complete_path(config, granule)
                 if complete_path is not None:
@@ -1512,6 +1562,10 @@ def _run_download(
     report_csv = write_download_report(config, preview, statuses)
     write_download_manifest(config, preview, statuses)
     write_download_workflow_manifest(config, preview, statuses)
+    if config.verified_downloads:
+        # Return only validated files, never merely paths reported by a transfer client.
+        downloaded_files = [config.output_folder / g.file_name for g in preview.selected_granules
+                            if statuses.get(g.identity, ("", ""))[0] == "DOWNLOADED"]
     return DownloadResult(
         preview=preview,
         downloaded_files=downloaded_files,

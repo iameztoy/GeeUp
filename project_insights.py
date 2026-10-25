@@ -96,6 +96,7 @@ class CleanupCandidate:
     protected_by: str
     size_bytes: int = 0
     partial_proof: PartialDownloadProof | None = None
+    verification_guard: dict | None = None
 
 
 @dataclass
@@ -1789,7 +1790,11 @@ def plan_cleanup_candidates(
             size_bytes=proof.signature[0], partial_proof=proof,
         )
 
-    return sorted(candidates.values(), key=lambda item: (item.stage, str(item.path).lower()))
+    result = sorted(candidates.values(), key=cleanup_order)
+    if config.get("download", {}).get("verified_downloads", False):
+        from pipeline_verification import cleanup_guards
+        result = cleanup_guards(dict(config), result)
+    return result
 
 
 def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
@@ -2310,13 +2315,28 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         cached_swot_filename_fields.cache_clear()
 
 
+def cleanup_order(candidate: CleanupCandidate) -> tuple[int, str]:
+    """Keep downstream proof files until their upstream deletions have finished."""
+    return ({"raw": 0, "extracted": 1, "mosaic": 2}.get(candidate.stage, 3), str(candidate.path).lower())
+
+
 def delete_cleanup_candidates(candidates: Iterable[CleanupCandidate]) -> tuple[int, int, List[str]]:
     """Delete candidate files and return deleted count, bytes, and errors."""
     deleted = 0
     bytes_deleted = 0
     errors: List[str] = []
     partials: List[PartialDownloadProof] = []
-    for candidate in candidates:
+    for candidate in sorted(candidates, key=cleanup_order):
+        if candidate.verification_guard is not None:
+            from pipeline_verification import check_cleanup_guard
+            try:
+                valid = check_cleanup_guard(candidate.verification_guard)
+            except (OSError, ValueError) as exc:
+                errors.append(f"{candidate.path}: verification failed: {exc}")
+                continue
+            if not valid:
+                errors.append(f"{candidate.path}: downstream verification changed; preview again.")
+                continue
         if candidate.stage == "partial" or candidate.path.name.startswith("partial_"):
             if candidate.partial_proof is None or candidate.partial_proof.path != candidate.path:
                 errors.append(f"{candidate.path}: Missing partial-download proof; preview again.")

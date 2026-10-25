@@ -55,9 +55,13 @@ download:
   # - all: download every matching remote file.
   product_version_filter: best
 
-  # Optional persistent filename/version history for future searches and downloads.
+  # Verified mode: complete dual-catalogue Version D search, mandatory history,
+  # exact NASA byte count/checksum. Old manifest flags alone cannot skip downloads.
+  # Narrow dates/tiles for pilots; max_granules must be blank and filter = best.
+  verified_downloads: true
+  # Persistent filename/version history (mandatory when verified mode is enabled).
   # This writes nasa_catalog_history.sqlite3 beside manifest_csv; never credentials.
-  catalog_history_enabled: false
+  catalog_history_enabled: true
 
   # Preview and final download status report.
   report_csv: "C:/path/to/SWOT_Processing/00_logs/download_preview.csv"
@@ -256,11 +260,13 @@ upload:
     # Leave null to keep Earth Engine's default.
     default: null
 
-    # Optional band-specific policies.
-    # Example:
+    # The browser upload dialog supports one policy for every band.
+    # Per-band entries are accepted only when identical; differing policies
+    # require a separate API/manifest ingestion workflow.
+    # Example (paired sampled elevation/quality pyramids):
     # per_band:
-    #   B1: "MEAN"
-    #   B2: "MODE"
+    #   b1: "SAMPLE"
+    #   b2: "SAMPLE"
     per_band: {}
 
   retry_attempts: 3

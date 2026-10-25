@@ -712,7 +712,10 @@ def reconcile_preflight_completion(
             complete = complete and uploaded >= total
         # Cached expectations may name an excluded lower version whose higher
         # version already has project proof. Never clear a genuinely new match.
-        plan.pending_downloads = min(plan.pending_downloads, max(0, total - downloaded))
+        if not config.get("download", {}).get("verified_downloads", False):
+            plan.pending_downloads = min(plan.pending_downloads, max(0, total - downloaded))
+        else:
+            complete = complete and plan.pending_downloads == 0
         if complete:
             plan.classification = "already complete"
             plan.message = f"All {total} expected observations have completed-stage proof for these dates."
@@ -729,6 +732,8 @@ def _preflight_automation(
 ) -> AutomationRunState:
     """Run preflight while the caller owns the project operation lock."""
     normalized = normalize_automation_config(config)
+    from download_integrity import assert_project_not_reset
+    assert_project_not_reset(Path(normalized.project_root) / "00_logs")
     state = ensure_run_state(normalized)
     state.started_at = now_text()
     base_config = normalized.base_config
@@ -798,7 +803,7 @@ def _preflight_automation(
                 end_date=normalized.end_date,
                 include_upload=normalized.include_upload,
             )
-            preview = None if normalized.refresh_cmr else cached_update_preview(download_config)
+            preview = None if (normalized.refresh_cmr or download_config.verified_downloads) else cached_update_preview(download_config)
             preview_source = "cached_update_expected"
             if preview is None:
                 preview = preview_builder(download_config)
@@ -812,7 +817,7 @@ def _preflight_automation(
             request_expected.extend(update_preview_rows(preview))
             pending = 0
             for granule in preview.selected_granules:
-                if manifest_has_downloaded(manifest, granule):
+                if not download_config.verified_downloads and manifest_has_downloaded(manifest, granule):
                     continue
                 if existing_download_path(download_config, granule) is not None:
                     continue
@@ -1514,6 +1519,8 @@ def run_automation(
 ) -> AutomationRunState:
     """Run the tile-by-tile automation workflow."""
     normalized = normalize_automation_config(config)
+    from download_integrity import assert_project_not_reset
+    assert_project_not_reset(Path(normalized.project_root) / "00_logs")
     with automation_lock(normalized.project_root), keep_system_awake(
         enabled=normalized.prevent_system_sleep,
         keep_display_awake=normalized.prevent_display_sleep,
@@ -1547,6 +1554,7 @@ def _run_automation_normalized(
     plan_by_tile = {plan.tile: plan for plan in state.tile_plans}
     resume_completed = completed_stage_keys(state)
     latest_results = latest_stage_results_by_key(state)
+    verified_mode = bool(normalized.base_config.get("download", {}).get("verified_downloads", False))
 
     def stages_for_current_run() -> list[str]:
         stages = ["download", "duplicates", "extract", "raw_cleanup", "mosaic", "extracted_cleanup"]
@@ -1571,7 +1579,7 @@ def _run_automation_normalized(
             if stop_event is not None and stop_event.is_set():
                 state.stopped = True
                 break
-            if (tile, stage) in resume_completed:
+            if (tile, stage) in resume_completed and not verified_mode:
                 if progress_callback is not None:
                     progress_callback(
                         tile,
@@ -1606,6 +1614,13 @@ def _run_automation_normalized(
                 )
             append_stage_result(state, result)
             latest_results[(tile, stage)] = result
+            if verified_mode and stage == "download" and result.status == "success":
+                from pipeline_verification import catalogue_selection
+                selection = catalogue_selection(project_manifest_path(tile_config, "download", "manifest_csv").parent,
+                                                tile_config.get("download", {}))
+                if selection is not None:
+                    tile_config.setdefault("mosaic", {})["selection_scan_id"] = selection[0]
+                    write_tile_config(tile_config, tile_config_path)
             if progress_callback is not None:
                 progress_callback(tile, stage, result.status, result.message)
             if result.status == "failed":
@@ -1620,7 +1635,7 @@ def _run_automation_normalized(
         if stop_event is not None and stop_event.is_set():
             state.stopped = True
             break
-        if plan is not None and plan.classification == "already complete" and plan.pending_downloads == 0:
+        if not verified_mode and plan is not None and plan.classification == "already complete" and plan.pending_downloads == 0:
             for stage in stages_for_current_run():
                 if stage in {"upload", "ee_sync", "mosaic_cleanup"} and not normalized.include_upload:
                     continue
@@ -1736,6 +1751,50 @@ def _run_automation_normalized(
         state.unresolved_upload_count = len(unresolved)
         state.unresolved_upload_tiles = sorted(unresolved_tiles)
 
+    if verified_mode and not state.stopped:
+        reconcile_verified_run(state)
     state.finished_at = now_text()
     write_run_state(state)
     return state
+
+
+def reconcile_verified_run(state: AutomationRunState) -> None:
+    """Finish verified runs with explicit per-scope accounting, never lifetime counts."""
+    from nasa_catalog_history import CatalogHistory
+    from pipeline_verification import VerificationStore, load_inventory, pending_local_inputs, project_report, save_report
+    config = state.config.base_config
+    store = VerificationStore(project_manifest_path(config, "download", "manifest_csv").parent)
+    ledger = CatalogHistory(store.logs / "nasa_catalog_history.sqlite3")
+    inventory = load_inventory(store, str(config.get("destination_parent", "")))
+    for tile in state.config.utm_tiles:
+        started = now_text()
+        try:
+            scans = [r for r in ledger.scans() if r["status"] == "complete" and
+                     (scope := json.loads(r["scope"])).get("start") == state.config.start_date and
+                     scope.get("end") == state.config.end_date and scope.get("tiles") == [tile]]
+            if not scans:
+                raise ValueError("No complete retained NASA search for this exact tile/date scope")
+            if not state.config.include_upload:
+                # Keep local-only runs explicit. They cannot certify an EE dataset.
+                missing = pending_local_inputs(store, ledger.snapshot(scans[0]["id"]))
+                if missing:
+                    raise ValueError(f"{len(missing)} preferred inputs lack mosaic receipts; first: {missing[0]}")
+                message = "Local input receipts accounted for; EE upload and pixel verification remain pending."
+                status = "warning"
+            else:
+                if not inventory:
+                    raise ValueError("No complete current EE metadata snapshot; sync before reconciliation")
+                report = project_report(Path(state.config.project_root), store, scans[0]["id"], inventory)
+                path = save_report(store, report)
+                if not report["input_accounting_complete"]:
+                    raise ValueError(f"Exact-input accounting is incomplete; inspect {path}")
+                status = "success" if report["pixel_verification_complete"] else "warning"
+                message = f"Recorded input accounting complete. Full pixel checks {'passed' if status == 'success' else 'remain pending'}. {path}"
+            if status == "warning":
+                state.warnings.append(f"{tile}: {message}")
+            result = AutomationStageResult(state.run_id, tile, "reconciliation", status, started, now_text(), message=message)
+        except Exception as exc:
+            message = str(exc)
+            state.errors.append(f"{tile}: reconciliation incomplete: {message}")
+            result = AutomationStageResult(state.run_id, tile, "reconciliation", "failed", started, now_text(), return_code=2, message=message)
+        append_stage_result(state, result)

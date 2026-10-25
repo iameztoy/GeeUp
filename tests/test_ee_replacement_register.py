@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from contextlib import closing
 from pathlib import Path
@@ -188,7 +189,11 @@ class RegisterTests(unittest.TestCase):
         # Keep source asset IDs distinct while intentionally repeating original lineage.
         b_manifest = manifest(self.b)
         b_manifest[next(iter(b_manifest))]["input_files"] = manifest(self.a)[next(iter(manifest(self.a)))]["input_files"]
-        plan = c.plan_assets([self.a, self.b], COLLECTION, c.Options(), manifest(self.a) | b_manifest)
+        with self.assertRaisesRegex(ValueError, "Duplicate acquisition"):
+            c.plan_assets([self.a, self.b], COLLECTION, c.Options(), manifest(self.a) | b_manifest)
+        # Retain the independent register guard for plans created by older releases.
+        with mock.patch.object(c, "validate_source_identities"):
+            plan = c.plan_assets([self.a, self.b], COLLECTION, c.Options(), manifest(self.a) | b_manifest)
         out = stored(plan["groups"][0], plan)
         self.r.import_plan(plan, DESTINATION)
         self.r.sync_inventory(inventory(DESTINATION, [out]))

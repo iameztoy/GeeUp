@@ -34,7 +34,7 @@ MOSAIC_SCRIPT = PROJECT_ROOT / "ee_mosaic_tool.py"
 DUPLICATE_SCRIPT = PROJECT_ROOT / "swot_duplicate_remover.py"
 PROGRESS_PREFIX = "GEEUP_PROGRESS\t"
 APP_NAME = "SWOTFlow"
-APP_VERSION = "v0.6.1"
+APP_VERSION = "v0.7.3"
 GITHUB_URL = "https://github.com/iameztoy/GeeUp"
 DEFAULT_PROCESSING_ROOT = "./SWOT_Processing"
 DEFAULT_PROCESSING_PATHS = {
@@ -267,6 +267,7 @@ class LauncherApp:
         self.download_collection_var = tk.StringVar(value=download_label)
         self.download_product_filter_var = tk.StringVar(value=download_product_filter_label)
         self.catalog_history_enabled_var = tk.BooleanVar(value=bool(download_data.get("catalog_history_enabled", False)))
+        self.verified_downloads_var = tk.BooleanVar(value=bool(download_data.get("verified_downloads", False)))
         self.download_start_date_var = tk.StringVar(
             value=str(download_data.get("start_date", ""))
         )
@@ -1413,6 +1414,12 @@ class LauncherApp:
             text="Skip granules already recorded in the project download manifest",
             variable=self.download_skip_manifest_existing_var,
         ).grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Checkbutton(options,
+            text="Verified downloads: both NASA catalogues, retained history and exact file checksums",
+            variable=self.verified_downloads_var,
+        ).grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(options, text="Verified mode ignores manifest-only skips. Use a small date/grid scope for tests; leave Max granules blank.",
+                  wraplength=850).grid(row=3, column=0, sticky="w")
 
         preview = ttk.LabelFrame(parent, text="Preview", padding=12)
         preview.grid(row=4, column=0, sticky="nsew", pady=(14, 0))
@@ -2112,8 +2119,23 @@ class LauncherApp:
         self.nasa_history_panel = NasaHistoryPanel(nasa_history, self)
 
         overview.columnconfigure(0, weight=1)
-        overview.rowconfigure(0, weight=1)
-        overview.rowconfigure(1, weight=0)
+        overview.rowconfigure(1, weight=1)
+        evidence = ttk.LabelFrame(overview, text="Verification and consolidation", padding=6)
+        evidence.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        evidence.columnconfigure(0, weight=1)
+        evidence_note = ttk.Label(
+            evidence, justify="left", wraplength=850,
+            text=("Totals below describe recorded processing history. NASA History checks selected inputs and pixel evidence; "
+                  "Consolidation tracks replacements and duplicate findings. Estimated asset savings require verified retirement."),
+        )
+        evidence_note.grid(row=0, column=0, sticky="ew")
+        evidence.bind("<Configure>", lambda event: evidence_note.configure(wraplength=max(250, event.width - 20)))
+        evidence_actions = ttk.Frame(evidence)
+        evidence_actions.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(evidence_actions, text="Input verification / NASA History",
+                   command=lambda: inner.select(nasa_history)).pack(side="left")
+        ttk.Button(evidence_actions, text="Consolidation coverage",
+                   command=lambda: inner.select(consolidation_coverage)).pack(side="left", padx=(8, 0))
         self.stats_metrics_tree = ttk.Treeview(
             overview,
             columns=("metric", "value"),
@@ -2124,17 +2146,17 @@ class LauncherApp:
         self.stats_metrics_tree.heading("value", text="Value")
         self.stats_metrics_tree.column("metric", width=310, anchor="w")
         self.stats_metrics_tree.column("value", width=180, anchor="w")
-        self.stats_metrics_tree.grid(row=0, column=0, sticky="nsew")
+        self.stats_metrics_tree.grid(row=1, column=0, sticky="nsew")
         metrics_scroll = ttk.Scrollbar(
             overview,
             orient="vertical",
             command=self.stats_metrics_tree.yview,
         )
-        metrics_scroll.grid(row=0, column=1, sticky="ns")
+        metrics_scroll.grid(row=1, column=1, sticky="ns")
         self.stats_metrics_tree.configure(yscrollcommand=metrics_scroll.set)
 
         charts = ttk.LabelFrame(overview, text="Plots", padding=8)
-        charts.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        charts.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         charts.columnconfigure(0, weight=1)
         charts.columnconfigure(1, weight=1)
         self.stats_stage_chart_canvas = tk.Canvas(
@@ -3317,6 +3339,7 @@ class LauncherApp:
         self.download_collection_var.set(download_label)
         self.download_product_filter_var.set(download_product_filter_label)
         self.catalog_history_enabled_var.set(bool(download_data.get("catalog_history_enabled", False)))
+        self.verified_downloads_var.set(bool(download_data.get("verified_downloads", False)))
         self.download_start_date_var.set(str(download_data.get("start_date", "")))
         self.download_end_date_var.set(str(download_data.get("end_date", "")))
         self.download_output_var.set(download_data.get("output_folder", raw_downloads))
@@ -4390,6 +4413,8 @@ class LauncherApp:
             batch_size=batch_size,
             product_version_filter=self.selected_download_product_filter(),
             catalog_history_enabled=self.catalog_history_enabled_var.get(),
+            verified_downloads=self.verified_downloads_var.get(),
+            destination_parent=self.destination_var.get().strip(),
             base_dir=PROJECT_ROOT,
         )
 
@@ -4794,6 +4819,7 @@ class LauncherApp:
                 "collection_version_label": self.download_collection_var.get(),
                 "product_version_filter": self.selected_download_product_filter(),
                 "catalog_history_enabled": self.catalog_history_enabled_var.get(),
+                "verified_downloads": self.verified_downloads_var.get(),
                 "output_folder": self.download_output_var.get().strip()
                 or DEFAULT_PROCESSING_PATHS["raw_downloads"],
                 "start_date": self.download_start_date_var.get().strip(),

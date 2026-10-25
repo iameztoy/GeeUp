@@ -359,6 +359,8 @@ def _metadata_files(root: Path) -> Iterable[Path]:
             directories[:] = [name for name in directories if name not in {"upload_artifacts", "chrome-profile"}]
             for name in files:
                 path = Path(current) / name
+                if any(part in {"source_pixel_checks", "native_pixel_checks", "verification_reports"} for part in path.relative_to(root).parts):
+                    continue  # Immutable scientific reports remain historical evidence.
                 if path.suffix.lower() not in {".json", ".yaml", ".yml", ".csv"}:
                     continue
                 if not path.resolve().is_relative_to(root):
@@ -464,6 +466,29 @@ def _remap_database(path: Path, mapper: PathMapper, root: Path, progress: Progre
         return counts
 
 
+def _remap_verification_database(path: Path, mapper: PathMapper) -> None:
+    """Migrate operational indexes transactionally; retain original receipt payloads."""
+    with closing(sqlite3.connect(path)) as db, db:
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        required = {"artifacts", "runs", "cloud"} if path.name == "workflow_verification.sqlite3" else {"checks"}
+        if not required <= tables:
+            raise ValueError("Unsupported verification database schema: " + path.name)
+        db.execute("CREATE TABLE IF NOT EXISTS path_mappings (seq INTEGER PRIMARY KEY, version INTEGER, mappings TEXT)")
+        db.execute("INSERT INTO path_mappings(version,mappings) VALUES (1,?)", (json.dumps(mapper.mappings),))
+        if "artifacts" in tables:
+            rows = db.execute("SELECT DISTINCT path FROM artifacts").fetchall()
+            mapped = [mapper.text(r[0]) for r in rows]
+            if len(set(mapped)) != len(rows):
+                raise ValueError("Relocation would merge distinct artifact paths")
+            # Each original index is rewritten once, including historical revisions.
+            db.execute("CREATE TEMP TABLE relocated_paths (old TEXT, new TEXT)")
+            db.executemany("INSERT INTO relocated_paths VALUES (?,?)", [(r[0], m) for r, m in zip(rows, mapped)])
+            db.execute("UPDATE artifacts SET path=(SELECT new FROM relocated_paths WHERE old=artifacts.path)")
+            db.execute("DROP TABLE relocated_paths")
+        if "checks" in tables:
+            db.execute("CREATE INDEX IF NOT EXISTS checks_filename_id ON checks(filename,id)")
+
+
 def restore_relocation(path: str | Path, progress: Progress = lambda _: None) -> None:
     """Recover an interrupted metadata installation using its durable backup."""
     root = project_root(path)
@@ -491,6 +516,9 @@ def restore_relocation(path: str | Path, progress: Progress = lambda _: None) ->
     progress("Restoring the pre-relocation database and metadata...")
     _backup(backup / DATABASE_FILE_NAME, root / DATABASE_FILE_NAME, progress)
     for source, destination in recovery_files:
+        if destination.suffix == ".sqlite3":
+            _backup(source, destination, progress)
+            continue
         temporary = destination.with_name(destination.name + ".relocation-tmp")
         shutil.copy2(source, temporary)
         os.replace(temporary, destination)
@@ -547,6 +575,7 @@ def _relocate_locked(root: Path, extra_mappings: list[tuple[str, str]], progress
     metadata_files = list(_metadata_files(root))
     directories = _directory_times(root, metadata_files)
     required_space = database.stat().st_size * 6 + sum(path.stat().st_size for path in metadata_files) * 2 + 256 * 1024 * 1024
+    required_space += sum(p.stat().st_size * 6 for p in (root / "00_logs").glob("*verification.sqlite3"))
     if shutil.disk_usage(root).free < required_space:
         raise ValueError(f"Relocation needs at least {required_space / 1024**3:.1f} GiB free for database backups and staging.")
     backup_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8]
@@ -559,6 +588,16 @@ def _relocate_locked(root: Path, extra_mappings: list[tuple[str, str]], progress
     _backup(before / DATABASE_FILE_NAME, after / DATABASE_FILE_NAME, progress)
     counts = _remap_database(after / DATABASE_FILE_NAME, mapper, root, progress)
     files = []
+    for name in ("workflow_verification.sqlite3", "download_verification.sqlite3"):
+        relative = Path("00_logs") / name
+        source = root / relative
+        if source.exists():
+            (before / relative).parent.mkdir(parents=True, exist_ok=True)
+            (after / relative).parent.mkdir(parents=True, exist_ok=True)
+            _backup(source, before / relative, progress)
+            _backup(before / relative, after / relative, progress)
+            _remap_verification_database(after / relative, mapper)
+            files.append(str(relative))
     for source in metadata_files:
         relative = source.relative_to(root)
         progress(f"Rebasing metadata: {relative}")
@@ -577,6 +616,9 @@ def _relocate_locked(root: Path, extra_mappings: list[tuple[str, str]], progress
         _backup(after / DATABASE_FILE_NAME, database, progress)
         for relative in files:
             destination = root / relative
+            if destination.suffix == ".sqlite3":
+                _backup(after / relative, destination, progress)
+                continue
             temporary = destination.with_name(destination.name + ".relocation-tmp")
             shutil.copy2(after / relative, temporary)
             os.replace(temporary, destination)

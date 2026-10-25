@@ -125,6 +125,8 @@ class ExtractConfig:
     manifest_csv: Path = Path(DEFAULT_CONFIG["extract"]["manifest_csv"])
     errors_csv: Path = Path(DEFAULT_CONFIG["extract"]["errors_csv"])
     base_dir: Path = Path.cwd()
+    verified_workflow: bool = False
+    verification_run_id: str = ""
 
 
 @dataclass
@@ -209,6 +211,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> ExtractConfig:
             base_dir,
         ),
         base_dir=base_dir,
+        verified_workflow=bool(data.get("download", {}).get("verified_downloads", False)),
     )
     validate_config(config)
     return config
@@ -659,7 +662,7 @@ def write_extract_workflow_manifest(
     upsert_workflow_manifest(workflow_manifest_path(config.manifest_csv), rows)
 
 
-def process_one_file(
+def _process_one_file(
     source: ExtractSource,
     config: ExtractConfig,
     gdal: Any,
@@ -739,6 +742,37 @@ def process_one_file(
     }
 
 
+def process_one_file(
+    source: ExtractSource,
+    config: ExtractConfig,
+    gdal: Any,
+    existing_manifest: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Require current byte evidence for verified-mode extraction reuse."""
+    if not config.verified_workflow:
+        return _process_one_file(source, config, gdal, existing_manifest)
+    from dataclasses import replace
+    from pipeline_verification import VerificationStore
+    store = VerificationStore(config.manifest_csv.parent)
+    output = build_output_path(source.path, config.output_folder, config.target_crs_mode)
+    reusable = config.skip_existing and store.reusable("extract", output, [source.path], config)
+    effective = replace(config, skip_existing=bool(reusable), skip_manifest_existing=False)
+    if output.exists() and not reusable:
+        remove_geotiff_and_sidecars(output)
+    result = _process_one_file(source, effective, gdal, existing_manifest)
+    if not reusable:
+        driver = gdal or require_gdal()
+        ds = driver.Open(str(output))
+        try:
+            grid = {"transform": list(ds.GetGeoTransform()), "crs": ds.GetProjectionRef(),
+                    "width": ds.RasterXSize, "height": ds.RasterYSize, "bands": ds.RasterCount}
+        finally:
+            ds = None
+        run_id = config.verification_run_id or store.begin_run("extract", config)
+        store.record_artifact("extract", output, [source.path], config, run_id, grid)
+    return result
+
+
 def process_one_file_worker(
     index: int,
     source: ExtractSource,
@@ -807,6 +841,11 @@ def run_extract(
     if dry_run:
         return 0, plan, [], []
 
+    if config.verified_workflow:
+        from dataclasses import asdict
+        from pipeline_verification import VerificationStore
+        config.verification_run_id = VerificationStore(config.manifest_csv.parent).begin_run("extract", {
+            **asdict(config), "requested_workers": config.workers, "workers": max(1, min(config.workers, len(plan.selected)))})
     config.output_folder.mkdir(parents=True, exist_ok=True)
     results: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = unmatched_error_rows(plan)

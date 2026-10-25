@@ -90,6 +90,26 @@ def swot_tif_name(tile: str) -> str:
 
 
 class GuiLayoutTests(unittest.TestCase):
+    def test_statistics_evidence_shortcuts_only_navigate_existing_panels(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            notebook = app.statistics_notebook
+            buttons = {button.cget("text"): button for button in collect_widgets(notebook, ttk.Button)}
+            with mock.patch.object(app.nasa_history_panel, "work") as nasa_work, \
+                 mock.patch.object(app.consolidation_coverage_panel, "work") as register_work:
+                buttons["Input verification / NASA History"].invoke()
+                self.assertEqual(notebook.tab(notebook.select(), "text"), "NASA History")
+                buttons["Consolidation coverage"].invoke()
+                self.assertEqual(notebook.tab(notebook.select(), "text"), "Consolidation")
+                nasa_work.assert_not_called()
+                register_work.assert_not_called()
+            self.assertIn("Verification and consolidation", collect_label_texts(notebook))
+        finally:
+            root.update_idletasks()
+            root.destroy()
+
     def test_nasa_history_preview_compare_and_future_run_setting_are_isolated(self) -> None:
         import json
         from tests.test_download_tool import FakeGranule, FakePagedEarthaccess, granule_name
@@ -135,10 +155,28 @@ class GuiLayoutTests(unittest.TestCase):
                     app.catalog_history_enabled_var.set(True)
                     self.assertTrue(app.build_config()["download"]["catalog_history_enabled"])
                     self.assertTrue(app.download_config_from_ui().catalog_history_enabled)
+                    panel.reconcile_stages()
+                    self.assertEqual(len(panel.stage_table.get_children()),1)
+                    self.assertFalse(panel.verification_report["complete"])
+                    self.assertEqual(panel.verification_report["rows"][0]["state"],"download_missing_or_unverified")
+                    self.assertIn("No verified download receipt", panel.stage_table.item("0", "values"))
+                    self.assertIn("Selected search only: 2026-01-01 to 2026-01-31", panel.summary.get())
+                    self.assertIn("EE inventory:", panel.status.get())
+                    panel.verification_report["rows"][0]["asset_ids"] = [a["id"]]
+                    panel.stage_table.selection_set("0")
+                    reference = project/"local_name_different_from_asset.tif"
+                    with mock.patch("pipeline_verification.VerificationStore.artifacts",return_value={str(reference):{"stage":"mosaic","path":str(reference)}}), \
+                         mock.patch("project_database.read_project_rows",return_value=[{"asset_id":a["id"],"local_file":str(reference)}]), \
+                         mock.patch("native_pixel_verification.check_native_pixels",return_value={"passed":True}) as pixel_check, \
+                         mock.patch.object(panel,"show_details"):
+                        panel.check_pixels()
+                        self.assertEqual(pixel_check.call_args.args[1],reference)
                 panel.clear()
                 self.assertFalse(panel.inventory)
                 self.assertFalse(panel.report)
                 self.assertFalse(panel.searches.get_children())
+                self.assertFalse(panel.stage_table.get_children())
+                self.assertFalse(panel.verification_report)
         finally:
             root.update_idletasks()
             root.destroy()
@@ -306,7 +344,7 @@ class GuiLayoutTests(unittest.TestCase):
                 cleanup_tab,
             ) = notebook.winfo_children()
             self.assertIn("Current Project", collect_label_texts(home_tab))
-            self.assertIn("v0.6.1", {app.home_banner_canvas.itemcget(item, "text") for item in app.home_banner_canvas.find_all()
+            self.assertIn("v0.7.3", {app.home_banner_canvas.itemcget(item, "text") for item in app.home_banner_canvas.find_all()
                                       if app.home_banner_canvas.type(item) == "text"})
             self.assertIn("Project And Documentation", collect_label_texts(home_tab))
             self.assertIn("Workflow Shortcuts", collect_label_texts(home_tab))
@@ -1145,6 +1183,9 @@ class GuiLayoutTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp:
                 project_root = Path(temp) / "Stats"
                 project = create_project(project_root, "Stats", app.build_config())
+                # This legacy statistics fixture has only manifest flags, no byte
+                # receipts. Verified mode must withhold these cleanup proposals.
+                project.config["download"]["verified_downloads"] = False
                 app.apply_project(project, write_config=False)
                 raw = project_root / "01_raw_downloads" / "raw.nc"
                 extracted = project_root / "02_extracted_geotiffs" / "raw.tif"
@@ -1171,6 +1212,10 @@ class GuiLayoutTests(unittest.TestCase):
                 cleanup_rows = app.cleanup_tree.get_children()
                 self.assertIn(("Raw NetCDF files on disk", "1"), metrics)
                 self.assertEqual(len(cleanup_rows), 1)
+                app.verified_downloads_var.set(True)
+                app.refresh_project_statistics()
+                self.assertFalse(app.cleanup_tree.get_children())
+                app.verified_downloads_var.set(False)
                 self.assertIn("Project statistics refreshed", app.statistics_status_var.get())
                 self.assertTrue(
                     (project_root / "00_logs" / "statistics" / "project_statistics_snapshot.json").exists()

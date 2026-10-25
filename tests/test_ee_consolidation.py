@@ -34,6 +34,14 @@ def manifest(a, crids=("PGD0",)):
 
 
 class PlanTests(unittest.TestCase):
+    def test_initial_plan_refuses_two_versions_of_one_acquisition(self):
+        a = asset()
+        b = asset(counter="02")
+        lineage = {**manifest(a), **manifest(b)}
+        for separate in (False, True):
+            with self.assertRaisesRegex(ValueError, "Duplicate acquisition"):
+                c.plan_assets([a, b], COLLECTION, c.Options(separate_versions=separate), lineage)
+
     def test_grid_zone_hemisphere_alignment_and_tile_modes(self):
         assets = [asset(), asset(tile="UTM31Q", x=500150), asset(tile="UTM31M", crs="EPSG:32731"),
                   asset(tile="UTM32P", crs="EPSG:32632"), asset(tile="UTM31R", x=500000)]

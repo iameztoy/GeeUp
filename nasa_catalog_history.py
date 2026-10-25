@@ -307,6 +307,10 @@ def search_with_history(config: Any, earthaccess: Any = None, progress: Callable
             if (not parsed or not g.file_name.startswith("SWOT_L2_HR_Raster_100m_")
                     or g.utm_tile not in scope["tiles"]):
                 raise ValueError("NASA returned an unrecognized or out-of-scope product; inspect saved page")
+            if config.verified_downloads and g.file_name in granules:
+                from download_integrity import provider_integrity
+                if provider_integrity(g) != provider_integrity(granules[g.file_name]):
+                    raise ValueError("NASA catalogue aliases disagree on file size/checksum; review required")
             granules.setdefault(g.file_name, g)
         returned = list(granules.values())
         eligible = returned if config.max_granules is None else returned[:config.max_granules]

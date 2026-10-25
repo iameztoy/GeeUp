@@ -50,6 +50,21 @@ def swot_name(
 
 
 class MosaicPlanningTests(unittest.TestCase):
+    def test_verified_workflow_refuses_to_drop_incompatible_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / swot_name(scene="000A")).touch()
+            (root / swot_name(scene="001A")).touch()
+            config = MosaicConfig(input_folder=root, output_folder=root / "out", require_all_inputs=True,
+                                  report_csv=root / "report.csv", manifest_csv=root / "manifest.csv")
+            group = build_mosaic_plan(config).groups[0]
+            excluded = ee_mosaic_tool.SourceExclusion(group.sources[1], "different resolution")
+            with mock.patch.object(ee_mosaic_tool, "select_compatible_sources", return_value=([group.sources[0]], [excluded])):
+                code, rows = run_mosaic(config)
+            self.assertEqual(code, 2)
+            self.assertIn("refuses a partial mosaic", rows[0]["message"])
+            self.assertFalse(group.output_file.exists())
+
     def test_groups_by_cycle_pass_start_date_and_exact_utm_token(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -414,11 +429,36 @@ class MosaicPlanningTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 2)
             self.assertEqual(rows[0]["status"], "STALE_EXISTS")
+            # Repeated checks must not relabel old pixels with the new signature.
+            exit_code, rows = run_mosaic(config, dry_run=False)
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(rows[0]["status"], "STALE_EXISTS")
             self.assertEqual(rows[0]["stale"], "true")
 
 
 @unittest.skipUnless(GDAL_AVAILABLE, f"GDAL runtime unavailable: {GDAL_CHECK.stderr}")
 class MosaicGdalRuntimeTests(unittest.TestCase):
+    def test_native_grid_rejects_half_pixel_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_two_band_geotiff(root / swot_name(scene="000A"), 10, 0, x_origin=0)
+            self.write_two_band_geotiff(root / swot_name(scene="001A"), 20, 0, x_origin=0.5)
+            code, rows, output = self.run_mosaic_cli(root)
+            self.assertEqual(code, 2, output)
+            self.assertIn("not pixel aligned", rows[0]["message"])
+
+    def test_lowest_quality_keeps_elevation_paired_and_ties_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_custom_two_band_geotiff(root / swot_name(scene="000A"),
+                [[10, 10], [10, 10]], [[2, 0], [3, 255]])
+            self.write_custom_two_band_geotiff(root / swot_name(scene="001A", start="20250707T011000", end="20250707T011100"),
+                [[20, 20], [20, 20]], [[0, 0], [3, 1]])
+            code, rows, output = self.run_mosaic_cli(root)
+            self.assertEqual(code, 0, output)
+            self.assertEqual(self.read_all_bands(Path(rows[0]["output_file"]))["array"],
+                [[[20, 10], [10, 20]], [[0, 0], [3, 1]]])
+
     def run_gdal_python(self, code: str, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(DEFAULT_GDAL_PYTHON), "-c", code, *args],

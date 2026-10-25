@@ -12,9 +12,18 @@ them, attach them to GitHub releases, or force-add ignored files. The local
 investigation directory may include frozen application source copies for replay;
 those copies are evidence, not the development version.
 
+Create investigation scripts and their outputs directly in an external folder
+(for example, a sibling `GeeUp-investigations/` directory), with a separate folder
+for each pilot. Do not use the application checkout as temporary investigation
+storage. Keep real project folders on the user's selected data drive or another
+external location. Maintained application regression tests stay in `tests/` and
+use isolated temporary fixtures.
+
 `outputs/` and known investigation filenames are ignored as a second safeguard.
 A local compatibility junction may preserve old report addresses after moving
 files; it must remain ignored and must not be included in release archives.
+Use the external paths directly for all new work; the junction is only for old
+evidence references and does not store a second copy of the investigation data.
 Never recursively clean a junction's contents to remove the junction itself.
 
 ## Durable application data

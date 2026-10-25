@@ -470,6 +470,7 @@ class AppConfig:
     artifacts: ArtifactConfig
     mosaic_manifest_csv: Optional[Path]
     base_dir: Path
+    verified_workflow: bool = False
 
 
 @dataclass
@@ -491,6 +492,7 @@ class UploadItem:
     processing_level: str = ""
     best_processing_level: str = ""
     conflicting_asset_id: str = ""
+    ingestion_revision: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1026,6 +1028,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
             else None
         ),
         base_dir=base_dir,
+        verified_workflow=bool(data.get("download", {}).get("verified_downloads", False)),
     )
     validate_config(config)
     return config
@@ -1252,6 +1255,8 @@ class EarthEngineUIUploader:
 
     def run(self) -> int:
         """Run the upload workflow and export compatibility reports once."""
+        from download_integrity import assert_project_not_reset
+        assert_project_not_reset(self.config.artifacts.report_csv.parent)
         try:
             return self._run()
         finally:
@@ -1424,6 +1429,35 @@ class EarthEngineUIUploader:
 
         for item in items:
             existing_status = self.report.get_status(item.asset_id)
+            if self.config.verified_workflow and item.upload_selected:
+                from pipeline_verification import VerificationStore, active_proofs, artifact_current
+                if not self.config.mosaic_manifest_csv:
+                    raise ValueError("Verified upload requires the project mosaic manifest path")
+                store = VerificationStore(self.config.mosaic_manifest_csv.parent)
+                proof = store.artifact(item.local_file)
+                if not proof or proof["stage"] != "mosaic" or not artifact_current(proof):
+                    raise ValueError("Upload blocked: missing/changed mosaic byte proof for " + item.local_file.name)
+                if self.ee_inventory_synced and item.asset_id in self.ee_existing_asset_ids:
+                    from pipeline_verification import load_inventory, revision_matches
+                    if not hasattr(self, "_verified_inventory"):
+                        self._verified_inventory = {a["id"]: a for a in load_inventory(store, self.config.destination_parent).get("assets", [])}
+                    asset = self._verified_inventory.get(item.asset_id, {})
+                    if not asset or not revision_matches(store, proof, asset):
+                        raise ValueError("Existing EE revision is unverified or differs from the local mosaic: " + item.asset_id +
+                                         ". Run a full pixel check or prepare an explicit replacement; presence alone cannot skip upload.")
+                if not hasattr(self, "_verified_active_inputs"):
+                    self._verified_active_inputs = active_proofs(store, self.config.destination_parent)
+                active = self._verified_active_inputs
+                if proof["sources"] and all(active.get(n, {}).get("checksum") == value for n, value in proof["sources"].items()):
+                    self.resume_skipped_assets.append(item.asset_id)
+                    report_rows.append(self.make_report_row(item=item, submit_time="", detected_task_name="",
+                        final_status="SKIPPED_VERIFIED_REPLACEMENT", error_message="Exact inputs already represented by current full-pixel evidence: " +
+                        ", ".join(sorted({active[n]["asset_id"] for n in proof["sources"]}))))
+                    continue
+                represented_identities = {product_identity_key(n) for n in active}
+                if any(product_identity_key(n) in represented_identities for n in proof["sources"]):
+                    raise ValueError("Upload contains observations already active in verified EE assets. Use an explicit affected-group replacement; "
+                                     "do not add a partially duplicated mosaic: " + item.local_file.name)
             if self.ee_inventory_synced and item.asset_id in self.ee_existing_asset_ids:
                 item.ee_asset_exists = True
                 item.ee_verified_at = now_iso()
@@ -1566,6 +1600,13 @@ class EarthEngineUIUploader:
     ) -> bool:
         """Return whether a previous report status should skip this upload."""
         status = str(existing_status or "").strip().upper()
+        if self.config.verified_workflow:
+            if self.ee_inventory_synced and asset_id in self.ee_existing_asset_ids:
+                return True
+            # A historical READY/RUNNING/EE_VERIFIED_EXISTS flag cannot hide a
+            # missing image. Only a currently tracked ingestion justifies waiting.
+            return bool(asset_id and asset_id in self.ee_operations_by_asset and
+                        not self.ee_operations_by_asset[asset_id].done)
         if not self.config.execution.resume or status not in RESUME_SKIP_STATUSES:
             return False
         if not self.ee_inventory_synced:
@@ -1590,7 +1631,7 @@ class EarthEngineUIUploader:
 
     def sync_earth_engine_inventory(self) -> None:
         """List target Earth Engine assets and cache them for resume decisions."""
-        if not self.config.upload.ee_sync_before_upload:
+        if not self.config.upload.ee_sync_before_upload and not self.config.verified_workflow:
             return
         ee = import_ee()
         initialize_earth_engine(ee, self.config.destination_parent)
@@ -1598,6 +1639,8 @@ class EarthEngineUIUploader:
         records = self.list_earth_engine_assets(ee)
         self.write_asset_inventory(records)
         self.ee_inventory_synced = True
+        if hasattr(self, "_verified_active_inputs"):
+            del self._verified_active_inputs
         self.ee_existing_asset_ids = {
             record.asset_id for record in records if record.asset_type in {"IMAGE", ""}
         }
@@ -1776,8 +1819,8 @@ class EarthEngineUIUploader:
                         "ee_asset_exists": "yes",
                         "ee_verified_at": verified_at,
                         "verification_source": "ee.data.listAssets",
-                        "final_status": EE_VERIFIED_EXISTS_STATUS,
-                        "error_message": "Asset exists in the target Earth Engine collection.",
+                        "final_status": self.existing_revision_status(Path(existing.get("local_file", "")), asset_id),
+                        "error_message": "Asset exists; revision verification is reported separately.",
                     }
                 )
                 changed_rows.append(row)
@@ -1857,7 +1900,7 @@ class EarthEngineUIUploader:
                     item=item,
                     submit_time="",
                     detected_task_name="",
-                    final_status=EE_VERIFIED_EXISTS_STATUS,
+                    final_status=self.existing_revision_status(file_path, asset_id),
                     error_message="Asset exists in the target Earth Engine collection.",
                 )
             )
@@ -1898,7 +1941,7 @@ class EarthEngineUIUploader:
                     item=item,
                     submit_time=existing.get("submit_time", ""),
                     detected_task_name=existing.get("detected_task_name", ""),
-                    final_status=EE_VERIFIED_EXISTS_STATUS,
+                    final_status=self.existing_revision_status(item.local_file, asset_id),
                     error_message="Asset exists in the target Earth Engine collection.",
                 )
             )
@@ -1910,13 +1953,27 @@ class EarthEngineUIUploader:
             )
         return len(verified_rows)
 
+    def existing_revision_status(self, local_file: Path, asset_id: str) -> str:
+        """Keep EE presence distinct from evidence of the submitted local revision."""
+        if not self.config.verified_workflow:
+            return EE_VERIFIED_EXISTS_STATUS
+        from pipeline_verification import VerificationStore, revision_matches
+        if not self.config.mosaic_manifest_csv:
+            return "EXISTING_REVISION_UNVERIFIED"
+        store = VerificationStore(self.config.mosaic_manifest_csv.parent)
+        proof = store.artifact(local_file)
+        asset = getattr(self, "_verified_inventory", {}).get(asset_id)
+        return (EE_VERIFIED_EXISTS_STATUS if proof and asset and revision_matches(store, proof, asset)
+                else "EXISTING_REVISION_UNVERIFIED")
+
     def list_earth_engine_assets(self, ee: Any) -> List[AssetInventoryRecord]:
         """Return direct child assets from the configured destination parent."""
         records: List[AssetInventoryRecord] = []
+        full_assets: list[dict] = []
         params: Dict[str, str] = {
             "parent": self.config.destination_parent,
             "pageSize": str(self.config.upload.ee_asset_inventory_page_size),
-            "view": "BASIC",
+            "view": "FULL" if self.config.verified_workflow else "BASIC",
         }
         while True:
             try:
@@ -1928,10 +1985,18 @@ class EarthEngineUIUploader:
                 normalize_asset_record(asset)
                 for asset in response.get("assets", [])
             )
+            full_assets.extend(response.get("assets", []))
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
             params["pageToken"] = str(page_token)
+        if self.config.verified_workflow and self.config.mosaic_manifest_csv:
+            from pipeline_verification import VerificationStore, save_inventory, utc_now
+            save_inventory(VerificationStore(self.config.mosaic_manifest_csv.parent),
+                           {"collection": self.config.destination_parent, "finished_utc": utc_now(), "assets": full_assets})
+            self._verified_inventory = {a["id"]: a for a in full_assets}
+            if hasattr(self, "_verified_active_inputs"):
+                del self._verified_active_inputs
         return records
 
     def write_asset_inventory(self, records: Sequence[AssetInventoryRecord]) -> None:
@@ -2426,8 +2491,21 @@ class EarthEngineUIUploader:
                 )
                 self.ensure_assets_tab()
                 self.open_image_upload_dialog()
+                if self.config.verified_workflow:
+                    from pipeline_verification import VerificationStore
+                    store = VerificationStore(self.config.mosaic_manifest_csv.parent)
+                    proof = store.artifact(item.local_file)
+                    if not proof:
+                        raise ValueError("Missing mosaic proof before submission")
+                    item.ingestion_revision = store.prepare_ingestion(item.asset_id, proof)
                 self.populate_upload_dialog(item)
+                if self.config.verified_workflow:
+                    from pipeline_verification import artifact_current
+                    if not artifact_current(proof):
+                        raise ValueError("Local mosaic changed while preparing the upload")
                 outcome = self.submit_upload_dialog(item)
+                if self.config.verified_workflow:
+                    store.record_ingestion({**item.ingestion_revision, "phase": "submitted", "task_id": outcome.task_name})
                 self.report.upsert(
                     self.make_report_row(
                         item=item,
@@ -3138,6 +3216,10 @@ class EarthEngineUIUploader:
         default_policy = self.config.upload.pyramiding_policy.default
         if not default_policy and not self.config.upload.pyramiding_policy.per_band:
             return True
+        if any(str(policy).strip().upper() != str(default_policy or "").strip().upper()
+               for policy in self.config.upload.pyramiding_policy.per_band.values()):
+            raise ValueError("This browser uploader cannot apply different per-band pyramiding policies. "
+                             "Choose the same supported global policy for both bands; no upload was submitted.")
 
         if default_policy:
             desired = default_policy.strip().upper()
@@ -3159,7 +3241,7 @@ class EarthEngineUIUploader:
 
                 const items = Array.from(listbox.querySelectorAll('paper-item'));
                 const index = items.findIndex((item) => (item.innerText || item.textContent || '').trim().toUpperCase() === arguments[0]);
-                if (index < 0) return {{ok: false, reason: `Value not available: ${arguments[0]}`}};
+                if (index < 0) return {{ok: false, reason: `Value not available: ${{arguments[0]}}`}};
 
                 listbox.selected = index;
                 menuLight.value = arguments[0];
@@ -3178,11 +3260,6 @@ class EarthEngineUIUploader:
                 reason = result.get("reason") if isinstance(result, dict) else "Unknown UI error."
                 raise RetryableUIError(f"Could not set the global pyramiding policy. {reason}")
 
-        if self.config.upload.pyramiding_policy.per_band:
-            self.logger.warning(
-                "Band-specific pyramiding policies are not mapped for this Earth Engine upload dialog layout. "
-                "Only the global default was applied."
-            )
         return True
 
     def parse_metadata_for_item(self, item: UploadItem, required: bool = False) -> ParsedMetadata:
@@ -3214,6 +3291,11 @@ class EarthEngineUIUploader:
     def apply_metadata_properties(self, item: UploadItem) -> None:
         """Apply configured asset metadata in the Earth Engine upload dialog."""
         parsed = self.parse_metadata_for_item(item, required=True)
+        if self.config.verified_workflow:
+            from pipeline_verification import ingestion_properties
+            if parsed.status != "METADATA_PARSED" or not getattr(item, "ingestion_revision", None):
+                raise ValueError("Verified upload requires filename metadata and a prepared ingestion revision")
+            parsed.properties.update(ingestion_properties(item.ingestion_revision))
         if parsed.status != "METADATA_PARSED":
             if parsed.error_message:
                 self.logger.warning("%s", parsed.error_message)

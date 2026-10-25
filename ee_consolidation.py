@@ -243,6 +243,19 @@ def contributors(group: dict) -> list[dict]:
     return group.get("contributors", group["sources"])
 
 
+def validate_source_identities(sources: list[dict]) -> None:
+    """Refuse ambiguous duplicate observations before any consolidation export."""
+    from swot_metadata import product_identity_key
+    seen = set()
+    for source in sources:
+        for original in source["original_inputs"]:
+            identity = product_identity_key(original["filename"])
+            if identity and identity in seen:
+                raise ValueError("Duplicate acquisition/processing versions require an explicit replacement: " + original["filename"])
+            if identity:
+                seen.add(identity)
+
+
 def plan_assets(assets: list[dict], collection: str, options: Options,
                 lineage: dict[str, dict] | None = None) -> dict:
     """Build a reproducible plan; excluded/unselected/singleton assets stay in place."""
@@ -266,6 +279,7 @@ def plan_assets(assets: list[dict], collection: str, options: Options,
             grouped[grouping_key(source, options)].append(source)
         except (ValueError, KeyError, TypeError) as exc:
             excluded.append({"asset_id": asset_id, "reason": str(exc)})
+    validate_source_identities([source for sources in grouped.values() for source in sources])
     groups, singletons = [], []
     for key, sources in sorted(grouped.items()):
         sources.sort(key=lambda s: (s["start"], s["asset"]["id"]))

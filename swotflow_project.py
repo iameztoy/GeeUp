@@ -192,6 +192,11 @@ def create_project(root: str | Path, name: str, base_config: Mapping[str, Any]) 
         download_history=[],
         created_at=now_iso(),
     )
+    # New projects start with verification; opening an existing project preserves
+    # its settings. Keep source files during the initial validation exercises.
+    project.config.setdefault("download", {})["verified_downloads"] = True
+    project.config["download"]["catalog_history_enabled"] = True
+    project.config.setdefault("automation", {})["cleanup_enabled"] = False
     ProjectDatabase(root_path / DATABASE_FILE_NAME)
     save_project(project)
     return project

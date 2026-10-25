@@ -19,7 +19,7 @@ import yaml
 from gdal_runtime import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
 from project_database import dataset_for_path, read_project_rows, upsert_project_rows
 from swot_download_tool import normalize_utm_tiles
-from swot_metadata import ParsedMetadata, parse_swot_l2_hr_raster_metadata, swot_product_rank
+from swot_metadata import ParsedMetadata, parse_swot_l2_hr_raster_metadata, swot_product_rank, product_identity_key, processing_level_rank
 from workflow_manifest import (
     source_signature,
     timestamp_text,
@@ -139,6 +139,11 @@ class MosaicConfig:
     mixed_crid_report_csv: Optional[Path] = None
     workers: int = 1
     utm_tiles: List[str] = field(default_factory=list)
+    require_all_inputs: bool = False
+    verified_workflow: bool = False
+    verification_run_id: str = ""
+    selection_scan_id: str = ""
+    expected_sources: Optional[Dict[str, dict]] = None
     base_dir: Path = Path.cwd()
 
 
@@ -242,9 +247,16 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> MosaicConfig:
         ),
         workers=normalize_workers(mosaic_data.get("workers", 1)),
         utm_tiles=normalize_utm_tiles(mosaic_data.get("utm_tiles", [])),
+        require_all_inputs=bool(data.get("download", {}).get("verified_downloads", False)),
+        verified_workflow=bool(data.get("download", {}).get("verified_downloads", False)),
         base_dir=base_dir,
     )
     validate_config(config)
+    if config.verified_workflow:
+        from pipeline_verification import catalogue_selection
+        selection = catalogue_selection(config.manifest_csv.parent, data.get("download", {}), mosaic_data.get("selection_scan_id", ""))
+        if selection is not None:
+            config.selection_scan_id, config.expected_sources = selection
     return config
 
 
@@ -360,6 +372,7 @@ def build_mosaic_plan(config: MosaicConfig) -> MosaicPlan:
     grouped: Dict[MosaicGroupKey, List[MosaicSource]] = {}
     report_rows: List[Dict[str, str]] = []
     selected_tiles = set(config.utm_tiles)
+    versions: Dict[str, List[MosaicSource]] = {}
 
     for file_path in collect_input_files(config):
         try:
@@ -385,9 +398,35 @@ def build_mosaic_plan(config: MosaicConfig) -> MosaicPlan:
         source_tile = str(metadata.fields.get("coordinate_system", "") or "").upper()
         if selected_tiles and source_tile not in selected_tiles:
             continue
-        grouped.setdefault(group_key(metadata, config), []).append(
-            MosaicSource(path=file_path, metadata=metadata)
-        )
+        versions.setdefault(product_identity_key(file_path), []).append(MosaicSource(path=file_path, metadata=metadata))
+
+    from pipeline_verification import product_name, VerificationStore
+    expected_by_identity = {product_identity_key(n): n for n in config.expected_sources or {}}
+    store = VerificationStore(config.manifest_csv.parent)
+    for identity, sources in versions.items():
+        if config.expected_sources is not None:
+            wanted = expected_by_identity.get(identity)
+            eligible = [s for s in sources if product_name(s.path) == wanted]
+            if wanted and not eligible:
+                raise ValueError("Preferred catalogue version is missing from extracted inputs: " + wanted)
+        else:
+            best = max(processing_level_rank(s.path) for s in sources)
+            eligible = [s for s in sources if processing_level_rank(s.path) == best]
+        if len(eligible) > 1:
+            raise ValueError("Ambiguous equal-rank/duplicate extracted versions: " + ", ".join(str(s.path) for s in eligible))
+        chosen = eligible[0] if eligible else None
+        for source in sources:
+            if source is not chosen:
+                report_rows.append(report_row(status="FILTERED_PROCESSING_VERSION" if chosen else "FILTERED_CATALOGUE_SCOPE",
+                    message=("Preferred input: " + chosen.path.name if chosen else "Not selected in catalogue snapshot " + config.selection_scan_id),
+                    input_files=[source.path]))
+        if chosen:
+            if config.expected_sources is not None:
+                proof = store.artifact(chosen.path)
+                wanted = product_name(chosen.path)
+                if not proof or not config.expected_sources[wanted] or proof["sources"].get(wanted) != config.expected_sources[wanted]:
+                    raise ValueError("Extraction does not match selected NASA checksum: " + wanted)
+            grouped.setdefault(group_key(chosen.metadata, config), []).append(chosen)
 
     groups = []
     for key, sources in sorted(grouped.items(), key=lambda item: group_sort_key(item[0])):
@@ -409,7 +448,7 @@ def mosaic_record_id(group: MosaicGroup) -> str:
 
 def group_source_signature(group: MosaicGroup) -> str:
     """Return a signature for the current source membership of a mosaic group."""
-    return source_signature([source.path for source in group.sources])
+    return "paired-lowest-quality-v2:" + source_signature([source.path for source in group.sources])
 
 
 def read_mosaic_manifest(path: Path) -> Dict[str, Dict[str, str]]:
@@ -460,7 +499,11 @@ def write_mosaic_manifest(config: MosaicConfig, rows: Iterable[Dict[str, str]]) 
         if not key:
             continue
         previous = existing.get(key, {column: "" for column in REPORT_COLUMNS})
+        previous_signature = previous.get("source_signature", "")
         previous.update(row)
+        if row.get("status") == "STALE_EXISTS":
+            # A warning must never relabel unchanged old pixels as newly built.
+            previous["source_signature"] = previous_signature
         previous["updated_at"] = timestamp_text()
         existing[key] = previous
     upsert_project_rows(
@@ -564,9 +607,17 @@ def preflight_mosaic_group(
 
     if group.output_file.exists() and not config.overwrite:
         stale = bool(previous_signature and previous_signature != signature)
+        if config.verified_workflow:
+            from pipeline_verification import VerificationStore
+            if not VerificationStore(config.manifest_csv.parent).reusable(
+                "mosaic", group.output_file, [s.path for s in group.sources], config
+            ):
+                stale = True
+        if config.require_all_inputs and not mosaic_manifest_completed(manifest_row):
+            stale = True
         status = "STALE_EXISTS" if stale else "SKIPPED_EXISTS"
         message = (
-            "Output exists, but the current source set differs from the recorded mosaic manifest. "
+            "Output exists without current proof for this source set and mosaic algorithm. "
             "Enable overwrite or remove the output to rebuild."
             if stale
             else "Output exists and overwrite is disabled."
@@ -583,6 +634,7 @@ def preflight_mosaic_group(
 
     if (
         config.skip_manifest_existing
+        and not config.require_all_inputs
         and mosaic_manifest_completed(manifest_row)
         and previous_signature == signature
     ):
@@ -603,10 +655,12 @@ def preflight_mosaic_group(
     return None, signature
 
 
-def execute_mosaic_group(group: MosaicGroup, config: MosaicConfig, signature: str) -> Dict[str, str]:
+def _execute_mosaic_group(group: MosaicGroup, config: MosaicConfig, signature: str) -> Dict[str, str]:
     """Write one mosaic output and return its report row."""
     try:
         selected_sources, exclusions = select_compatible_sources(group.sources)
+        if exclusions and config.require_all_inputs:
+            raise ValueError("Verified workflow refuses a partial mosaic: " + exclusion_message(exclusions, len(group.sources)))
         if not selected_sources:
             return add_mosaic_tracking_fields(
                 report_row_for_group(
@@ -656,7 +710,7 @@ def execute_mosaic_group(group: MosaicGroup, config: MosaicConfig, signature: st
         message = (
             partial_mosaic_message(exclusions, len(group.sources))
             if exclusions
-            else "Merged with current wse priority and wse_qual fallback over class 3."
+            else "Merged paired elevation/quality using lowest quality code; ties use first sorted source."
         )
         return add_mosaic_tracking_fields(
             report_row_for_group(
@@ -692,6 +746,27 @@ def execute_mosaic_group(group: MosaicGroup, config: MosaicConfig, signature: st
         )
 
 
+def execute_mosaic_group(group: MosaicGroup, config: MosaicConfig, signature: str) -> Dict[str, str]:
+    """Write and bind verified mosaics to exact extracted inputs before completion."""
+    row = _execute_mosaic_group(group, config, signature)
+    if config.verified_workflow and row.get("status") in {"MOSAIC_CREATED", "COPIED_SINGLETON"}:
+        from pipeline_verification import VerificationStore
+        try:
+            store = VerificationStore(config.manifest_csv.parent)
+            ds = require_gdal().Open(str(group.output_file))
+            try:
+                grid = {"transform": list(ds.GetGeoTransform()), "crs": ds.GetProjectionRef(),
+                        "width": ds.RasterXSize, "height": ds.RasterYSize, "bands": ds.RasterCount}
+            finally:
+                ds = None
+            run_id = config.verification_run_id or store.begin_run("mosaic", config)
+            store.record_artifact("mosaic", group.output_file, [s.path for s in group.sources], config, run_id, grid)
+        except Exception as exc:
+            row["status"] = "ERROR_VERIFICATION"
+            row["message"] = str(exc)
+    return row
+
+
 def execute_mosaic_group_worker(
     index: int,
     group: MosaicGroup,
@@ -709,6 +784,11 @@ def run_mosaic(
 ) -> Tuple[int, List[Dict[str, str]]]:
     """Plan and optionally write all mosaic outputs."""
     plan = build_mosaic_plan(config)
+    if config.verified_workflow and not dry_run:
+        from dataclasses import asdict
+        from pipeline_verification import VerificationStore
+        config.verification_run_id = VerificationStore(config.manifest_csv.parent).begin_run("mosaic", {
+            **asdict(config), "requested_workers": config.workers, "workers": max(1, min(config.workers, len(plan.groups)))})
     rows = list(plan.report_rows)
     group_rows: List[Tuple[int, Dict[str, str]]] = []
     existing_manifest = read_mosaic_manifest(config.manifest_csv)
@@ -1045,6 +1125,11 @@ def promote_temporary_output(temp_file: Path, output_file: Path, config: MosaicC
                 final_world.unlink()
         except OSError:
             pass
+    # An old final-name PAM file could override the new TIFF's grid/masks.
+    # Failure to remove it must fail the write, never certify a mixed artifact.
+    final_aux = output_file.with_suffix(f"{output_file.suffix}.aux.xml")
+    if final_aux.exists():
+        final_aux.unlink()
     try:
         if temp_aux.exists():
             temp_aux.unlink()
@@ -1084,9 +1169,12 @@ def copy_singleton(group: MosaicGroup, config: MosaicConfig) -> None:
             creationOptions=geotiff_creation_options(config),
         )
         out_ds = gdal.Translate(str(temp_output), source_ds, options=translate_options)
-        source_ds = None
         if out_ds is None:
             raise RuntimeError(f"Could not write singleton output: {group.output_file}")
+        if out_ds.RasterCount == 2:
+            rewrite_quality_band(out_ds, [source_ds], out_ds.GetRasterBand(1).GetNoDataValue(),
+                                 out_ds.GetRasterBand(2).GetNoDataValue())
+        source_ds = None
         apply_output_band_metadata(out_ds)
         out_ds.FlushCache()
         out_ds = None
@@ -1169,80 +1257,77 @@ def rewrite_quality_band(
     band1_nodata: Any,
     band2_nodata: Any,
 ) -> None:
-    """Overwrite output band 2 using wse-aware overlap rules."""
+    """Write paired WSE/quality blocks, choosing lowest quality, stable first tie.
+
+    The historical function name is retained for callers, but BOTH bands are
+    written together. Invalid, nonfinite and masked observations are excluded.
+    """
     np, gdal_array = require_numpy()
-
-    output_band = output_dataset.GetRasterBand(2)
-    block_cols, block_rows = output_band.GetBlockSize()
-    if block_cols <= 0:
-        block_cols = min(512, output_dataset.RasterXSize)
-    if block_rows <= 0:
-        block_rows = min(512, output_dataset.RasterYSize)
-
-    quality_dtype = gdal_array.GDALTypeCodeToNumericTypeCode(output_band.DataType)
-    if quality_dtype is None:
-        raise RuntimeError("Could not map output band 2 GDAL data type to NumPy.")
-
-    for y_off in range(0, output_dataset.RasterYSize, block_rows):
-        rows = min(block_rows, output_dataset.RasterYSize - y_off)
-        for x_off in range(0, output_dataset.RasterXSize, block_cols):
-            cols = min(block_cols, output_dataset.RasterXSize - x_off)
-            quality_block = np.full((rows, cols), band2_nodata, dtype=quality_dtype)
+    elevation_band = output_dataset.GetRasterBand(1)
+    quality_band = output_dataset.GetRasterBand(2)
+    if band1_nodata is None or band2_nodata is None:
+        raise ValueError("Paired mosaicking requires explicit nodata on both bands")
+    block_cols, block_rows = quality_band.GetBlockSize()
+    block_cols = min(block_cols or 512, 512)
+    block_rows = min(block_rows or 512, 512)
+    elevation_dtype = gdal_array.GDALTypeCodeToNumericTypeCode(elevation_band.DataType)
+    quality_dtype = gdal_array.GDALTypeCodeToNumericTypeCode(quality_band.DataType)
+    # GeoTIFF has one embedded nodata value for all bands. Separate WSE/QA
+    # fills can appear correct while open but lose the QA mask after reopening
+    # without PAM sidecars (including ingestion of the TIFF alone).
+    common_nodata = band1_nodata
+    if common_nodata in (0, 1, 2, 3):
+        if not (np.issubdtype(elevation_dtype, np.floating)
+                and np.issubdtype(quality_dtype, np.floating)):
+            raise ValueError("Paired GeoTIFF needs a nodata value outside quality codes 0-3")
+        common_nodata = float("nan")
+    for band, dtype in ((elevation_band, elevation_dtype), (quality_band, quality_dtype)):
+        converted = np.asarray(common_nodata, dtype=dtype).item()
+        if not (converted == common_nodata or (np.isnan(converted) and np.isnan(common_nodata))):
+            raise ValueError("Shared nodata is not representable in both output bands")
+        band.SetNoDataValue(common_nodata)
+    for y in range(0, output_dataset.RasterYSize, block_rows):
+        rows = min(block_rows, output_dataset.RasterYSize - y)
+        for x in range(0, output_dataset.RasterXSize, block_cols):
+            cols = min(block_cols, output_dataset.RasterXSize - x)
+            elevation = np.full((rows, cols), common_nodata, dtype=elevation_dtype)
+            quality = np.full((rows, cols), common_nodata, dtype=quality_dtype)
             assigned = np.zeros((rows, cols), dtype=bool)
-
-            for source_dataset in aligned_sources:
-                source_wse = source_dataset.GetRasterBand(1).ReadAsArray(x_off, y_off, cols, rows)
-                source_quality = source_dataset.GetRasterBand(2).ReadAsArray(
-                    x_off,
-                    y_off,
-                    cols,
-                    rows,
-                )
-                if source_wse is None or source_quality is None:
-                    raise RuntimeError("Could not read aligned source block for quality merge.")
-                mask = (
-                    (~assigned)
-                    & valid_data_mask(source_wse, band1_nodata, np)
-                    & np.isin(source_quality, (0, 1, 2))
-                )
-                if np.any(mask):
-                    quality_block[mask] = source_quality[mask]
-                    assigned[mask] = True
-
-            if not np.all(assigned):
-                for source_dataset in aligned_sources:
-                    source_wse = source_dataset.GetRasterBand(1).ReadAsArray(
-                        x_off,
-                        y_off,
-                        cols,
-                        rows,
-                    )
-                    source_quality = source_dataset.GetRasterBand(2).ReadAsArray(
-                        x_off,
-                        y_off,
-                        cols,
-                        rows,
-                    )
-                    if source_wse is None or source_quality is None:
-                        raise RuntimeError("Could not read aligned source block for quality merge.")
-                    mask = (
-                        (~assigned)
-                        & valid_data_mask(source_wse, band1_nodata, np)
-                        & (source_quality == 3)
-                    )
-                    if np.any(mask):
-                        quality_block[mask] = source_quality[mask]
-                        assigned[mask] = True
-
-            output_band.WriteArray(quality_block, x_off, y_off)
-
+            for source in aligned_sources:
+                wband, qband = source.GetRasterBand(1), source.GetRasterBand(2)
+                wse, qa = wband.ReadAsArray(x, y, cols, rows), qband.ReadAsArray(x, y, cols, rows)
+                if wse is None or qa is None:
+                    raise RuntimeError("Could not read aligned source block for paired merge")
+                eligible = (np.isfinite(wse) & valid_data_mask(wse, wband.GetNoDataValue(), np)
+                            & np.isin(qa, (0, 1, 2, 3))
+                            & (wband.GetMaskBand().ReadAsArray(x, y, cols, rows) != 0)
+                            & (qband.GetMaskBand().ReadAsArray(x, y, cols, rows) != 0))
+                choose = eligible & ((~assigned) | (qa < quality))
+                elevation[choose], quality[choose] = wse[choose], qa[choose]
+                assigned[choose] = True
+            elevation_band.WriteArray(elevation, x, y)
+            quality_band.WriteArray(quality, x, y)
     apply_output_band_metadata(output_dataset)
-    output_band.FlushCache()
+    output_dataset.SetMetadataItem("SWOTFLOW_OVERLAP_RULE", "paired-lowest-quality-v2")
+    elevation_band.FlushCache()
+    quality_band.FlushCache()
 
 
 def merge_group(group: MosaicGroup, config: MosaicConfig) -> None:
     """Merge a compatible multi-file group into one GeoTIFF."""
     gdal = require_gdal()
+    if config.grouping_mode != GROUPING_MODE_PASS_DATE_COMMON_CRS:
+        # Equal pixel size/CRS alone is insufficient: native cells must align.
+        first = None
+        for source in group.sources:
+            dataset = gdal.Open(str(source.path))
+            transform = dataset.GetGeoTransform()
+            dataset = None
+            first = first or transform
+            for axis, resolution in ((0, 1), (3, 5)):
+                offset = (transform[axis] - first[axis]) / first[resolution]
+                if abs(offset - round(offset)) > 1e-6:
+                    raise ValueError(f"Native-grid inputs are not pixel aligned: {source.path.name}")
 
     config.output_folder.mkdir(parents=True, exist_ok=True)
     temp_output = temporary_mosaic_path(group.output_file)
