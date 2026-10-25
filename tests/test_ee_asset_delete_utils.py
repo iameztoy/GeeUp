@@ -1,6 +1,6 @@
 import unittest
 
-from Utils.delete_ee_collection_children import (
+from swotflow.tools.delete_ee_collection_children import (
     AssetRecord,
     infer_project_from_asset,
     list_child_assets,

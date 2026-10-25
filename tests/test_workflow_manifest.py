@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workflow_manifest import (
+from swotflow.project.manifest import (
     read_workflow_manifest,
     source_signature,
     upsert_workflow_manifest,

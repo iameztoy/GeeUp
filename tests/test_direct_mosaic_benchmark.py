@@ -2,14 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from direct_mosaic_benchmark import (
+from swotflow.tools.mosaic_benchmark import (
     BenchmarkGroup,
     paths_overlap,
     select_representative_groups,
     validate_output_location,
 )
-from ee_mosaic_tool import MosaicGroup, MosaicGroupKey, MosaicSource
-from swot_metadata import ParsedMetadata
+from swotflow.processing.mosaic import MosaicGroup, MosaicGroupKey, MosaicSource
+from swotflow.core.metadata import ParsedMetadata
 
 
 def fake_group(name: str, source_count: int) -> MosaicGroup:

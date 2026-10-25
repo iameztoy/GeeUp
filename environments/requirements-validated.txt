@@ -1,0 +1,9 @@
+# SWOTFlow v0.8.0: exact direct dependency versions used for Windows validation.
+# Install from the checkout: python -m pip install -r environments/requirements-validated.txt
+# Transitive dependencies remain resolved by pip; this is not a full lockfile.
+-r ../requirements.txt
+selenium==4.43.0
+PyYAML==6.0.3
+earthengine-api==1.7.26
+earthaccess==0.17.0
+numpy==2.4.4

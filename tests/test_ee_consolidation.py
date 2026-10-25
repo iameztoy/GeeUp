@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import ee_consolidation as c
+import swotflow.consolidation.core as c
 
 COLLECTION = "projects/example/assets/source"
 DESTINATION = "projects/example/assets/consolidated"

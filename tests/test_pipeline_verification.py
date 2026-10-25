@@ -11,11 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import download_integrity
-import nasa_catalog_history as history
-import pipeline_verification as p
-from native_pixel_verification import compare_arrays, windows
-from swot_download_tool import normalize_granule
+import swotflow.verification.download as download_integrity
+import swotflow.catalog.history as history
+import swotflow.verification.pipeline as p
+from swotflow.verification.native import compare_arrays, windows
+from swotflow.processing.download import normalize_granule
 from tests.test_download_tool import FakeGranule, granule_name
 
 
@@ -164,7 +164,7 @@ class ProofTests(unittest.TestCase):
             self.assertEqual(p.reusable_download_groups([self.g, second], self.store, "collection"), set())
 
     def test_cleanup_rechecks_downstream_bytes_and_retains_metadata(self) -> None:
-        from project_insights import CleanupCandidate, delete_cleanup_candidates
+        from swotflow.project.insights import CleanupCandidate, delete_cleanup_candidates
         config = {"download": {"manifest_csv": str(self.store.logs / "download_manifest.csv")}}
         candidate = CleanupCandidate("raw", self.raw, "legacy flag", "old manifest")
         allowed = p.cleanup_guards(config, [candidate])
@@ -177,7 +177,7 @@ class ProofTests(unittest.TestCase):
         self.assertTrue(self.store.path.exists())
 
     def test_no_cleanup_from_legacy_manifest_alone(self) -> None:
-        from project_insights import CleanupCandidate
+        from swotflow.project.insights import CleanupCandidate
         config = {"download": {"manifest_csv": str(self.root / "other" / "download_manifest.csv")}}
         self.assertEqual(p.cleanup_guards(config, [CleanupCandidate("raw", self.raw, "done", "manifest")]), [])
 

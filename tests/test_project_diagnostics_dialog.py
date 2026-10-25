@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from project_diagnostics import DiagnosticFile, DiagnosticPreview
-from project_diagnostics_dialog import DiagnosticCleanupDialog
+from swotflow.project.diagnostics import DiagnosticFile, DiagnosticPreview
+from swotflow.project.diagnostics_dialog import DiagnosticCleanupDialog
 
 
 class DiagnosticCleanupDialogTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class DiagnosticCleanupDialogTests(unittest.TestCase):
         ])
 
     def test_preview_runs_in_background_and_displays_size(self):
-        with mock.patch("project_diagnostics_dialog.threading.Thread") as thread:
+        with mock.patch("swotflow.project.diagnostics_dialog.threading.Thread") as thread:
             self.dialog.start_preview()
             thread.return_value.start.assert_called_once()
         self.assertTrue(self.dialog.busy)
@@ -46,7 +46,7 @@ class DiagnosticCleanupDialogTests(unittest.TestCase):
 
     def test_delete_requires_confirmation_stopped_and_idle(self):
         self.dialog.display_preview(self.preview())
-        with mock.patch("project_diagnostics_dialog.messagebox.showwarning"), mock.patch("project_diagnostics_dialog.threading.Thread") as thread:
+        with mock.patch("swotflow.project.diagnostics_dialog.messagebox.showwarning"), mock.patch("swotflow.project.diagnostics_dialog.threading.Thread") as thread:
             self.dialog.start_delete(True)
             thread.assert_not_called()
             self.dialog.stopped.set(True)
@@ -54,7 +54,7 @@ class DiagnosticCleanupDialogTests(unittest.TestCase):
             self.dialog.start_delete(True)
             thread.assert_not_called()
         self.dialog.project_busy = lambda: False
-        with mock.patch("project_diagnostics_dialog.messagebox.askyesno", return_value=False), mock.patch("project_diagnostics_dialog.threading.Thread") as thread:
+        with mock.patch("swotflow.project.diagnostics_dialog.messagebox.askyesno", return_value=False), mock.patch("swotflow.project.diagnostics_dialog.threading.Thread") as thread:
             self.dialog.start_delete(True)
             thread.assert_not_called()
 
@@ -63,7 +63,7 @@ class DiagnosticCleanupDialogTests(unittest.TestCase):
         self.dialog.display_preview(preview)
         self.dialog.stopped.set(True)
         self.dialog.table.selection_set("1")
-        with mock.patch("project_diagnostics_dialog.messagebox.askyesno", return_value=True), mock.patch("project_diagnostics_dialog.threading.Thread") as thread:
+        with mock.patch("swotflow.project.diagnostics_dialog.messagebox.askyesno", return_value=True), mock.patch("swotflow.project.diagnostics_dialog.threading.Thread") as thread:
             self.dialog.start_delete(False)
             self.assertEqual(thread.call_args.kwargs["args"], (preview, [preview.candidates[1]]))
 

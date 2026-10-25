@@ -1,10 +1,11 @@
 import tempfile
+from contextlib import chdir
 import threading
 import unittest
 import csv
 from pathlib import Path
 
-from swot_download_tool import (
+from swotflow.processing.download import (
     DownloadConfig,
     EXCLUDED_OLDER_VERSION_STATUS,
     PRODUCT_FILTER_ALL,
@@ -21,7 +22,7 @@ from swot_download_tool import (
     run_download,
     write_download_report,
 )
-from swot_metadata import product_identity_key, processing_level_rank
+from swotflow.core.metadata import product_identity_key, processing_level_rank
 
 
 def granule_name(
@@ -252,6 +253,11 @@ class FailingPagedEarthaccess(FakePagedEarthaccess):
 
 
 class DownloadToolTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Default relative campaign paths must never create project data in the checkout.
+        scratch = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(chdir(scratch))
+
     def test_utm_generation_and_wildcard_patterns(self) -> None:
         tiles = generate_utm_tiles()
 

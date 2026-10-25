@@ -1,5 +1,15 @@
 # Release history
 
+## 0.8.0 — 25 October 2026
+
+- Organize application implementation under `swotflow/` packages for processing, consolidation, Earth Engine upload, catalogue history, verification, project management, core helpers, interface and tools. Keep `swotflow_gui.py` as the simple top-level launcher and add `python -m swotflow`.
+- Show v0.8.0 on Home and in the application window title, keeping the version visible while other tabs are selected.
+- Update internal imports, test targets and worker subprocesses to package/module execution. Resolve bundled assets, presets, configuration and legacy history from one application-root helper.
+- This is a minor version increment because documented standalone worker paths/imports change. Update manual CLI examples to `python -m swotflow.<package>.<module>`. Existing standalone worker paths and flat imports have moved; custom scripts need those documented updates.
+- Preserve scientific processing, processing-version priority, overlap selection, project formats and existing EE assets. No rebuild, investigation, or cloud mutation is started by this refactor.
+- Keep all one-off migration scripts, backups and validation reports outside the application repository. Use **v0.8.0** in the GitHub release title and description.
+- Declare NumPy for the GUI environment's native pixel checks and provide pinned validation dependency references under `environments/`. Refresh verification guides to v0.8.0, retaining the live-upload/update acceptance gates.
+
 ## 0.7.3 — 25 October 2026
 
 - Select the preferred processing version before overlap selection, even when older extracted TIFFs remain. Automation freezes the completed NASA selection for the mosaic stage; missing preferred versions or checksum conflicts stop that stage. Record excluded versions without deleting them.

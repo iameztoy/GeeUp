@@ -4,8 +4,8 @@ import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
 
-import ee_consolidation as c
-import ee_consolidation_update as u
+import swotflow.consolidation.core as c
+import swotflow.consolidation.update as u
 from tests.test_ee_consolidation import asset, manifest, COLLECTION, DESTINATION, local_temp
 
 

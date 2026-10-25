@@ -9,17 +9,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from swot_download_tool import DownloadConfig
-from swotflow_automation import (
+from swotflow.processing.download import DownloadConfig
+from swotflow.processing.automation import (
     AutomationConfig,
     AutomationRunState,
     AutomationStageResult,
     AutomationTilePlan,
     write_run_state,
 )
-from swotflow_gui import LauncherApp
-from swotflow_project import create_project, load_project_tile_profiles
-from utm_map_selector import DisplayTile, UTMDisplayGeometry
+from swotflow.ui.main import LauncherApp
+from swotflow.project.model import create_project, load_project_tile_profiles
+from swotflow.ui.utm_map import DisplayTile, UTMDisplayGeometry
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -97,7 +97,7 @@ class GuiLayoutTests(unittest.TestCase):
             app = LauncherApp(root)
             notebook = app.statistics_notebook
             buttons = {button.cget("text"): button for button in collect_widgets(notebook, ttk.Button)}
-            with mock.patch.object(app.nasa_history_panel, "work") as nasa_work, \
+            with mock.patch.object(app.nasa_history_panel, "work") as nasa_work,\
                  mock.patch.object(app.consolidation_coverage_panel, "work") as register_work:
                 buttons["Input verification / NASA History"].invoke()
                 self.assertEqual(notebook.tab(notebook.select(), "text"), "NASA History")
@@ -138,11 +138,11 @@ class GuiLayoutTests(unittest.TestCase):
                 old = Path(json.loads(rows[0]["input_files"])[0]).stem + ".nc"
                 new = old.replace("_PGD0_01.nc", "_PGD0_02.nc")
                 fake = FakePagedEarthaccess([FakeGranule(old, concept_id="old"), FakeGranule(new, concept_id="new")])
-                with mock.patch.object(panel, "work", side_effect=lambda label, job, done: done(job())), \
-                     mock.patch("swot_download_tool.import_earthaccess", return_value=fake):
+                with mock.patch.object(panel, "work", side_effect=lambda label, job, done: done(job())),\
+                     mock.patch("swotflow.processing.download.import_earthaccess", return_value=fake):
                     panel.scan()
                     self.assertEqual(len(panel.scan_rows), 1)
-                    from nasa_catalog_history import utc_now
+                    from swotflow.catalog.history import utc_now
                     panel.inventory_ready({"collection": COLLECTION, "assets": [a], "finished_utc": utc_now()})
                     panel.compare()
                     self.assertEqual(panel.report["summary"], {"newer_version_available": 1})
@@ -165,9 +165,9 @@ class GuiLayoutTests(unittest.TestCase):
                     panel.verification_report["rows"][0]["asset_ids"] = [a["id"]]
                     panel.stage_table.selection_set("0")
                     reference = project/"local_name_different_from_asset.tif"
-                    with mock.patch("pipeline_verification.VerificationStore.artifacts",return_value={str(reference):{"stage":"mosaic","path":str(reference)}}), \
-                         mock.patch("project_database.read_project_rows",return_value=[{"asset_id":a["id"],"local_file":str(reference)}]), \
-                         mock.patch("native_pixel_verification.check_native_pixels",return_value={"passed":True}) as pixel_check, \
+                    with mock.patch("swotflow.verification.pipeline.VerificationStore.artifacts",return_value={str(reference):{"stage":"mosaic","path":str(reference)}}),\
+                         mock.patch("swotflow.project.database.read_project_rows",return_value=[{"asset_id":a["id"],"local_file":str(reference)}]),\
+                         mock.patch("swotflow.verification.native.check_native_pixels",return_value={"passed":True}) as pixel_check,\
                          mock.patch.object(panel,"show_details"):
                         panel.check_pixels()
                         self.assertEqual(pixel_check.call_args.args[1],reference)
@@ -185,7 +185,7 @@ class GuiLayoutTests(unittest.TestCase):
         from tests.test_ee_replacement_register import inventory, receipt
         from tests.test_ee_consolidation import asset, manifest, COLLECTION, DESTINATION, local_temp
         from tests.test_ee_consolidation_update import stored
-        import ee_consolidation as c
+        import swotflow.consolidation.core as c
         root = tk.Tk()
         root.withdraw()
         try:
@@ -206,22 +206,22 @@ class GuiLayoutTests(unittest.TestCase):
                 tab.existing_inventory = inventory(DESTINATION, [output])
                 tab.plan = plan
                 tab.plan_settings = tab.settings()
-                with mock.patch.object(tab, "work", side_effect=lambda label, job, done: done(job())), \
-                     mock.patch.object(panel, "work", side_effect=lambda job, done: done(job())), \
-                     mock.patch("ee_consolidation_tab.registry.default_path", return_value=path), \
-                     mock.patch("ee_consolidation_tab.engine.read_lineage", return_value=lineage), \
-                     mock.patch("ee_consolidation_tab.engine.connect", side_effect=AssertionError("No EE calls allowed")):
+                with mock.patch.object(tab, "work", side_effect=lambda label, job, done: done(job())),\
+                     mock.patch.object(panel, "work", side_effect=lambda job, done: done(job())),\
+                     mock.patch("swotflow.consolidation.tab.registry.default_path", return_value=path),\
+                     mock.patch("swotflow.consolidation.tab.engine.read_lineage", return_value=lineage),\
+                     mock.patch("swotflow.consolidation.tab.engine.connect", side_effect=AssertionError("No EE calls allowed")):
                     tab.update_register()
                     self.assertEqual(panel.report["summary"]["awaiting"], 2)
                     self.assertEqual(len(panel.tiles.get_children()), 2)
                     self.assertEqual(app.stats_status_map.consolidation_rows["UTM31Q"]["awaiting"], 1)
-                    from ee_replacement_register import ReplacementRegister
+                    from swotflow.consolidation.register import ReplacementRegister
                     register = ReplacementRegister(path, COLLECTION)
                     register.record_verification(receipt(output, plan))
                     panel.refresh()
                     row = next(i for i in panel.products.get_children() if panel.products.item(i, "values")[0] == output["id"])
                     panel.products.selection_set(row)
-                    with mock.patch("ee_consolidation_coverage_ui.messagebox.askyesno", return_value=True):
+                    with mock.patch("swotflow.consolidation.coverage_ui.messagebox.askyesno", return_value=True):
                         panel.approve()
                     self.assertEqual(panel.report["summary"]["active"], 2)
                     self.assertEqual(app.stats_status_map.consolidation_rows["UTM31P"]["status"], "complete")
@@ -238,10 +238,10 @@ class GuiLayoutTests(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         root = Path(folder.name)
-        config_patch = mock.patch("swotflow_gui.load_config", return_value=self.sample_config(root / "NoProject"))
+        config_patch = mock.patch("swotflow.ui.main.load_config", return_value=self.sample_config(root / "NoProject"))
         config_patch.start()
         self.addCleanup(config_patch.stop)
-        path_patch = mock.patch("swotflow_gui.CONFIG_PATH", root / "config.yaml")
+        path_patch = mock.patch("swotflow.ui.main.CONFIG_PATH", root / "config.yaml")
         path_patch.start()
         self.addCleanup(path_patch.stop)
 
@@ -266,7 +266,7 @@ class GuiLayoutTests(unittest.TestCase):
     def test_incremental_consolidation_preview_without_cloud_or_project_writes(self) -> None:
         from tests.test_ee_consolidation import asset, manifest, COLLECTION, DESTINATION, local_temp
         from tests.test_ee_consolidation_update import stored
-        import ee_consolidation as consolidation
+        import swotflow.consolidation.core as consolidation
         root = tk.Tk()
         root.withdraw()
         try:
@@ -282,8 +282,8 @@ class GuiLayoutTests(unittest.TestCase):
                 tab.previous_plans.set(temp)
                 tab.inventory_ready({"collection": COLLECTION, "assets": [new],
                                      "existing_inventory": {"collection": DESTINATION, "assets": [previous]}})
-                with mock.patch.object(tab, "work", side_effect=lambda label, job, done: done(job())), \
-                     mock.patch("ee_consolidation_tab.engine.read_lineage", return_value=lineage):
+                with mock.patch.object(tab, "work", side_effect=lambda label, job, done: done(job())),\
+                     mock.patch("swotflow.consolidation.tab.engine.read_lineage", return_value=lineage):
                     tab.preview()
                 self.assertEqual(tab.plan["summary"]["extended_groups"], 1)
                 self.assertEqual(len(tab.tree.get_children()), 1)
@@ -344,7 +344,8 @@ class GuiLayoutTests(unittest.TestCase):
                 cleanup_tab,
             ) = notebook.winfo_children()
             self.assertIn("Current Project", collect_label_texts(home_tab))
-            self.assertIn("v0.7.3", {app.home_banner_canvas.itemcget(item, "text") for item in app.home_banner_canvas.find_all()
+            self.assertIn("v0.8.0", root.title())
+            self.assertIn("v0.8.0", {app.home_banner_canvas.itemcget(item, "text") for item in app.home_banner_canvas.find_all()
                                       if app.home_banner_canvas.type(item) == "text"})
             self.assertIn("Project And Documentation", collect_label_texts(home_tab))
             self.assertIn("Workflow Shortcuts", collect_label_texts(home_tab))
@@ -477,9 +478,9 @@ class GuiLayoutTests(unittest.TestCase):
             ]
             app.latest_project_insights = SimpleNamespace(upload_qa_tile_rows=status_rows)
             app.set_automation_tiles(["UTM34M"])
-            with mock.patch("swotflow_gui.load_display_geometry", return_value=object()):
-                with mock.patch("swotflow_gui.collect_project_insights") as collect:
-                    with mock.patch("swotflow_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("swotflow.ui.main.load_display_geometry", return_value=object()):
+                with mock.patch("swotflow.ui.main.collect_project_insights") as collect:
+                    with mock.patch("swotflow.ui.main.UTMMapSelectorDialog") as dialog:
                         app.open_automation_map_selector()
 
             collect.assert_not_called()
@@ -496,7 +497,7 @@ class GuiLayoutTests(unittest.TestCase):
             root = tk.Tk()
             root.withdraw()
             try:
-                with mock.patch("swotflow_gui.load_config", return_value=project.config):
+                with mock.patch("swotflow.ui.main.load_config", return_value=project.config):
                     app = LauncherApp(root)
 
                 self.assertEqual(app.current_project_name_var.get(), "Auto Project")
@@ -511,9 +512,9 @@ class GuiLayoutTests(unittest.TestCase):
             root = tk.Tk()
             root.withdraw()
             try:
-                with mock.patch("swotflow_gui.load_config", return_value=config):
+                with mock.patch("swotflow.ui.main.load_config", return_value=config):
                     app = LauncherApp(root)
-                with mock.patch("swotflow_gui.messagebox.showwarning") as warning:
+                with mock.patch("swotflow.ui.main.messagebox.showwarning") as warning:
                     saved = app.save_config(notify=False, validate_upload=False)
 
                 self.assertFalse(saved)
@@ -523,12 +524,12 @@ class GuiLayoutTests(unittest.TestCase):
                 root.destroy()
 
     def test_opening_moved_project_routes_to_relocation_dialog(self) -> None:
-        from project_relocation import RelocationRequired
+        from swotflow.project.relocation import RelocationRequired
         root = tk.Tk()
         root.withdraw()
         try:
             app = LauncherApp(root)
-            with mock.patch("swotflow_gui.load_project", side_effect=RelocationRequired("moved")), mock.patch("swotflow_gui.messagebox.showwarning"), mock.patch.object(app, "show_project_transfer") as dialog:
+            with mock.patch("swotflow.ui.main.load_project", side_effect=RelocationRequired("moved")), mock.patch("swotflow.ui.main.messagebox.showwarning"), mock.patch.object(app, "show_project_transfer") as dialog:
                 app.open_project_path(Path("copied/project.yaml"))
             dialog.assert_called_once_with(str(Path("copied/project.yaml")))
         finally:
@@ -566,8 +567,8 @@ class GuiLayoutTests(unittest.TestCase):
             app.download_authenticated = False
             with mock.patch.object(app, "save_config", return_value=True):
                 with mock.patch.object(app, "download_config_from_ui", return_value=config):
-                    with mock.patch("swotflow_gui.messagebox.askyesno", return_value=False) as ask:
-                        with mock.patch("swotflow_gui.threading.Thread") as thread:
+                    with mock.patch("swotflow.ui.main.messagebox.askyesno", return_value=False) as ask:
+                        with mock.patch("swotflow.ui.main.threading.Thread") as thread:
                             app.start_download()
 
             ask.assert_called_once()
@@ -586,7 +587,7 @@ class GuiLayoutTests(unittest.TestCase):
                 preflight_ok=True,
                 tile_plans=[SimpleNamespace(pending_downloads=2)],
             )
-            with mock.patch("swotflow_gui.messagebox.showwarning") as warning:
+            with mock.patch("swotflow.ui.main.messagebox.showwarning") as warning:
                 app.start_automation()
 
             warning.assert_called_once()
@@ -618,7 +619,7 @@ class GuiLayoutTests(unittest.TestCase):
             ]
             with mock.patch.object(app, "start_automation") as start:
                 with mock.patch.object(app.root, "after", side_effect=lambda _delay, callback: callback()):
-                    with mock.patch("swotflow_gui.messagebox.showinfo") as info:
+                    with mock.patch("swotflow.ui.main.messagebox.showinfo") as info:
                         app.finish_automation_preflight(state)
 
             start.assert_called_once()
@@ -651,7 +652,7 @@ class GuiLayoutTests(unittest.TestCase):
             ]
             with mock.patch.object(app, "start_automation") as start:
                 with mock.patch.object(app.root, "after", side_effect=lambda _delay, callback: callback()):
-                    with mock.patch("swotflow_gui.messagebox.showinfo") as info:
+                    with mock.patch("swotflow.ui.main.messagebox.showinfo") as info:
                         app.finish_automation_preflight(state)
 
             start.assert_called_once()
@@ -803,7 +804,7 @@ class GuiLayoutTests(unittest.TestCase):
                 ],
             )
 
-            with mock.patch("swotflow_gui.messagebox.showinfo"):
+            with mock.patch("swotflow.ui.main.messagebox.showinfo"):
                 with mock.patch.object(app, "refresh_project_statistics_if_active"):
                     app.finish_automation(state)
 
@@ -869,9 +870,9 @@ class GuiLayoutTests(unittest.TestCase):
         try:
             app = LauncherApp(root)
             app.set_download_tiles(["UTM34M", "UTM35M"])
-            with mock.patch("swotflow_gui.load_display_geometry", return_value=object()):
-                with mock.patch("swotflow_gui.manifest_downloaded_tiles", return_value=["UTM33M"]):
-                    with mock.patch("swotflow_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("swotflow.ui.main.load_display_geometry", return_value=object()):
+                with mock.patch("swotflow.ui.main.manifest_downloaded_tiles", return_value=["UTM33M"]):
+                    with mock.patch("swotflow.ui.main.UTMMapSelectorDialog") as dialog:
                         app.open_utm_map_selector()
 
             args, kwargs = dialog.call_args
@@ -887,8 +888,8 @@ class GuiLayoutTests(unittest.TestCase):
         try:
             app = LauncherApp(root)
             app.set_download_tiles(["UTM34M", "UTM35M"])
-            with mock.patch("swotflow_gui.load_display_geometry", return_value=object()):
-                with mock.patch("swotflow_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("swotflow.ui.main.load_display_geometry", return_value=object()):
+                with mock.patch("swotflow.ui.main.UTMMapSelectorDialog") as dialog:
                     app.open_utm_map_selector()
 
             args, kwargs = dialog.call_args
@@ -922,7 +923,7 @@ class GuiLayoutTests(unittest.TestCase):
                 stdout="done",
                 stderr="",
             )
-            with mock.patch("swotflow_gui.messagebox.showinfo"):
+            with mock.patch("swotflow.ui.main.messagebox.showinfo"):
                 with mock.patch.object(app, "refresh_project_statistics_if_active") as refresh:
                     app.finish_duplicate_process(result, dry_run=False)
 
@@ -941,7 +942,7 @@ class GuiLayoutTests(unittest.TestCase):
                 stdout="done",
                 stderr="",
             )
-            with mock.patch("swotflow_gui.messagebox.showinfo"):
+            with mock.patch("swotflow.ui.main.messagebox.showinfo"):
                 with mock.patch.object(app, "refresh_project_statistics_if_active") as refresh:
                     app.finish_duplicate_process(result, dry_run=True)
 
@@ -1035,7 +1036,7 @@ class GuiLayoutTests(unittest.TestCase):
             app = LauncherApp(root)
             app.upload_progress_started_at = "2026-08-11T20:12:08+02:00"
             with mock.patch(
-                "swotflow_gui.project_status_counts_since",
+                "swotflow.ui.main.project_status_counts_since",
                 return_value={"PLANNED_UPLOAD": 108},
             ) as counts_since:
                 app.update_upload_progress_from_report(Path("upload_report.csv"))
@@ -1079,7 +1080,7 @@ class GuiLayoutTests(unittest.TestCase):
         try:
             app = LauncherApp(root)
             with mock.patch.object(app, "save_config", return_value=True):
-                with mock.patch("swotflow_gui.messagebox.askyesno", return_value=True):
+                with mock.patch("swotflow.ui.main.messagebox.askyesno", return_value=True):
                     with mock.patch.object(app, "launch_uploader") as launch:
                         app.save_and_run_real()
 
@@ -1145,8 +1146,8 @@ class GuiLayoutTests(unittest.TestCase):
             app = LauncherApp(root)
             app.tile_preset_var.set("Continent: Africa")
             app.apply_tile_preset()
-            with mock.patch("swotflow_gui.load_display_geometry", return_value=object()):
-                with mock.patch("swotflow_gui.UTMMapSelectorDialog") as dialog:
+            with mock.patch("swotflow.ui.main.load_display_geometry", return_value=object()):
+                with mock.patch("swotflow.ui.main.UTMMapSelectorDialog") as dialog:
                     app.open_utm_map_selector()
 
             args, _kwargs = dialog.call_args
@@ -1277,7 +1278,7 @@ class GuiLayoutTests(unittest.TestCase):
                 cleanup_candidates=[],
             )
 
-            with mock.patch("swotflow_gui.load_display_geometry", return_value=geometry):
+            with mock.patch("swotflow.ui.main.load_display_geometry", return_value=geometry):
                 app.display_project_statistics(
                     insights,
                     status_text="Project statistics refreshed.",
@@ -1314,8 +1315,8 @@ class GuiLayoutTests(unittest.TestCase):
                 app.apply_project(project, write_config=False)
                 app.set_download_tiles(["UTM34K", "UTM34L"])
 
-                with mock.patch("swotflow_gui.simpledialog.askstring", return_value="Okavango Delta"):
-                    with mock.patch("swotflow_gui.messagebox.showinfo"):
+                with mock.patch("swotflow.ui.main.simpledialog.askstring", return_value="Okavango Delta"):
+                    with mock.patch("swotflow.ui.main.messagebox.showinfo"):
                         app.save_selected_tiles_as_preset()
 
                 presets = load_project_tile_profiles(project.root)

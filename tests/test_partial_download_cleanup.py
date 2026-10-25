@@ -11,13 +11,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from partial_download_cleanup import partial_product_name, plan_partial_downloads
-from project_database import upsert_project_rows
-from project_insights import (
+from swotflow.processing.partial_cleanup import partial_product_name, plan_partial_downloads
+from swotflow.project.database import upsert_project_rows
+from swotflow.project.insights import (
     COMPLETED_EXTRACT_STATUSES, CleanupCandidate, delete_cleanup_candidates, plan_cleanup_candidates,
 )
-from project_operation_lock import download_folder_lock
-from swot_download_tool import DownloadConfig, run_download
+from swotflow.project.lock import download_folder_lock
+from swotflow.processing.download import DownloadConfig, run_download
 
 
 def attribute(name: str, value: str | int) -> bytes:
@@ -170,7 +170,7 @@ class PartialCleanupTests(unittest.TestCase):
                 with download_folder_lock(self.raw):
                     pass
             raise ValueError('simulated interruption')
-        with mock.patch('swot_download_tool._run_download', side_effect=interrupted):
+        with mock.patch('swotflow.processing.download._run_download', side_effect=interrupted):
             with self.assertRaises(ValueError):
                 run_download(DownloadConfig(output_folder=self.raw))
         with download_folder_lock(self.raw):
@@ -178,7 +178,7 @@ class PartialCleanupTests(unittest.TestCase):
 
     def test_db_unavailable_never_falls_back_to_csv_for_deletion(self) -> None:
         candidates = self.preview()
-        with mock.patch('partial_download_cleanup._completion_times', side_effect=sqlite3.OperationalError('locked')):
+        with mock.patch('swotflow.processing.partial_cleanup._completion_times', side_effect=sqlite3.OperationalError('locked')):
             self.assertEqual(self.preview(), [])
             deleted, _, errors = delete_cleanup_candidates(candidates)
         self.assertEqual(deleted, 0)
@@ -208,11 +208,11 @@ class PartialCleanupTests(unittest.TestCase):
         self.assertFalse(any(c.stage == 'partial' for c in candidates))
 
     def test_gui_protects_partials_during_automation(self) -> None:
-        from swotflow_gui import LauncherApp
+        from swotflow.ui.main import LauncherApp
         app = SimpleNamespace(cleanup_delete_running=False, automation_running=True,
                               automation_preflight_running=False, download_stop_event=None)
-        with mock.patch('swotflow_gui.messagebox.showinfo') as info:
-            with mock.patch('swotflow_gui.messagebox.askyesno') as confirm:
+        with mock.patch('swotflow.ui.main.messagebox.showinfo') as info:
+            with mock.patch('swotflow.ui.main.messagebox.askyesno') as confirm:
                 LauncherApp.delete_cleanup_files(app, self.preview(), 'selected files')
         info.assert_called_once()
         confirm.assert_not_called()

@@ -63,7 +63,7 @@ conda env create --prefix .\.conda\swot_gdal --file environment_swot_gdal.yml
 Verify the environment:
 
 ```powershell
-.\.conda\swot_gdal\python.exe swot_extract_tool.py --check-gdal
+.\.conda\swot_gdal\python.exe -m swotflow.processing.extract --check-gdal
 ```
 
 Expected output should include the required GDAL drivers:
@@ -373,49 +373,49 @@ The GUI writes `config.yaml` as the active session mirror. You can also run modu
 Preview a download:
 
 ```powershell
-python swot_download_tool.py --config config.yaml --dry-run
+python -m swotflow.processing.download --config config.yaml --dry-run
 ```
 
 Run a download:
 
 ```powershell
-python swot_download_tool.py --config config.yaml
+python -m swotflow.processing.download --config config.yaml
 ```
 
 Plan extraction:
 
 ```powershell
-.\.conda\swot_gdal\python.exe swot_extract_tool.py --config config.yaml --dry-run
+.\.conda\swot_gdal\python.exe -m swotflow.processing.extract --config config.yaml --dry-run
 ```
 
 Run extraction:
 
 ```powershell
-.\.conda\swot_gdal\python.exe swot_extract_tool.py --config config.yaml
+.\.conda\swot_gdal\python.exe -m swotflow.processing.extract --config config.yaml
 ```
 
 Plan mosaics:
 
 ```powershell
-.\.conda\swot_gdal\python.exe ee_mosaic_tool.py --config config.yaml --dry-run
+.\.conda\swot_gdal\python.exe -m swotflow.processing.mosaic --config config.yaml --dry-run
 ```
 
 Run mosaics:
 
 ```powershell
-.\.conda\swot_gdal\python.exe ee_mosaic_tool.py --config config.yaml
+.\.conda\swot_gdal\python.exe -m swotflow.processing.mosaic --config config.yaml
 ```
 
 Run an upload dry run:
 
 ```powershell
-python ee_ui_uploader.py --config config.yaml --dry-run
+python -m swotflow.earthengine.uploader --config config.yaml --dry-run
 ```
 
 Run a real upload:
 
 ```powershell
-python ee_ui_uploader.py --config config.yaml
+python -m swotflow.earthengine.uploader --config config.yaml
 ```
 
 ## Logs And Reports
@@ -448,7 +448,7 @@ Older root-level folders such as `logs`, `artifacts`, or `reports` may exist fro
 Built-in continent presets and display geometry are generated offline from the UTM grid and continent GeoPackages:
 
 ```powershell
-python build_spatial_presets.py --utm-grid C:\path\to\World_UTM_Grid.gpkg --continents C:\path\to\World_Continents.gpkg --output spatial_presets\continent_utm_tiles.json --display-output spatial_presets\utm_display_geometries.json
+python -m swotflow.tools.build_spatial_presets --utm-grid C:\path\to\World_UTM_Grid.gpkg --continents C:\path\to\World_Continents.gpkg --output spatial_presets\continent_utm_tiles.json --display-output spatial_presets\utm_display_geometries.json
 ```
 
 The GUI consumes the generated JSON files. It does not require geopandas, shapely, fiona, pyogrio, or a web map runtime.

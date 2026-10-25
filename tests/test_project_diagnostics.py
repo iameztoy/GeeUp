@@ -11,10 +11,10 @@ from unittest import mock
 
 import yaml
 
-from project_diagnostics import (
+from swotflow.project.diagnostics import (
     AUDIT_NAME, CATEGORIES, DiagnosticPreview, delete_diagnostics, preview_diagnostics,
 )
-from project_operation_lock import automation_lock
+from swotflow.project.lock import automation_lock
 
 
 class ProjectDiagnosticsTests(unittest.TestCase):
@@ -185,7 +185,7 @@ class ProjectDiagnosticsTests(unittest.TestCase):
 
     def test_reparse_point_directory_is_not_scanned(self):
         self.artifact()
-        from project_diagnostics import _is_link
+        from swotflow.project.diagnostics import _is_link
         def is_link(info):
             return stat_is_dir(info) or _is_link(info)
         # Simulate the artifact directory being a junction, including platforms
@@ -194,7 +194,7 @@ class ProjectDiagnosticsTests(unittest.TestCase):
         def stat_is_dir(info):
             return stat.S_ISDIR(info.st_mode) and info.st_ino == artifact_inode
         artifact_inode = (self.root / "00_logs/upload_artifacts").stat().st_ino
-        with mock.patch("project_diagnostics._is_link", side_effect=is_link):
+        with mock.patch("swotflow.project.diagnostics._is_link", side_effect=is_link):
             preview = preview_diagnostics(self.root)
         self.assertFalse(preview.candidates)
         self.assertTrue(preview.warnings)

@@ -1,3 +1,5 @@
+from swotflow.paths import script_command
+from contextlib import chdir
 import csv
 import json
 import subprocess
@@ -7,8 +9,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-import ee_mosaic_tool
-from ee_mosaic_tool import (
+import swotflow.processing.mosaic as ee_mosaic_tool
+from swotflow.processing.mosaic import (
     ERROR_DISK_SPACE_STATUS,
     GROUPING_MODE_PASS_DATE_COMMON_CRS,
     GROUPING_MODE_UTM_ZONE_HEMISPHERE,
@@ -24,9 +26,9 @@ from ee_mosaic_tool import (
     world_file_path,
     write_mosaic_manifest,
 )
-from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env, check_gdal_runtime
-from project_database import ProjectDatabase
-from swot_metadata import parse_swot_l2_hr_raster_metadata
+from swotflow.core.gdal import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env, check_gdal_runtime
+from swotflow.project.database import ProjectDatabase
+from swotflow.core.metadata import parse_swot_l2_hr_raster_metadata
 
 
 GDAL_CHECK = check_gdal_runtime(DEFAULT_GDAL_PYTHON)
@@ -50,6 +52,11 @@ def swot_name(
 
 
 class MosaicPlanningTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Isolate default manifest paths as well as explicitly configured fixtures.
+        scratch = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(chdir(scratch))
+
     def test_verified_workflow_refuses_to_drop_incompatible_input(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -674,12 +681,7 @@ print(json.dumps(dataset.GetMetadata("IMAGE_STRUCTURE")))
             encoding="utf-8",
         )
         result = subprocess.run(
-            [
-                str(DEFAULT_GDAL_PYTHON),
-                str(Path(__file__).resolve().parents[1] / "ee_mosaic_tool.py"),
-                "--config",
-                str(config),
-            ],
+            script_command(str(DEFAULT_GDAL_PYTHON), Path(__file__).resolve().parents[1] / "swotflow/processing/mosaic.py", "--config", str(config)),
             cwd=str(Path(__file__).resolve().parents[1]),
             env=build_gdal_runtime_env(DEFAULT_GDAL_PYTHON),
             text=True,
@@ -692,11 +694,7 @@ print(json.dumps(dataset.GetMetadata("IMAGE_STRUCTURE")))
 
     def test_check_gdal_command_confirms_required_drivers(self) -> None:
         result = subprocess.run(
-            [
-                str(DEFAULT_GDAL_PYTHON),
-                str(Path(__file__).resolve().parents[1] / "ee_mosaic_tool.py"),
-                "--check-gdal",
-            ],
+            script_command(str(DEFAULT_GDAL_PYTHON), Path(__file__).resolve().parents[1] / "swotflow/processing/mosaic.py", "--check-gdal"),
             cwd=str(Path(__file__).resolve().parents[1]),
             env=build_gdal_runtime_env(DEFAULT_GDAL_PYTHON),
             text=True,

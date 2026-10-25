@@ -12,22 +12,22 @@ from unittest import mock
 
 import yaml
 
-from project_database import DATABASE_FILE_NAME, ProjectDatabase
-from project_relocation import (
+from swotflow.project.database import DATABASE_FILE_NAME, ProjectDatabase
+from swotflow.project.relocation import (
     LOCK_FILE, PENDING_FILE, VALIDATION_FILE, PathMapper, RelocationRequired,
     _backup, relocate_project, restore_relocation, save_validation_report,
     validate_project,
 )
-from swotflow_project import create_project, load_project
-from swotflow_automation import (
+from swotflow.project.model import create_project, load_project
+from swotflow.processing.automation import (
     AutomationConfig, AutomationRunState, AutomationStageResult, AutomationTilePlan,
     completed_stage_keys, load_automation_run_state, write_run_state,
     latest_automation_run_dir,
 )
-from workflow_manifest import source_signature
-from swot_download_tool import read_download_manifest, manifest_row_downloaded
-from swot_extract_tool import read_extract_manifest, manifest_row_completed
-from ee_mosaic_tool import read_mosaic_manifest, mosaic_manifest_completed
+from swotflow.project.manifest import source_signature
+from swotflow.processing.download import read_download_manifest, manifest_row_downloaded
+from swotflow.processing.extract import read_extract_manifest, manifest_row_completed
+from swotflow.processing.mosaic import read_mosaic_manifest, mosaic_manifest_completed
 
 
 class ProjectRelocationTests(unittest.TestCase):
@@ -143,12 +143,12 @@ class ProjectRelocationTests(unittest.TestCase):
         self.assertTrue(self.relocate().valid)
 
     def test_path_mapping_windows_to_native_boundary_and_nested_json(self):
-        mapper = PathMapper([(r"D:\SWOT_e2e", str(self.target))])
-        self.assertEqual(mapper.text(r"d:\swot_E2E\03_mosaics\x.tif"), str(self.target / "03_mosaics" / "x.tif"))
-        self.assertEqual(mapper.text("D:/SWOT_e2e/../other/x.tif"), "D:/SWOT_e2e/../other/x.tif")
-        self.assertEqual(mapper.text("D:/SWOT_e2e_other/x.tif"), "D:/SWOT_e2e_other/x.tif")
+        mapper = PathMapper([(r"D:\original_project", str(self.target))])
+        self.assertEqual(mapper.text(r"d:\ORIGINAL_project\03_mosaics\x.tif"), str(self.target / "03_mosaics" / "x.tif"))
+        self.assertEqual(mapper.text("D:/original_project/../other/x.tif"), "D:/original_project/../other/x.tif")
+        self.assertEqual(mapper.text("D:/original_project_other/x.tif"), "D:/original_project_other/x.tif")
         self.assertEqual(mapper.text(self.asset), self.asset)
-        result = json.loads(mapper.value(json.dumps([r"D:\SWOT_e2e\x.nc"])))
+        result = json.loads(mapper.value(json.dumps([r"D:\original_project\x.nc"])))
         self.assertEqual(result, [str(self.target / "x.nc")])
 
     def test_unmapped_external_data_is_rejected_without_changing_target(self):
@@ -200,7 +200,7 @@ class ProjectRelocationTests(unittest.TestCase):
                 raise OSError("simulated interrupted install")
             return real_replace(source, destination)
 
-        with mock.patch("project_relocation.os.replace", side_effect=fail_once):
+        with mock.patch("swotflow.project.relocation.os.replace", side_effect=fail_once):
             with self.assertRaisesRegex(OSError, "simulated"):
                 self.relocate()
         self.assertEqual((self.target / "project.yaml").read_bytes(), before)
@@ -216,7 +216,7 @@ class ProjectRelocationTests(unittest.TestCase):
             if Path(destination) == self.target / "project.yaml":
                 raise KeyboardInterrupt
             return real_replace(source, destination)
-        with mock.patch("project_relocation.os.replace", side_effect=interrupt_install):
+        with mock.patch("swotflow.project.relocation.os.replace", side_effect=interrupt_install):
             with self.assertRaises(KeyboardInterrupt):
                 self.relocate()
         self.assertTrue((self.target / PENDING_FILE).exists())

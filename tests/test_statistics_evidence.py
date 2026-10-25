@@ -3,7 +3,7 @@ import copy
 import unittest
 from unittest import mock
 
-from nasa_catalog_ui import STAGE_EVIDENCE, stage_evidence_label, verification_view_text
+from swotflow.catalog.ui import STAGE_EVIDENCE, stage_evidence_label, verification_view_text
 
 
 class StatisticsEvidenceTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class StatisticsEvidenceTests(unittest.TestCase):
     def test_scope_counts_and_missing_receipt_are_not_collection_gaps(self) -> None:
         report = self.report()
         before = copy.deepcopy(report)
-        with mock.patch("nasa_catalog_ui.history.recent", return_value=True):
+        with mock.patch("swotflow.catalog.ui.history.recent", return_value=True):
             summary, status = verification_view_text(report)
         self.assertIn("Selected search only: 2024-07-01 to 2024-07-31 UTC | UTM31S", summary)
         self.assertIn("3 preferred inputs (not mosaic assets)", summary)
@@ -38,7 +38,7 @@ class StatisticsEvidenceTests(unittest.TestCase):
     def test_stale_evidence_never_displays_a_current_completeness_certificate(self) -> None:
         report = self.report()
         report.update(input_accounting_complete=True, pixel_verification_complete=True)
-        with mock.patch("nasa_catalog_ui.history.recent", return_value=False):
+        with mock.patch("swotflow.catalog.ui.history.recent", return_value=False):
             _, status = verification_view_text(report)
         self.assertEqual(status.count("refresh needed"), 2)
         self.assertIn("not a guarantee of a complete or duplicate-free collection", status)

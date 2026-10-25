@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from swot_duplicate_remover import (
+from swotflow.processing.duplicates import (
     DuplicateConfig,
     build_duplicate_plan,
     move_duplicates,

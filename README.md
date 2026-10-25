@@ -1,8 +1,8 @@
 # SWOTFlow
 
-Current application version: **v0.7.3** (25 October 2026). The Home page displays this version on the next normal launch.
+Current application version: **v0.8.0** (25 October 2026). The Home page and application window title display this version on the next normal launch.
 
-New in v0.7.3: select preferred processing versions before mosaicking; bind Automation mosaics to the retained NASA selection; require revision evidence when reusing an existing EE asset; detect duplicate acquisitions across processing versions; use indexed per-file verification lookups; preserve verification receipts through project relocation; and clean raw, extracted and mosaic files in dependency order. These safeguards do not automatically replace cloud assets or start a rebuild. See [workflow verification](WORKFLOW_VERIFICATION.md).
+New in v0.8.0: organize implementation modules into the `swotflow/` package by function. The existing `python swotflow_gui.py` launcher remains; `python -m swotflow` also launches the GUI. Worker commands and resource paths use the new package layout. The v0.7.3 processing, version-selection, verification and cleanup rules are unchanged. See [development layout and command migration](DEVELOPMENT.md).
 
 New in v0.7.1: durable download-to-mosaic evidence, exact-input reconciliation and a repair queue in Statistics, guarded resume/cleanup, and manually launched original-source and EE pixel checks. Paired mosaics now preserve both no-data masks in a standalone GeoTIFF. See [the verification guide](WORKFLOW_VERIFICATION.md) and [rebuild gates](WORKFLOW_VALIDATION.md). A small acceptance pilot is required before choosing a large rebuild scope.
 
@@ -93,7 +93,7 @@ Create the optional GDAL processing environment:
 
 ```powershell
 conda env create --prefix .\.conda\swot_gdal --file environment_swot_gdal.yml
-.\.conda\swot_gdal\python.exe swot_extract_tool.py --check-gdal
+.\.conda\swot_gdal\python.exe -m swotflow.processing.extract --check-gdal
 ```
 
 Start the desktop app:
@@ -123,28 +123,30 @@ A SWOTFlow project keeps settings and intermediate files together:
 
 ## Repository Map
 
-- `swotflow_gui.py`: desktop launcher with Home, Automation, Download, Duplicate Removal, Extraction, Mosaic, Upload, EE Consolidation, Statistics, and Cleanup tools.
-- `swotflow_automation.py`: tile-by-tile unattended workflow orchestration.
-- `swotflow_project.py`: project metadata, project folders, history, and tile profile helpers.
-- `project_relocation.py` and `project_transfer_dialog.py`: copied-project path relocation, validation, and recovery.
-- `project_database.py`: SQLite project store, legacy CSV migration, indexed status queries, and CSV exports.
-- `project_updates.py`: persistent date-window update campaigns and expected-granule records.
-- `swot_download_tool.py`: Earthdata / PO.DAAC search, preview, manifest, and download logic.
-- `swot_duplicate_remover.py`: local raw-file duplicate cleanup.
-- `swot_extract_tool.py`: GDAL-backed SWOT NetCDF to GeoTIFF extraction.
-- `ee_mosaic_tool.py`: GDAL-backed GeoTIFF mosaic creation.
-- `ee_ui_uploader.py`: Earth Engine browser upload automation and asset verification.
-- `project_insights.py`: project statistics and cleanup candidate logic.
-- `utm_map_selector.py`: pure Tkinter visual UTM tile selector.
-- `build_spatial_presets.py`: offline builder for continent and UTM display preset JSON.
-- `swot_metadata.py`: shared SWOT filename parser.
-- `ee_selectors.py`: Earth Engine web UI selectors used by the uploader.
+- `swotflow_gui.py`: small desktop launcher; `swotflow/ui/main.py` implements the main window and workflow tabs.
+- `swotflow/consolidation/`: EE consolidation planning, incremental updates, replacement register and interface.
+- `swotflow/catalog/` and `swotflow/verification/`: NASA history, input accounting and independent integrity checks.
+- `swotflow/processing/automation.py`: tile-by-tile unattended workflow orchestration.
+- `swotflow/project/model.py`: project metadata, project folders, history, and tile profile helpers.
+- `swotflow/project/relocation.py` and `swotflow/project/transfer_dialog.py`: copied-project path relocation, validation, and recovery.
+- `swotflow/project/database.py`: SQLite project store, legacy CSV migration, indexed status queries, and CSV exports.
+- `swotflow/project/updates.py`: persistent date-window update campaigns and expected-granule records.
+- `swotflow/processing/download.py`: Earthdata / PO.DAAC search, preview, manifest, and download logic.
+- `swotflow/processing/duplicates.py`: local raw-file duplicate cleanup.
+- `swotflow/processing/extract.py`: GDAL-backed SWOT NetCDF to GeoTIFF extraction.
+- `swotflow/processing/mosaic.py`: GDAL-backed GeoTIFF mosaic creation.
+- `swotflow/earthengine/uploader.py`: Earth Engine browser upload automation and asset verification.
+- `swotflow/project/insights.py`: project statistics and cleanup candidate logic.
+- `swotflow/ui/utm_map.py`: pure Tkinter visual UTM tile selector.
+- `swotflow/tools/build_spatial_presets.py`: offline builder for continent and UTM display preset JSON.
+- `swotflow/core/metadata.py`: shared SWOT filename parser.
+- `swotflow/earthengine/selectors.py`: Earth Engine web UI selectors used by the uploader.
 - `config.example.yaml`: tracked configuration template.
 - `environment_swot_gdal.yml`: conda environment definition for GDAL processing.
 - `requirements.txt`: `.venv` dependencies for the launcher, downloader, uploader, and Earth Engine utilities.
 - `assets/swotflow_home_banner.png`: original SWOTFlow home banner displayed in the desktop app.
-- `Utils/delete_ee_collection_children.py`: optional Earth Engine ImageCollection cleanup utility.
-- `Utils/generate_home_banner.py`: standard-library utility that regenerates the bundled home banner asset.
+- `swotflow/tools/delete_ee_collection_children.py`: optional Earth Engine ImageCollection cleanup utility.
+- `swotflow/tools/generate_home_banner.py`: standard-library utility that regenerates the bundled home banner asset.
 
 ## Documentation
 

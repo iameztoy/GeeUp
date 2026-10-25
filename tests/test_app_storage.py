@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import app_storage as storage
-import ee_replacement_register as registry
+import swotflow.core.storage as storage
+import swotflow.consolidation.register as registry
 
 
 class StorageTests(unittest.TestCase):

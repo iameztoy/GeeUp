@@ -11,7 +11,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
-import pipeline_verification as p
+import swotflow.verification.pipeline as p
 import tests.test_pipeline_verification as fixtures
 
 
@@ -20,7 +20,7 @@ class SafeguardTests(unittest.TestCase):
     report = fixtures.ProofTests.report
 
     def test_stale_extracted_version_cannot_supply_a_mosaic(self):
-        from ee_mosaic_tool import MosaicConfig, build_mosaic_plan
+        from swotflow.processing.mosaic import MosaicConfig, build_mosaic_plan
         folder = self.root / "extracted"
         folder.mkdir()
         preferred = folder / Path(self.name).with_suffix(".tif")
@@ -64,8 +64,8 @@ class SafeguardTests(unittest.TestCase):
         self.mosaic.write_bytes(b"different revision")
         self.store.record_artifact("mosaic", self.mosaic, [self.extract], self.config, "new", {})
         member = {"filename": self.name, "asset_id": self.asset["id"]}
-        with mock.patch("nasa_catalog_history.CatalogHistory.snapshot", return_value=self.snapshot), \
-             mock.patch("nasa_catalog_history.represented_inputs", return_value=([member], [])), \
+        with mock.patch("swotflow.catalog.history.CatalogHistory.snapshot", return_value=self.snapshot),\
+             mock.patch("swotflow.catalog.history.represented_inputs", return_value=([member], [])),\
              mock.patch.object(p, "active_proofs", return_value={self.name: {"checksum": self.mosaic_proof["sources"][self.name], "asset_id": self.asset["id"]}}):
             result = p.project_report(self.root, self.store, "scan1", self.inventory)
             self.assertFalse(result["input_accounting_complete"])
@@ -85,7 +85,7 @@ class SafeguardTests(unittest.TestCase):
         p.save_inventory(self.store, self.inventory)
         members = [{"filename": self.name, "asset_id": self.asset["id"]},
                    {"filename": self.name.replace("PID0", "PIC0"), "asset_id": "older"}]
-        with mock.patch("nasa_catalog_history.represented_inputs", return_value=(members, [])):
+        with mock.patch("swotflow.catalog.history.represented_inputs", return_value=(members, [])):
             self.assertEqual(p.active_proofs(self.store, self.inventory["collection"]), {})
 
     def test_single_receipt_lookup_uses_index_at_large_history_size(self):
@@ -103,7 +103,7 @@ class SafeguardTests(unittest.TestCase):
             self.store.record_artifact("extract", self.extract, [self.raw], self.config, "again", {})
 
     def test_combined_cleanup_orders_dependencies_even_if_selection_is_reversed(self):
-        from project_insights import CleanupCandidate, delete_cleanup_candidates
+        from swotflow.project.insights import CleanupCandidate, delete_cleanup_candidates
         config = {"download": {"manifest_csv": str(self.store.logs / "download_manifest.csv")}}
         candidates = [CleanupCandidate("extracted", self.extract, "done", "manifest"),
                       CleanupCandidate("raw", self.raw, "done", "manifest")]
@@ -114,9 +114,9 @@ class SafeguardTests(unittest.TestCase):
         self.assertTrue(self.mosaic.exists())
 
     def test_relocation_preserves_immutable_payload_and_maps_operational_proofs(self):
-        import download_integrity
-        from swotflow_project import create_project
-        from project_relocation import relocate_project
+        import swotflow.verification.download as download_integrity
+        from swotflow.project.model import create_project
+        from swotflow.project.relocation import relocate_project
         project = create_project(self.root / "original", "test", {})
         raw = project.root / "01_raw_downloads" / self.raw.name
         extracted = project.root / "02_extracted_geotiffs" / self.extract.name
@@ -153,7 +153,7 @@ class SafeguardTests(unittest.TestCase):
                 injected = True
                 raise OSError("simulated metadata installation interruption")
             return original_replace(source, destination)
-        with mock.patch("project_relocation.os.replace", side_effect=fail_once):
+        with mock.patch("swotflow.project.relocation.os.replace", side_effect=fail_once):
             with self.assertRaisesRegex(OSError, "simulated metadata"):
                 relocate_project(failed_target, confirmed_stopped=True)
         recovered = p.VerificationStore(failed_target / "00_logs")

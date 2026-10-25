@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from project_database import (
+from swotflow.project.database import (
     ProjectDatabase,
     database_path_for,
     migrate_project_csvs,

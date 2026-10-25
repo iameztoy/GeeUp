@@ -1,11 +1,12 @@
+from swotflow.paths import script_command
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
 
-from gdal_runtime import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env, check_gdal_runtime
-from swot_extract_tool import (
+from swotflow.core.gdal import DEFAULT_GDAL_PYTHON, build_gdal_runtime_env, check_gdal_runtime
+from swotflow.processing.extract import (
     ExtractConfig,
     ExtractSource,
     REWRITTEN_INVALID_EXISTING_STATUS,
@@ -257,7 +258,7 @@ class ExtractPlanningTests(unittest.TestCase):
             )
             source = ExtractSource(path=input_path, metadata=metadata)
 
-            import swot_extract_tool
+            import swotflow.processing.extract as swot_extract_tool
 
             calls = {"validate": 0, "removed_before_write": False}
 
@@ -294,11 +295,7 @@ class ExtractPlanningTests(unittest.TestCase):
 class ExtractGdalRuntimeTests(unittest.TestCase):
     def test_check_gdal_command_confirms_required_drivers(self) -> None:
         result = subprocess.run(
-            [
-                str(DEFAULT_GDAL_PYTHON),
-                str(Path(__file__).resolve().parents[1] / "swot_extract_tool.py"),
-                "--check-gdal",
-            ],
+            script_command(str(DEFAULT_GDAL_PYTHON), Path(__file__).resolve().parents[1] / "swotflow/processing/extract.py", "--check-gdal"),
             cwd=str(Path(__file__).resolve().parents[1]),
             env=build_gdal_runtime_env(DEFAULT_GDAL_PYTHON),
             text=True,

@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from project_relocation import ValidationReport
-from project_transfer_dialog import ProjectTransferDialog
+from swotflow.project.relocation import ValidationReport
+from swotflow.project.transfer_dialog import ProjectTransferDialog
 
 
 class ProjectTransferDialogTests(unittest.TestCase):
@@ -31,7 +31,7 @@ class ProjectTransferDialogTests(unittest.TestCase):
             self.assertLessEqual(button.winfo_rootx() + button.winfo_width(), self.dialog.winfo_rootx() + self.dialog.winfo_width())
 
     def test_requires_stopped_confirmation_before_spawning_worker(self):
-        with mock.patch("project_transfer_dialog.messagebox.showwarning") as warning, mock.patch("project_transfer_dialog.threading.Thread") as thread:
+        with mock.patch("swotflow.project.transfer_dialog.messagebox.showwarning") as warning, mock.patch("swotflow.project.transfer_dialog.threading.Thread") as thread:
             self.dialog.start("validate")
             warning.assert_called_once()
             thread.assert_not_called()
@@ -41,7 +41,7 @@ class ProjectTransferDialogTests(unittest.TestCase):
             folder = Path(temp)
             self.dialog.path_var.set(str(folder / "project.yaml"))
             self.dialog.stopped_var.set(True)
-            with mock.patch("project_transfer_dialog.threading.Thread") as thread:
+            with mock.patch("swotflow.project.transfer_dialog.threading.Thread") as thread:
                 self.dialog.start("validate")
                 thread.return_value.start.assert_called_once()
             self.assertTrue(self.dialog.busy)

@@ -8,7 +8,7 @@ from unittest import mock
 
 from selenium.common.exceptions import InvalidSessionIdException, TimeoutException, WebDriverException
 
-from ee_ui_uploader import (
+from swotflow.earthengine.uploader import (
     BLOCKED_PRODUCT_VERSION_CONFLICT_STATUS,
     EE_VERIFIED_EXISTS_STATUS,
     FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS,
@@ -27,7 +27,7 @@ from ee_ui_uploader import (
     normalize_ee_operation,
     parse_config,
 )
-from project_database import read_project_rows
+from swotflow.project.database import read_project_rows
 
 
 class UploaderDialogRegressionTests(unittest.TestCase):
@@ -43,15 +43,15 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             uploader.ee_existing_asset_ids.add(aid)
             uploader._verified_inventory = {aid: {"id": aid}}
             proof = {"stage": "mosaic", "sources": {}, "sha256": "new"}
-            with mock.patch.object(uploader, "sync_earth_engine_inventory"), \
-                 mock.patch("pipeline_verification.VerificationStore.artifact", return_value=proof), \
-                 mock.patch("pipeline_verification.artifact_current", return_value=True):
+            with mock.patch.object(uploader, "sync_earth_engine_inventory"),\
+                 mock.patch("swotflow.verification.pipeline.VerificationStore.artifact", return_value=proof),\
+                 mock.patch("swotflow.verification.pipeline.artifact_current", return_value=True):
                 with self.assertRaisesRegex(ValueError, "Existing EE revision is unverified"):
                     uploader.build_upload_plan()
                 self.assertEqual(uploader.existing_revision_status(local, aid), "EXISTING_REVISION_UNVERIFIED")
 
     def test_upload_properties_bind_prepared_revision(self) -> None:
-        from pipeline_verification import ingestion_properties
+        from swotflow.verification.pipeline import ingestion_properties
         from tests.test_download_tool import granule_name
         with tempfile.TemporaryDirectory() as temp:
             uploader = self.uploader(self.uploader_config(Path(temp)))
@@ -59,7 +59,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             local = Path(temp) / Path(granule_name()).with_suffix(".tif")
             item = UploadItem(local, local.stem, "asset")
             item.ingestion_revision = {"token": "unique", "local_sha256": "hash", "sources": {"source": "checksum"}}
-            with mock.patch.object(uploader, "is_current_upload_dialog_open", return_value=True), \
+            with mock.patch.object(uploader, "is_current_upload_dialog_open", return_value=True),\
                  mock.patch.object(uploader, "_apply_current_ui_metadata_properties") as apply:
                 uploader.apply_metadata_properties(item)
                 self.assertEqual({k: apply.call_args.args[0].properties[k] for k in ingestion_properties(item.ingestion_revision)},
@@ -70,7 +70,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             uploader = self.uploader(self.uploader_config(Path(temp)))
             uploader.config.upload.pyramiding_policy.default = "SAMPLE"
             uploader.config.upload.pyramiding_policy.per_band = {"b1":"SAMPLE","b2":"SAMPLE"}
-            with mock.patch.object(uploader,"is_current_upload_dialog_open",return_value=True), \
+            with mock.patch.object(uploader,"is_current_upload_dialog_open",return_value=True),\
                  mock.patch.object(uploader,"execute_script",return_value={"ok":True}) as script:
                 self.assertTrue(uploader._apply_current_ui_pyramiding_policy())
                 self.assertIn("${arguments[0]}",script.call_args.args[0])
@@ -98,14 +98,14 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             (root/"inputs"/"test.tif").write_bytes(b"test")
             first, second = granule_name(scene="001F"), granule_name(scene="002F")
             proof = {"stage":"mosaic","sources":{first:{"hash":"a"},second:{"hash":"b"}}}
-            with mock.patch.object(uploader,"sync_earth_engine_inventory"), \
-                 mock.patch("pipeline_verification.VerificationStore.artifact",return_value=None):
+            with mock.patch.object(uploader,"sync_earth_engine_inventory"),\
+                 mock.patch("swotflow.verification.pipeline.VerificationStore.artifact",return_value=None):
                 with self.assertRaisesRegex(ValueError,"mosaic byte proof"):
                     uploader.build_upload_plan()
-            with mock.patch.object(uploader,"sync_earth_engine_inventory"), \
-                 mock.patch("pipeline_verification.VerificationStore.artifact",return_value=proof), \
-                 mock.patch("pipeline_verification.artifact_current",return_value=True), \
-                 mock.patch("pipeline_verification.active_proofs",return_value={first:{"checksum":{"hash":"a"},"asset_id":"old"}}):
+            with mock.patch.object(uploader,"sync_earth_engine_inventory"),\
+                 mock.patch("swotflow.verification.pipeline.VerificationStore.artifact",return_value=proof),\
+                 mock.patch("swotflow.verification.pipeline.artifact_current",return_value=True),\
+                 mock.patch("swotflow.verification.pipeline.active_proofs",return_value={first:{"checksum":{"hash":"a"},"asset_id":"old"}}):
                 with self.assertRaisesRegex(ValueError,"partially duplicated mosaic"):
                     uploader.build_upload_plan()
                 uploader._verified_active_inputs[second] = {"checksum":{"hash":"b"},"asset_id":"old"}
@@ -350,7 +350,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                     "wait_for_current_upload_dialog_close",
                     side_effect=RetryableUIError("remained open without progress"),
                 ),
-                mock.patch("ee_ui_uploader.time.sleep"),
+                mock.patch("swotflow.earthengine.uploader.time.sleep"),
             ):
                 with self.assertRaises(RetryableUIError) as raised:
                     uploader.submit_upload_dialog(item)
@@ -378,7 +378,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                     uploader,
                     "wait_for_current_upload_dialog_close",
                 ),
-                mock.patch("ee_ui_uploader.time.sleep"),
+                mock.patch("swotflow.earthengine.uploader.time.sleep"),
             ):
                 outcome = uploader.submit_upload_dialog(item)
 
@@ -402,7 +402,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                 ),
                 mock.patch.object(uploader, "current_upload_progress_signature", return_value=""),
                 mock.patch.object(uploader, "read_dialog_error_message", return_value=""),
-                mock.patch("ee_ui_uploader.time.sleep"),
+                mock.patch("swotflow.earthengine.uploader.time.sleep"),
             ):
                 uploader.wait_for_current_upload_dialog_close(
                     item,
@@ -659,7 +659,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
             fake_ee = FakeEe()
             config = self.uploader_config(root, scope="all", ee_sync=True)
 
-            with mock.patch("ee_ui_uploader.import_ee", return_value=fake_ee):
+            with mock.patch("swotflow.earthengine.uploader.import_ee", return_value=fake_ee):
                 plan = self.uploader(config).build_upload_plan()
 
             rows = self.read_report_rows(config.artifacts.report_csv)
@@ -701,7 +701,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                 )
             config = self.uploader_config(root, scope="all", ee_sync=True)
 
-            with mock.patch("ee_ui_uploader.import_ee", return_value=FakeEe()):
+            with mock.patch("swotflow.earthengine.uploader.import_ee", return_value=FakeEe()):
                 plan = self.uploader(config).build_upload_plan()
 
             rows = self.read_report_rows(config.artifacts.report_csv)
@@ -739,7 +739,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                 )
             config = self.uploader_config(root, scope="all", ee_sync=True)
 
-            with mock.patch("ee_ui_uploader.import_ee", return_value=FakeEe()):
+            with mock.patch("swotflow.earthengine.uploader.import_ee", return_value=FakeEe()):
                 plan = self.uploader(config).build_upload_plan()
 
             self.assertEqual([item.asset_id for item in plan], ["projects/example/assets/collection/a"])
@@ -774,7 +774,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                 )
             config = self.uploader_config(root, scope="all", ee_sync=True)
 
-            with mock.patch("ee_ui_uploader.import_ee", return_value=FakeEe()):
+            with mock.patch("swotflow.earthengine.uploader.import_ee", return_value=FakeEe()):
                 plan = self.uploader(config).build_upload_plan()
 
             self.assertEqual([item.asset_id for item in plan], ["projects/example/assets/collection/a"])
@@ -850,7 +850,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                 ee_sync=False,
             )
 
-            with mock.patch("ee_ui_uploader.import_ee", return_value=FakeEe()):
+            with mock.patch("swotflow.earthengine.uploader.import_ee", return_value=FakeEe()):
                 count = self.uploader(config).sync_existing_assets_to_report()
 
             rows = self.read_report_rows(config.artifacts.report_csv)
@@ -889,7 +889,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
 
             with mock.patch.object(uploader, "collect_task_rows", return_value=[]):
                 with mock.patch.object(uploader, "sync_earth_engine_inventory", side_effect=fake_sync_inventory):
-                    with mock.patch("ee_ui_uploader.time.sleep") as sleep:
+                    with mock.patch("swotflow.earthengine.uploader.time.sleep") as sleep:
                         uploader.wait_for_all_tracked_tasks()
 
             rows = self.read_report_rows(config.artifacts.report_csv)
@@ -972,7 +972,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                 "refresh_earth_engine_operations",
                 side_effect=acknowledge_one,
             ) as refresh:
-                with mock.patch("ee_ui_uploader.time.sleep"):
+                with mock.patch("swotflow.earthengine.uploader.time.sleep"):
                     drained = uploader.wait_for_browser_upload_capacity(target_pending=1)
 
             self.assertTrue(drained)

@@ -1,0 +1,15 @@
+# SWOTFlow v0.8.0: core versions used for Windows GDAL regression validation.
+# Keep this separate from the GUI/upload virtual environment.
+# This pins direct dependencies, not every transitive library/build.
+name: swot_gdal
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11.15
+  - gdal=3.13.0
+  - libgdal-core=3.13.0
+  - libgdal-netcdf=3.13.0
+  - libnetcdf=4.10.0
+  - proj=9.8.1
+  - numpy=2.4.5
+  - tqdm=4.67.3

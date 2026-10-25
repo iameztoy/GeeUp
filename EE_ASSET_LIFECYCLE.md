@@ -106,6 +106,6 @@ Retirement procedure to implement: freeze an explicit proposed list; verify repl
 
 ## Sources
 
-Repository implementation reviewed 24 October 2026: `ee_consolidation.py`, `ee_consolidation_update.py`, `ee_consolidation_tab.py`, `swotflow_gui.py`, `project_insights.py`, `ee_ui_uploader.py`, `project_database.py` and `utm_map_selector.py`.
+Repository implementation reviewed 24 October 2026: `swotflow/consolidation/core.py`, `swotflow/consolidation/update.py`, `swotflow/consolidation/tab.py`, `swotflow_gui.py`, `swotflow/project/insights.py`, `swotflow/earthengine/uploader.py`, `swotflow/project/database.py` and `swotflow/ui/utm_map.py`.
 
 Official EE documentation checked the same day: [batch processing](https://developers.google.com/earth-engine/guides/processing_environments), [collections from explicit image lists](https://developers.google.com/earth-engine/apidocs/ee-imagecollection-fromimages), and [asset management](https://developers.google.com/earth-engine/guides/manage_assets).

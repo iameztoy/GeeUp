@@ -15,12 +15,12 @@ except ImportError:
 @unittest.skipIf(gdal is None, "Run with the configured GDAL environment")
 class SourceReplayTests(unittest.TestCase):
     def test_verified_pipeline_and_oracle_detects_injected_shift(self) -> None:
-        import download_integrity
-        from pipeline_verification import VerificationStore
-        from source_pixel_verification import check_sources
-        from swot_download_tool import normalize_granule
-        from swot_extract_tool import ExtractConfig, run_extract
-        from ee_mosaic_tool import MosaicConfig, run_mosaic
+        import swotflow.verification.download as download_integrity
+        from swotflow.verification.pipeline import VerificationStore
+        from swotflow.verification.source import check_sources
+        from swotflow.processing.download import normalize_granule
+        from swotflow.processing.extract import ExtractConfig, run_extract
+        from swotflow.processing.mosaic import MosaicConfig, run_mosaic
         from tests.test_download_tool import FakeGranule, granule_name
         gdal.UseExceptions()
         with tempfile.TemporaryDirectory() as temp:

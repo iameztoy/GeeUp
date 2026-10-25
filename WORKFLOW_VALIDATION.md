@@ -1,4 +1,4 @@
-# Workflow verification and rebuild gates — v0.7.2
+# Workflow verification and rebuild gates — v0.8.0
 
 Do not start a continent-wide rebuild solely because the application version has changed. Start a separate project with a small, explicit acquisition scope. Keep the old project as historical evidence. Collection deletion is an operator action, not an application upgrade or an automatic repair.
 
@@ -28,4 +28,6 @@ Do not start a continent-wide rebuild solely because the application version has
 - Cleanup and resume consult current downstream proofs and resolvable approved replacement history. Legacy filename-only chains remain pending. Automatic cloud retirement and active-dataset publication are still absent.
 - Still needed separately: a spatial coverage report distinguishing missing catalogue inputs, upstream source-data gaps and invalid/no-observation pixels. Re-downloading cannot create observations absent from NASA's source products.
 
-These are acceptance gates, not claims that the full pipeline is already certified. All investigation data, real-source pilot outputs and collection-reset journals stay outside this repository. Application regression tests remain in `tests/`. GitHub release titles and descriptions must include **v0.7.2** when this version is published. The v0.7.2 Statistics clarifications do not change processing or resolve the outstanding pipeline review findings.
+The v0.7.3 review fixes add preferred-version selection before mosaicking, revision-bound ingestion receipts, duplicate-acquisition checks, indexed receipt lookup, verification-ledger relocation and ordered cleanup. The v0.8.0 package reorganization preserves these rules. A fresh browser-upload pilot and a changed-input update still need live acceptance before a continental rebuild; passing offline checks is not a full production certificate.
+
+All investigation data, real-source pilot outputs and collection-reset journals stay outside this repository. Application regression tests remain in `tests/`. GitHub release titles and descriptions must include **v0.8.0** for this release.

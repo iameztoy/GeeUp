@@ -1,8 +1,8 @@
 import tkinter as tk
 import unittest
 
-from swotflow_project import TilePreset
-from utm_map_selector import (
+from swotflow.project.model import TilePreset
+from swotflow.ui.utm_map import (
     CanvasTransform,
     UTMPipelineStatusMap,
     UTMMapSelectorDialog,

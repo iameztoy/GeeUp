@@ -1,7 +1,7 @@
 from pathlib import Path
 import unittest
 
-from swot_metadata import crid_rank, parse_swot_l2_hr_raster_metadata, swot_product_rank
+from swotflow.core.metadata import crid_rank, parse_swot_l2_hr_raster_metadata, swot_product_rank
 
 
 EXTRA_PROPERTIES = {

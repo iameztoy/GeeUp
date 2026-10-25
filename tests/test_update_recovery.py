@@ -9,18 +9,18 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from ee_ui_uploader import EarthEngineUIUploader, active_upload_dialog_helper_js
-from project_database import ProjectDatabase, read_project_rows
-from project_insights import build_update_coverage_tile_rows, collect_project_insights, write_project_insights_snapshot, load_project_insights_snapshot
-from project_operation_lock import automation_lock
-from project_updates import record_update_expected_rows, campaign_rows, set_campaign_archived
-from swotflow_automation import (AutomationConfig, AutomationRunState, AutomationTilePlan,
+from swotflow.earthengine.uploader import EarthEngineUIUploader, active_upload_dialog_helper_js
+from swotflow.project.database import ProjectDatabase, read_project_rows
+from swotflow.project.insights import build_update_coverage_tile_rows, collect_project_insights, write_project_insights_snapshot, load_project_insights_snapshot
+from swotflow.project.lock import automation_lock
+from swotflow.project.updates import record_update_expected_rows, campaign_rows, set_campaign_archived
+from swotflow.processing.automation import (AutomationConfig, AutomationRunState, AutomationTilePlan,
                                 preflight_automation, latest_automation_run_dir, reconcile_preflight_completion)
-from swotflow_gui import LauncherApp
+from swotflow.ui.main import LauncherApp
 from tests.test_automation import base_config, fake_granule
 from tests.test_project_insights import swot_name
-from swot_download_tool import DownloadPreview, build_download_query
-from utm_map_selector import UTMPipelineStatusMap
+from swotflow.processing.download import DownloadPreview, build_download_query
+from swotflow.ui.utm_map import UTMPipelineStatusMap
 
 
 class UpdateRecoveryTests(unittest.TestCase):
@@ -118,7 +118,7 @@ class UpdateRecoveryTests(unittest.TestCase):
             def preview(cfg):
                 return DownloadPreview(query=build_download_query(cfg), granules=[granule])
             builder = mock.Mock(side_effect=preview)
-            with mock.patch("swotflow_automation.windows_automation_reboot_warnings", return_value=[]):
+            with mock.patch("swotflow.processing.automation.windows_automation_reboot_warnings", return_value=[]):
                 result = preflight_automation(request, preview_builder=builder)
             builder.assert_called_once()
             self.assertTrue(result.preflight_ok, result.errors)
@@ -138,7 +138,7 @@ class UpdateRecoveryTests(unittest.TestCase):
                 "mosaic_manifest": [{"output_file": mosaic, "input_files": json.dumps([tif]), "status": "MOSAIC_CREATED"}],
                 "upload_report": [{"local_file": mosaic, "final_status": "EE_VERIFIED_EXISTS"}],
             }
-            with mock.patch("swotflow_automation.read_project_rows", side_effect=lambda path, dataset: stages[dataset]):
+            with mock.patch("swotflow.processing.automation.read_project_rows", side_effect=lambda path, dataset: stages[dataset]):
                 for status, expected_class in [("EE_VERIFIED_EXISTS", "already complete"), ("SUBMITTED", "partial/resumable")]:
                     stages["upload_report"][0]["final_status"] = status
                     state.tile_plans = [AutomationTilePlan("UTM34M", "needs update", "old filename missing", pending_downloads=1)]
@@ -151,7 +151,7 @@ class UpdateRecoveryTests(unittest.TestCase):
         app = LauncherApp.__new__(LauncherApp)
         app.automation_running = False
         app.automation_preflight_running = True
-        with mock.patch("swotflow_gui.messagebox.showwarning") as warning, mock.patch.object(app, "automation_config_from_ui") as config:
+        with mock.patch("swotflow.ui.main.messagebox.showwarning") as warning, mock.patch.object(app, "automation_config_from_ui") as config:
             app.run_automation_preflight()
         warning.assert_called_once()
         config.assert_not_called()
@@ -170,10 +170,10 @@ class UpdateRecoveryTests(unittest.TestCase):
         state.config.start_date = "2026-08-10"
         state.config.end_date = "2026-09-10"
         state.config.utm_tiles = ["UTM34M"]
-        with mock.patch.object(app, "build_config", return_value={}), mock.patch("swotflow_gui.load_latest_automation_run_state", return_value=state), mock.patch.object(app, "apply_automation_run_state") as apply:
+        with mock.patch.object(app, "build_config", return_value={}), mock.patch("swotflow.ui.main.load_latest_automation_run_state", return_value=state), mock.patch.object(app, "apply_automation_run_state") as apply:
             self.assertFalse(app.load_latest_automation_run_for_project())
             apply.assert_not_called()
-            with mock.patch("swotflow_gui.messagebox.askyesno", return_value=False) as confirm:
+            with mock.patch("swotflow.ui.main.messagebox.askyesno", return_value=False) as confirm:
                 self.assertFalse(app.load_latest_automation_run_for_project(notify=True))
                 confirm.assert_called_once()
                 apply.assert_not_called()

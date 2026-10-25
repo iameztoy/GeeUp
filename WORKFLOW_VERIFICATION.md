@@ -1,4 +1,4 @@
-# Workflow verification — v0.7.2
+# Workflow verification — v0.8.0
 
 Verified mode connects exact preferred NASA filenames and checksums to local outputs and current Earth Engine assets. It applies to initial runs and updates in the same project. Preserve the project logs and databases when cleaning rasters; independent projects do not automatically share history.
 
@@ -77,4 +77,4 @@ Approved consolidation evidence is reused only when it can be connected to check
 
 Back up `00_logs/nasa_catalog_history.sqlite3`, `download_verification.sqlite3`, `workflow_verification.sqlite3`, project manifests/database and consolidation plans/register. Dated stage reports are in `verification_reports/`; original-source results in `source_pixel_checks/`. Credentials are excluded from receipts.
 
-Historical refresh and integrity checks are manually launched. Scheduling, automatic repair execution, a stratified collection-wide audit queue, automatic cloud retirement and a spatial gap atlas remain future work. A limited successful pilot supports those tested native cases; it does not certify every grid, date, processing version or optional projection. Investigation reports/data stay outside the application repository. Use **v0.7.3** in any GitHub release title and description. The historical spatial-shift mechanism remains unresolved; these safeguards and independent checks do not establish that cause.
+Historical refresh and integrity checks are manually launched. Scheduling, automatic repair execution, a stratified collection-wide audit queue, automatic cloud retirement and a spatial gap atlas remain future work. A limited successful pilot supports those tested native cases; it does not certify every grid, date, processing version or optional projection. Investigation reports/data stay outside the application repository. Use **v0.8.0** in any GitHub release title and description. The historical spatial-shift mechanism remains unresolved; these safeguards and independent checks do not establish that cause.

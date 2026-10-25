@@ -9,9 +9,9 @@ from datetime import datetime, timedelta, timezone
 from contextlib import closing
 from pathlib import Path
 
-import ee_consolidation as c
-import ee_consolidation_update as u
-from ee_replacement_register import ReplacementRegister
+import swotflow.consolidation.core as c
+import swotflow.consolidation.update as u
+from swotflow.consolidation.register import ReplacementRegister
 from tests.test_ee_consolidation import asset, manifest, COLLECTION, DESTINATION, local_temp
 from tests.test_ee_consolidation_update import stored
 

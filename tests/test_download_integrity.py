@@ -8,9 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-import download_integrity as integrity
-import nasa_catalog_history as history
-import swot_download_tool as d
+import swotflow.verification.download as integrity
+import swotflow.catalog.history as history
+import swotflow.processing.download as d
 from tests.test_download_tool import FakeGranule, FakePagedEarthaccess, FakeEarthaccess, granule_name
 
 

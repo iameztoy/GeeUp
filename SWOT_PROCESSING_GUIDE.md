@@ -12,7 +12,7 @@ The current GUI workflow is:
 4. `Mosaic`
 5. `Upload`
 
-An optional **EE Consolidation** tab follows Upload and precedes Statistics for post-ingestion processing. It uses `ee_consolidation.py`, `ee_consolidation_update.py` and `ee_consolidation_tab.py`, independently of the local extraction/mosaic workers. Introduced in v0.5.0, `ee_replacement_register.py` and `ee_consolidation_coverage_ui.py` add a separate transactional local register, Statistics tables and source-tile consolidation coverage on the map. They do not change the pipeline database, workers, audits or EE assets. See [GETTING_STARTED.md](./GETTING_STARTED.md) and [replacement-register operations](EE_REPLACEMENT_REGISTER.md) for controls, duplicate checks, verification scope and the remaining retirement work.
+An optional **EE Consolidation** tab follows Upload and precedes Statistics for post-ingestion processing. It uses `swotflow/consolidation/core.py`, `swotflow/consolidation/update.py` and `swotflow/consolidation/tab.py`, independently of the local extraction/mosaic workers. Introduced in v0.5.0, `swotflow/consolidation/register.py` and `swotflow/consolidation/coverage_ui.py` add a separate transactional local register, Statistics tables and source-tile consolidation coverage on the map. They do not change the pipeline database, workers, audits or EE assets. See [GETTING_STARTED.md](./GETTING_STARTED.md) and [replacement-register operations](EE_REPLACEMENT_REGISTER.md) for controls, duplicate checks, verification scope and the remaining retirement work.
 
 In v0.6.0, **Statistics → NASA History** preserves candidate filenames, processing versions and catalogue revisions, with batch-transfer checkpoints when enabled for future runs. Historical checks compare the existing CRID/counter policy winner with recorded EE inputs, not merely downloaded files. This separate metadata checker can reconcile the 100 m and parent Raster catalogues without changing production download scope. See [NASA_HISTORY.md](NASA_HISTORY.md) for activation, evidence and limits.
 
@@ -64,7 +64,7 @@ The current background geometry is a continent layer, not a country/admin-bounda
 Built-in continent presets are read from `spatial_presets/continent_utm_tiles.json`, and the visual selector reads `spatial_presets/utm_display_geometries.json`. Both files are generated offline from the UTM grid and continent GeoPackages with:
 
 ```powershell
-python build_spatial_presets.py --utm-grid C:\path\to\World_UTM_Grid.gpkg --continents C:\path\to\World_Continents.gpkg --output spatial_presets\continent_utm_tiles.json --display-output spatial_presets\utm_display_geometries.json
+python -m swotflow.tools.build_spatial_presets --utm-grid C:\path\to\World_UTM_Grid.gpkg --continents C:\path\to\World_Continents.gpkg --output spatial_presets\continent_utm_tiles.json --display-output spatial_presets\utm_display_geometries.json
 ```
 
 ## Download Inputs
@@ -337,7 +337,7 @@ This utility removes many image assets from an Earth Engine ImageCollection afte
 Script:
 
 ```text
-Utils/delete_ee_collection_children.py
+swotflow/tools/delete_ee_collection_children.py
 ```
 
 Dependency:
@@ -355,8 +355,8 @@ Commands:
 
 ```powershell
 .\.venv\Scripts\earthengine.exe authenticate
-.\.venv\Scripts\python.exe Utils\delete_ee_collection_children.py --asset projects/YOUR_PROJECT/assets/YOUR_COLLECTION
-.\.venv\Scripts\python.exe Utils\delete_ee_collection_children.py --asset projects/YOUR_PROJECT/assets/YOUR_COLLECTION --execute --yes
+.\.venv\Scripts\python.exe -m swotflow.tools.delete_ee_collection_children --asset projects/YOUR_PROJECT/assets/YOUR_COLLECTION
+.\.venv\Scripts\python.exe -m swotflow.tools.delete_ee_collection_children --asset projects/YOUR_PROJECT/assets/YOUR_COLLECTION --execute --yes
 ```
 
 Default behavior:
@@ -416,10 +416,10 @@ The full validation summary is in `00_logs/relocation_validation.json`, with iss
 Command-line equivalents from the application folder, using the destination project path:
 
 ```powershell
-.\.venv\Scripts\python.exe project_relocation.py E:\SWOT_e2e --relocate --confirm-stopped
-.\.venv\Scripts\python.exe project_relocation.py E:\SWOT_e2e
+.\.venv\Scripts\python.exe -m swotflow.project.relocation E:\SWOT_e2e --relocate --confirm-stopped
+.\.venv\Scripts\python.exe -m swotflow.project.relocation E:\SWOT_e2e
 # Only after an interrupted relocation:
-.\.venv\Scripts\python.exe project_relocation.py E:\SWOT_e2e --restore --confirm-stopped
+.\.venv\Scripts\python.exe -m swotflow.project.relocation E:\SWOT_e2e --restore --confirm-stopped
 ```
 
 Use repeated `--map OLD_FOLDER NEW_FOLDER` arguments for external data folders. Validation exits with code `2` when file/location issues need attention and `1` for an operation error. The original project is not modified. Never work on two project copies concurrently and expect their SQLite histories to merge automatically.

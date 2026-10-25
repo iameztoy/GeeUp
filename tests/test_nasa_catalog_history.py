@@ -12,8 +12,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-import nasa_catalog_history as h
-import swot_download_tool as d
+import swotflow.catalog.history as h
+import swotflow.processing.download as d
 from tests.test_download_tool import FakeGranule, FakePagedEarthaccess, FakeEarthaccess, FakeCMRResponse, granule_name
 
 
@@ -221,7 +221,7 @@ class HistoryTests(unittest.TestCase):
         product = {"kind": "consolidated", "role": "active", "availability": "present", "errors": [],
                    "verified": True, "verification": "full_pixels", "asset_id": "consolidated", "observed_utc": h.utc_now(),
                    "details": {"group": {"sources": [{"original_inputs": [{"filename": name}]}]}}}
-        with mock.patch("ee_replacement_register.ReplacementRegister.coverage", return_value={"products": [product]}):
+        with mock.patch("swotflow.consolidation.register.ReplacementRegister.coverage", return_value={"products": [product]}):
             represented, warnings = h.approved_consolidated_inputs(COLLECTION, "2026-01-01", "2026-01-31")
             self.assertEqual(represented[0]["filename"], name)
             self.assertFalse(warnings)

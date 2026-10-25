@@ -1,5 +1,51 @@
 # Application source and local investigations
 
+## Package layout and entry points
+
+`swotflow_gui.py` is the small top-level GUI launcher. The implementation lives
+in `swotflow/`, grouped by responsibility:
+
+```text
+swotflow/
+  catalog/        NASA catalogue history and its interface
+  consolidation/ EE mosaic planning, updates, replacement register and panels
+  core/           filename metadata, storage, GDAL runtime and power helpers
+  earthengine/    browser uploader and selectors
+  processing/     download, duplicate removal, extraction, mosaicking, Automation
+  project/        project state, database, updates, statistics, relocation, cleanup
+  tools/          optional maintenance and preset/asset builders
+  ui/             main window and UTM map widgets
+  verification/   download receipts, provenance and independent pixel checks
+  paths.py        application-resource paths and child-process commands
+  version.py      shared application version
+```
+
+Launch from the checkout with `python swotflow_gui.py` or `python -m swotflow`.
+Run individual workers as modules, for example:
+
+```powershell
+python -m swotflow.processing.download --config config.yaml --dry-run
+.\.conda\swot_gdal\python.exe -m swotflow.processing.extract --check-gdal
+python -m swotflow.earthengine.uploader --config config.yaml --dry-run
+```
+
+The former standalone worker file paths and flat Python imports have moved.
+Update custom command lines/imports to their package locations; no duplicate
+implementation copies or legacy worker stubs remain at the top level. The GUI
+launch command, project formats, configuration locations and processing rules
+remain compatible. Package imports do not run workers automatically.
+
+Use `swotflow.paths.APP_ROOT` for bundled assets, presets and application files.
+Use `script_command()` with `cwd=APP_ROOT` for Python/GDAL subprocesses so they
+resolve the package even when the user's project is on another drive. Scientific
+input/output paths continue to come from the project configuration.
+
+For an investigation's frozen code snapshot, preserve the complete `swotflow/`
+package and launcher, not just top-level Python files. Historical investigations
+retain their own earlier snapshots and are not automatically migrated or rerun.
+
+## Source and investigation separation
+
 The repository contains shipped application modules, generic documentation,
 configuration templates, bundled UI assets and automated regression tests.
 Keep these regression tests in GitHub: they verify supported application behaviour
@@ -62,6 +108,13 @@ Run the maintained suite from the application checkout:
 Use the configured GDAL environment for GDAL-dependent checks. Tests use temporary
 folders; no real project or cloud changes are required. Investigation workers are
 run separately and are never started as part of the application regression suite.
+
+For v0.8.0, `environments/requirements-validated.txt` and
+`environments/swot-gdal-validated.yml` pin the direct dependencies/core libraries
+used for Windows validation. They are optional reproducibility references, not
+full transitive lockfiles. NumPy is explicitly required by native pixel checks in
+the GUI environment; GDAL retains its separate NumPy installation. Do not update
+either environment while a worker is running.
 
 Before publication, inspect the exact staged file list and test the application
 from those files. Stage intended source files explicitly. Generated data and

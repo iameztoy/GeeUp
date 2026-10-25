@@ -151,20 +151,20 @@ What it usually means:
 - Earth Engine changed the HTML
 - the page is still loading
 - you are on the wrong panel
-- the selector in `ee_selectors.py` needs updating
+- the selector in `swotflow/earthengine/selectors.py` needs updating
 
 What to do:
 
 1. Run again with console debug logging if needed:
 
 ```powershell
-python ee_ui_uploader.py --config config.yaml --verbose
+python -m swotflow.earthengine.uploader --config config.yaml --verbose
 ```
 
 2. Open the generated screenshot and HTML file in the configured artifact folder. In project mode this is `<project_root>/00_logs/upload_artifacts/`; older non-project runs may use `artifacts/`.
 3. Check whether the browser really reached the expected Earth Engine page.
 4. Inspect the page with Chrome DevTools.
-5. Update the relevant selector in `ee_selectors.py`.
+5. Update the relevant selector in `swotflow/earthengine/selectors.py`.
 
 ## Stale Element Reference
 
@@ -181,7 +181,7 @@ What to do:
 1. Rerun the script. The uploader already retries transient UI failures.
 2. Increase `upload.retry_attempts` if needed.
 3. Increase `execution.short_ui_wait_seconds` slightly if menus are animating slowly.
-4. If the same control keeps rerendering, refine its selector in `ee_selectors.py`.
+4. If the same control keeps rerendering, refine its selector in `swotflow/earthengine/selectors.py`.
 
 ## Upload Dialog Not Opening
 
@@ -201,8 +201,8 @@ What to do:
    - open the Assets tab
    - use the `NEW` button under the Assets tab, not the one under the Scripts tab
    - find the control that opens GeoTIFF image upload
-2. Check the shadow-DOM selectors in `ee_selectors.py`, especially `SHADOW_SELECTORS`.
-3. If needed, update `new_button` and `image_upload_button` in `ee_selectors.py` for the generic fallbacks too.
+2. Check the shadow-DOM selectors in `swotflow/earthengine/selectors.py`, especially `SHADOW_SELECTORS`.
+3. If needed, update `new_button` and `image_upload_button` in `swotflow/earthengine/selectors.py` for the generic fallbacks too.
 4. Re-run in dry-run mode first.
 
 ## Earth Engine Is Visible But The Console Reports a Page-Load Timeout
@@ -398,7 +398,7 @@ Symptoms:
 
 What to do:
 
-1. Open `ee_selectors.py`.
+1. Open `swotflow/earthengine/selectors.py`.
 2. Inspect the broken control in DevTools.
 3. Add or replace selectors using this order:
    - stable attributes
@@ -420,7 +420,7 @@ What to check:
 1. Confirm the filename follows the SWOT L2 HR Raster pattern with cycle, pass, scene, start time, end time, CRID, and product counter.
 2. Run a dry run and inspect `metadata_start_time`, `metadata_end_time`, `metadata_properties`, and `metadata_status` in the Upload summary or exported `<project_root>\00_logs\upload_report.csv`.
 3. If your filenames are not SWOT names, set `metadata.require_match: false` or `metadata.enabled: false`.
-4. If filenames parse correctly but the browser fields are not filled, inspect the upload dialog's Properties controls and update the metadata selector labels in `ee_selectors.py`.
+4. If filenames parse correctly but the browser fields are not filled, inspect the upload dialog's Properties controls and update the metadata selector labels in `swotflow/earthengine/selectors.py`.
 5. Test one real upload and verify the asset properties manually in Earth Engine before running a large batch.
 
 ## Nothing Happens After Clicking UPLOAD
@@ -439,7 +439,7 @@ What to do:
 
 1. Watch the Tasks panel manually during a run.
 2. Compare the task text with the asset name and file name.
-3. Update the task row selector or matching logic in `ee_ui_uploader.py`.
+3. Update the task row selector or matching logic in `swotflow/earthengine/uploader.py`.
 4. Check the saved HTML dump in the configured artifact folder. In project mode this is `<project_root>/00_logs/upload_artifacts/`.
 
 Current uploads wait for the dialog to close, not for a per-file Tasks-panel

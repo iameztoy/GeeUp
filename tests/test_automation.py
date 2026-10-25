@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from swotflow_automation import (
+from swotflow.processing.automation import (
     AutomationConfig,
     AutomationRunState,
     AutomationStageResult,
@@ -23,10 +23,10 @@ from swotflow_automation import (
     write_run_state,
     write_tile_config,
 )
-from project_database import upsert_project_rows
-from swot_download_tool import DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS
-from project_updates import record_update_expected_rows
-from power_management import active_hours_leave_overnight_unprotected, hour_inside_active_hours
+from swotflow.project.database import upsert_project_rows
+from swotflow.processing.download import DEFAULT_CMR_REQUEST_TIMEOUT_SECONDS
+from swotflow.project.updates import record_update_expected_rows
+from swotflow.core.power import active_hours_leave_overnight_unprotected, hour_inside_active_hours
 
 
 def base_config(root: Path) -> dict:
@@ -164,7 +164,7 @@ class AutomationTests(unittest.TestCase):
                 min_free_space_gb=0,
             )
             with mock.patch(
-                "swotflow_automation.tile_counts_from_insights",
+                "swotflow.processing.automation.tile_counts_from_insights",
                 return_value={"UTM34M": (10, 10, 4, 0, 4, 0)},
             ):
                 state = preflight_automation(automation_config, preview_builder=preview_builder)
@@ -201,7 +201,7 @@ class AutomationTests(unittest.TestCase):
             )
 
             with mock.patch(
-                "swotflow_automation.windows_automation_reboot_warnings",
+                "swotflow.processing.automation.windows_automation_reboot_warnings",
                 return_value=["Windows Update reports a pending reboot."],
             ):
                 state = preflight_automation(automation_config, preview_builder=preview_builder)
@@ -243,7 +243,7 @@ class AutomationTests(unittest.TestCase):
             preview_builder = mock.Mock(side_effect=AssertionError("CMR should not be queried"))
 
             with mock.patch(
-                "swotflow_automation.windows_automation_reboot_warnings",
+                "swotflow.processing.automation.windows_automation_reboot_warnings",
                 return_value=[],
             ):
                 state = preflight_automation(automation_config, preview_builder=preview_builder)
@@ -273,7 +273,7 @@ class AutomationTests(unittest.TestCase):
                 )
 
             with mock.patch(
-                "swotflow_automation.windows_automation_reboot_warnings",
+                "swotflow.processing.automation.windows_automation_reboot_warnings",
                 return_value=[],
             ):
                 state = preflight_automation(automation_config, preview_builder=preview_builder)
@@ -314,11 +314,11 @@ class AutomationTests(unittest.TestCase):
             )
             progress_rows = []
             with mock.patch(
-                "swotflow_automation.sync_ee_assets_for_preflight",
+                "swotflow.processing.automation.sync_ee_assets_for_preflight",
                 return_value=(0, "Earth Engine asset sync completed.", root / "sync.log"),
             ) as sync:
                 with mock.patch(
-                    "swotflow_automation.tile_counts_from_insights",
+                    "swotflow.processing.automation.tile_counts_from_insights",
                     return_value={},
                 ):
                     state = preflight_automation(
@@ -345,7 +345,7 @@ class AutomationTests(unittest.TestCase):
             )
             preview_builder = mock.Mock()
             with mock.patch(
-                "swotflow_automation.sync_ee_assets_for_preflight",
+                "swotflow.processing.automation.sync_ee_assets_for_preflight",
                 return_value=(1, "credentials unavailable", root / "sync.log"),
             ):
                 state = preflight_automation(
@@ -402,9 +402,9 @@ class AutomationTests(unittest.TestCase):
                     message="cleanup ok",
                 )
 
-            with mock.patch("swotflow_automation.execute_download_result", side_effect=download_result):
-                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
-                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+            with mock.patch("swotflow.processing.automation.execute_download_result", side_effect=download_result):
+                with mock.patch("swotflow.processing.automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow.processing.automation.execute_cleanup_result", side_effect=cleanup_result):
                         result = run_automation(config, preflight_state=state)
 
             complete_rows = [row for row in result.stage_results if row.tile == "UTM34M"]
@@ -446,9 +446,9 @@ class AutomationTests(unittest.TestCase):
                     deleted_files=1,
                 )
 
-            with mock.patch("swotflow_automation.execute_download_result") as download:
-                with mock.patch("swotflow_automation.execute_command_result") as command:
-                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result) as cleanup:
+            with mock.patch("swotflow.processing.automation.execute_download_result") as download:
+                with mock.patch("swotflow.processing.automation.execute_command_result") as command:
+                    with mock.patch("swotflow.processing.automation.execute_cleanup_result", side_effect=cleanup_result) as cleanup:
                         result = run_automation(config, preflight_state=state)
 
             download.assert_not_called()
@@ -497,11 +497,11 @@ class AutomationTests(unittest.TestCase):
                 )
 
             with mock.patch(
-                "swotflow_automation.plan_cleanup_candidates",
+                "swotflow.processing.automation.plan_cleanup_candidates",
                 return_value=[SimpleNamespace(stage="mosaic")],
             ):
                 with mock.patch(
-                    "swotflow_automation.execute_cleanup_result",
+                    "swotflow.processing.automation.execute_cleanup_result",
                     side_effect=cleanup_result,
                 ) as cleanup:
                     result = run_automation(config, preflight_state=state)
@@ -568,9 +568,9 @@ class AutomationTests(unittest.TestCase):
                     message="cleanup ok",
                 )
 
-            with mock.patch("swotflow_automation.execute_download_result", side_effect=download_result):
-                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
-                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+            with mock.patch("swotflow.processing.automation.execute_download_result", side_effect=download_result):
+                with mock.patch("swotflow.processing.automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow.processing.automation.execute_cleanup_result", side_effect=cleanup_result):
                         result = run_automation(config, preflight_state=state)
 
             self.assertIn(
@@ -600,7 +600,7 @@ class AutomationTests(unittest.TestCase):
                 AutomationTilePlan(tile="UTM34M", classification="already complete", message="done"),
             ]
 
-            with mock.patch("swotflow_automation.keep_system_awake") as keep_awake:
+            with mock.patch("swotflow.processing.automation.keep_system_awake") as keep_awake:
                 keep_awake.return_value.__enter__.return_value = None
                 keep_awake.return_value.__exit__.return_value = None
                 run_automation(config, preflight_state=state)
@@ -661,9 +661,9 @@ class AutomationTests(unittest.TestCase):
                     message="cleanup ok",
                 )
 
-            with mock.patch("swotflow_automation.execute_download_result", side_effect=download_result):
-                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
-                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+            with mock.patch("swotflow.processing.automation.execute_download_result", side_effect=download_result):
+                with mock.patch("swotflow.processing.automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow.processing.automation.execute_cleanup_result", side_effect=cleanup_result):
                         result = run_automation(config, preflight_state=state)
 
             tile_stage_statuses = [
@@ -701,8 +701,8 @@ class AutomationTests(unittest.TestCase):
                 selected = list(selected)
                 return len(selected), sum(item.size_bytes for item in selected), []
 
-            with mock.patch("swotflow_automation.plan_cleanup_candidates", return_value=candidates):
-                with mock.patch("swotflow_automation.delete_cleanup_candidates", side_effect=fake_delete):
+            with mock.patch("swotflow.processing.automation.plan_cleanup_candidates", return_value=candidates):
+                with mock.patch("swotflow.processing.automation.delete_cleanup_candidates", side_effect=fake_delete):
                     deleted, bytes_deleted, errors = cleanup_stage({}, "UTM30P", "mosaic")
 
             self.assertEqual(deleted, 1)
@@ -755,7 +755,7 @@ class AutomationTests(unittest.TestCase):
                 progress_callback(1, 1, "downloaded test granule")
                 return fake_result
 
-            with mock.patch("swotflow_automation.run_download", side_effect=fake_run_download):
+            with mock.patch("swotflow.processing.automation.run_download", side_effect=fake_run_download):
                 result = execute_download_result(
                     state,
                     "UTM34M",
@@ -864,9 +864,9 @@ class AutomationTests(unittest.TestCase):
                     message="cleanup ok",
                 )
 
-            with mock.patch("swotflow_automation.execute_download_result") as download:
-                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
-                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+            with mock.patch("swotflow.processing.automation.execute_download_result") as download:
+                with mock.patch("swotflow.processing.automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow.processing.automation.execute_cleanup_result", side_effect=cleanup_result):
                         result = run_automation(config, preflight_state=state)
 
             download.assert_not_called()
@@ -906,7 +906,7 @@ class AutomationTests(unittest.TestCase):
                 state.run_dir / "UTM34M" / "automation_config.yaml",
             )
             with mock.patch(
-                "swotflow_automation.run_subprocess_stage",
+                "swotflow.processing.automation.run_subprocess_stage",
                 return_value=(2, "Run finished with upload errors."),
             ):
                 result = execute_command_result(
@@ -970,9 +970,9 @@ class AutomationTests(unittest.TestCase):
                     message="cleanup ok",
                 )
 
-            with mock.patch("swotflow_automation.execute_download_result") as download:
-                with mock.patch("swotflow_automation.execute_command_result", side_effect=command_result):
-                    with mock.patch("swotflow_automation.execute_cleanup_result", side_effect=cleanup_result):
+            with mock.patch("swotflow.processing.automation.execute_download_result") as download:
+                with mock.patch("swotflow.processing.automation.execute_command_result", side_effect=command_result):
+                    with mock.patch("swotflow.processing.automation.execute_cleanup_result", side_effect=cleanup_result):
                         result = run_automation(config, preflight_state=state)
 
             download.assert_not_called()

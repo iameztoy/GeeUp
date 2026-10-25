@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from project_insights import (
+from swotflow.project.insights import (
     collect_project_insights,
     delete_cleanup_candidates,
     format_bytes,
@@ -12,8 +12,8 @@ from project_insights import (
     plan_cleanup_candidates,
     write_project_insights_snapshot,
 )
-from project_database import upsert_project_rows
-from project_updates import record_update_expected_rows
+from swotflow.project.database import upsert_project_rows
+from swotflow.project.updates import record_update_expected_rows
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
