@@ -1108,6 +1108,18 @@ class LauncherApp:
             wraplength=980,
             justify="left",
         ).grid(row=6, column=0, columnspan=8, sticky="ew", pady=(4, 0))
+        ttk.Checkbutton(
+            settings,
+            text="Refresh remote catalogue during preflight",
+            variable=self.automation_refresh_cmr_var,
+        ).grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(
+            settings,
+            text="Check NASA for current available files before planning. This does not change the tile/year processing order.",
+            foreground="#555555",
+            wraplength=980,
+            justify="left",
+        ).grid(row=8, column=0, columnspan=8, sticky="ew", pady=(4, 0))
 
         tiles = ttk.LabelFrame(parent, text="Automation UTM Tiles", padding=10)
         tiles.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
@@ -1180,8 +1192,6 @@ class LauncherApp:
             text="Start automatically after successful preflight",
             variable=self.automation_auto_start_after_preflight_var,
         ).grid(row=0, column=4, columnspan=2, sticky="w", padx=(12, 0))
-        ttk.Checkbutton(settings, text="Refresh remote catalogue during preflight",
-                        variable=self.automation_refresh_cmr_var).grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Progressbar(
             actions,
             variable=self.automation_progress_var,

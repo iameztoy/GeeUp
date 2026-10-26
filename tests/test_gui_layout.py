@@ -480,6 +480,23 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertFalse(app.automation_process_by_year_var.get())
                 self.assertFalse(app.build_config()["automation"]["process_by_year"])
                 self.assertIn("Process each tile year by year", collect_label_texts(root))
+                controls = {widget.cget("text"): widget for widget in collect_widgets(root, ttk.Checkbutton)}
+                yearly = controls["Process each tile year by year"]
+                refresh = controls["Refresh remote catalogue during preflight"]
+                self.assertEqual(yearly.master, refresh.master)
+                def occupied_cells(widget):
+                    grid = widget.grid_info()
+                    return {(r, c) for r in range(grid['row'], grid['row'] + grid['rowspan'])
+                            for c in range(grid['column'], grid['column'] + grid['columnspan'])}
+                self.assertTrue(occupied_cells(yearly).isdisjoint(occupied_cells(refresh)),
+                                "Catalogue refresh must not cover the yearly-processing checkbox")
+                app.automation_refresh_cmr_var.set(False)
+                yearly.invoke()
+                self.assertTrue(app.automation_process_by_year_var.get())
+                self.assertFalse(app.automation_refresh_cmr_var.get())
+                refresh.invoke()
+                self.assertTrue(app.automation_refresh_cmr_var.get())
+                self.assertTrue(app.automation_process_by_year_var.get())
                 config_data["automation"] = {
                     "process_by_year": True, "utm_tiles": ["UTM34M"],
                     "start_date": "2023-07-01", "end_date": "2026-09-30",

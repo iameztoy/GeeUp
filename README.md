@@ -1,6 +1,8 @@
 # SWOTFlow
 
-Current application version: **v0.8.2** (26 October 2026). The Home page and application window title display this version on the next normal launch.
+Current application version: **v0.8.3** (26 October 2026). The Home page and application window title display this version on the next normal launch.
+
+Fixed in v0.8.3: show the yearly-processing and remote-catalogue-refresh checkboxes on separate rows in Automation. Catalogue refresh checks available NASA files; **Process each tile year by year** selects the processing order. Pipeline and tracking behavior are unchanged.
 
 New in v0.8.2: optional **Process each tile year by year** scheduling in Automation. Finish one tile's requested calendar years before moving to the next tile, with inclusive acquisition-start boundaries, independent tile/year checkpoints and cumulative project history. The option is off by default. Uploads wait for Earth Engine confirmation; failed batches block later years of the affected tile. Statistics retains the full requested period and counts unique tiles separately from tile/year batches. See [yearly Automation, storage limits and cleanup requirements](YEARLY_AUTOMATION.md).
 

@@ -1,5 +1,11 @@
 # Release history
 
+## 0.8.3 — 26 October 2026
+
+- Fix overlapping Automation controls: the remote-catalogue-refresh checkbox could cover the yearly-processing checkbox in v0.8.2. Place them on separate rows and explain their different purposes.
+- Add a UI regression check for non-overlapping placement and independent settings. Preserve the download, processing, history, Statistics and cleanup behavior.
+- Display v0.8.3 on Home and in the window title; use v0.8.3 in the GitHub release title and description.
+
 ## 0.8.2 — 26 October 2026
 
 - Add optional **Process each tile year by year** scheduling to Automation, off by default. Complete one tile's requested years before moving to the next tile; leave the existing full-range tile workflow unchanged when disabled.

@@ -20,6 +20,11 @@ Changing the scheduling option requires a new preflight. Configure the complete
 run before starting; do not run manual processing against the same project while
 Automation is active.
 
+**Refresh remote catalogue during preflight** is a separate setting: it queries
+NASA for the current available files instead of reusing a cached planning list.
+It does not select the processing order. Verified workflows refresh the catalogue
+regardless, and annual batches always obtain a fresh scoped selection.
+
 ## Processing order and date ownership
 
 Automation handles each selected UTM tile in turn. For that tile, it handles
