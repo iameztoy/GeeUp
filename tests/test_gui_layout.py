@@ -18,6 +18,7 @@ from swotflow.processing.automation import (
     write_run_state,
 )
 from swotflow.ui.main import LauncherApp
+from swotflow.version import __version__
 from swotflow.project.model import create_project, load_project_tile_profiles
 from swotflow.ui.utm_map import DisplayTile, UTMDisplayGeometry
 
@@ -344,8 +345,8 @@ class GuiLayoutTests(unittest.TestCase):
                 cleanup_tab,
             ) = notebook.winfo_children()
             self.assertIn("Current Project", collect_label_texts(home_tab))
-            self.assertIn("v0.8.0", root.title())
-            self.assertIn("v0.8.0", {app.home_banner_canvas.itemcget(item, "text") for item in app.home_banner_canvas.find_all()
+            self.assertIn(f"v{__version__}", root.title())
+            self.assertIn(f"v{__version__}", {app.home_banner_canvas.itemcget(item, "text") for item in app.home_banner_canvas.find_all()
                                       if app.home_banner_canvas.type(item) == "text"})
             self.assertIn("Project And Documentation", collect_label_texts(home_tab))
             self.assertIn("Workflow Shortcuts", collect_label_texts(home_tab))
