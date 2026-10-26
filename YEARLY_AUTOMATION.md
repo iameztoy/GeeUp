@@ -6,6 +6,10 @@ preserves the existing workflow.
 
 ## Enable the option
 
+On smaller screens, use the Automation tab's right-hand scrollbar to reach the
+queue and results. The mouse wheel scrolls the page over settings/background;
+over the tile list or results table it scrolls that list/table instead.
+
 1. Open a project and configure its download, extraction, mosaic and upload
    settings in the corresponding tabs. Check their input and output folders.
 2. In **Automation**, select the full date range and UTM tiles. Enable

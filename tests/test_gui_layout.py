@@ -91,6 +91,47 @@ def swot_tif_name(tile: str) -> str:
 
 
 class GuiLayoutTests(unittest.TestCase):
+    def test_automation_scroll_reaches_results_in_a_short_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with mock.patch("swotflow.ui.main.load_config", return_value=self.sample_config(Path(temp))):
+                    app = LauncherApp(root)
+                root.attributes("-alpha", 0.0)
+                root.minsize(600, 300)
+                root.geometry("900x600")
+                app.select_tab("Automation")
+                root.deiconify()
+                root.update()
+                canvas = app.automation_scroller.canvas
+                self.assertLess(canvas.yview()[1], 1.0, "Short window must have scrollable content")
+                labels = collect_widgets(app.automation_scroller.content, ttk.Label)
+                canvas.yview_moveto(0)
+                labels[0].event_generate("<MouseWheel>", delta=-120)
+                root.update()
+                self.assertGreater(canvas.yview()[0], 0)
+                canvas.yview_moveto(1)
+                root.update()
+                self.assertGreaterEqual(app.automation_tree.winfo_rooty(), canvas.winfo_rooty())
+                self.assertLessEqual(app.automation_tree.winfo_rooty() + app.automation_tree.winfo_height(),
+                                     canvas.winfo_rooty() + canvas.winfo_height())
+                for index in range(60):
+                    app.automation_tree.insert("", "end", values=(str(index),))
+                page_position = canvas.yview()
+                app.automation_tree.event_generate("<MouseWheel>", delta=-120)
+                root.update()
+                self.assertEqual(canvas.yview(), page_position, "Queue wheel must not also scroll the page")
+                self.assertGreater(app.automation_tree.yview()[0], 0)
+                app.select_tab("Download")
+                root.update()
+                other_label = collect_widgets(app.tabs_by_name["Download"], ttk.Label)[0]
+                other_label.event_generate("<MouseWheel>", delta=-120)
+                root.update()
+                self.assertEqual(canvas.yview(), page_position, "Other tabs must not scroll Automation")
+            finally:
+                root.destroy()
+
     def test_statistics_evidence_shortcuts_only_navigate_existing_panels(self) -> None:
         root = tk.Tk()
         root.withdraw()

@@ -1,6 +1,8 @@
 # SWOTFlow
 
-Current application version: **v0.8.3** (26 October 2026). The Home page and application window title display this version on the next normal launch.
+Current application version: **v0.8.4** (26 October 2026). The Home page and application window title display this version on the next normal launch.
+
+New in v0.8.4: scroll the Automation tab vertically to reach the queue and results on smaller screens. Use its right-hand scrollbar or the mouse wheel over settings and background; the tile list and results table keep their own scrolling.
 
 Fixed in v0.8.3: show the yearly-processing and remote-catalogue-refresh checkboxes on separate rows in Automation. Catalogue refresh checks available NASA files; **Process each tile year by year** selects the processing order. Pipeline and tracking behavior are unchanged.
 

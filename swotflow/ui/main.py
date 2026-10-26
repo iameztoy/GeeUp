@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from swotflow.ui.scrolling import VerticalScrolledFrame
 
 
 PROJECT_ROOT = APP_ROOT
@@ -1000,6 +1001,11 @@ class LauncherApp:
     def build_automation_tab(self, parent: ttk.Frame) -> None:
         """Create unattended tile-by-tile workflow controls."""
         parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        self.automation_scroller = VerticalScrolledFrame(parent)
+        self.automation_scroller.grid(row=0, column=0, sticky="nsew")
+        parent = self.automation_scroller.content
+        parent.columnconfigure(0, weight=1)
         parent.rowconfigure(4, weight=1)
 
         intro = ttk.Label(
@@ -1241,6 +1247,7 @@ class LauncherApp:
         )
         self.refresh_automation_tile_list()
         self.update_automation_date_status()
+        self.automation_scroller.bind_mousewheel()
 
     def build_download_tab(self, parent: ttk.Frame) -> None:
         """Create SWOT Earthdata download controls."""

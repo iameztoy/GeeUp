@@ -1,5 +1,11 @@
 # Release history
 
+## 0.8.4 — 26 October 2026
+
+- Add vertical page scrolling to Automation so the queue and results remain reachable on smaller screens. The content also expands when more vertical space is available.
+- Support the mouse wheel over settings/background without global bindings or changes to the tile list, results table and other tabs' scrolling.
+- Preserve all processing, tracking and Statistics behavior. Display v0.8.4 on Home and in the window title; include v0.8.4 in the GitHub release title and description.
+
 ## 0.8.3 — 26 October 2026
 
 - Fix overlapping Automation controls: the remote-catalogue-refresh checkbox could cover the yearly-processing checkbox in v0.8.2. Place them on separate rows and explain their different purposes.
