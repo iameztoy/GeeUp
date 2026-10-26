@@ -178,6 +178,65 @@ class ExportTests(unittest.TestCase):
             self.ee.data.deleteAsset.assert_not_called()
             self.ee.data.setAssetProperties.assert_not_called()
 
+    def test_default_priority_reaches_submission_for_new_and_legacy_plans(self):
+        """Noncommercial exports must not receive a custom queue priority."""
+        def prepare_task(**parameters):
+            if parameters.get("priority", 100) != 100:
+                raise ValueError("Custom priority requires a commercial project")
+            return SimpleNamespace(config=parameters)
+
+        self.ee.batch.Export.image.toAsset.side_effect = prepare_task
+        for mode in ("native", "common"):
+            for legacy in (False, True):
+                with self.subTest(mode=mode, legacy=legacy):
+                    plan = c.plan_assets(self.assets, COLLECTION, c.Options(mode=mode))
+                    self.assertNotIn("priority", plan["export_settings"])
+                    if legacy:
+                        plan["export_settings"]["priority"] = 50
+                    original_plan = copy.deepcopy(plan)
+                    group = plan["groups"][0]
+                    with local_temp() as tmp, patch.object(c, "build_image", return_value=Mock()):
+                        receipt = c.submit_groups(self.ee, plan, [group["id"]], DESTINATION, Path(tmp))
+                    self.assertEqual(receipt["tasks"][group["id"]]["state"], "SUBMITTED")
+                    parameters = self.ee.data.exportImage.call_args.args[1]
+                    self.assertNotIn("priority", parameters)
+                    self.assertFalse(parameters["overwrite"])
+                    self.assertEqual(parameters["pyramidingPolicy"], {".default": "sample"})
+                    self.assertEqual(parameters["crsTransform"], group["transform"])
+                    self.assertEqual(plan, original_plan)
+        self.ee.data.deleteAsset.assert_not_called()
+
+    def test_real_ee_client_omits_priority_without_submitting(self):
+        """Exercise SDK request encoding offline; only image/geometry are fake."""
+        try:
+            import ee
+        except ImportError:
+            self.skipTest("Optional earthengine-api is not installed")
+        image = Mock()
+        image.set.return_value = image
+
+        def prepare(config):
+            remaining = dict(config)
+            # A real image folds these into its server-side expression.
+            for key in ("region", "crs", "crs_transform"):
+                remaining.pop(key, None)
+            return image, remaining
+
+        image.prepare_for_export.side_effect = prepare
+        self.ee.Geometry.Rectangle.return_value = None
+        self.ee.ImageCollection.fromImages.return_value.geometry.return_value.bounds.return_value = None
+        for mode in ("native", "common"):
+            with self.subTest(mode=mode), patch.object(c, "build_image", return_value=image):
+                plan = c.plan_assets(self.assets, COLLECTION, c.Options(mode=mode))
+                parameters = c.export_parameters(self.ee, plan["groups"][0], plan, DESTINATION)
+                with patch.object(ee.data, "exportImage", side_effect=AssertionError("No cloud submission")) as submit:
+                    task = ee.batch.Export.image.toAsset(**parameters)
+                submit.assert_not_called()
+                self.assertNotIn("priority", task.config)
+                settings = task.config["assetExportOptions"]
+                self.assertEqual(settings["pyramidingPolicy"], "SAMPLE")
+                self.assertFalse(settings["earthEngineDestination"]["overwrite"])
+
     def test_uncertain_submission_is_durable_and_never_blindly_retried(self):
         self.ee.data.exportImage.side_effect = TimeoutError("network response lost")
         with local_temp() as tmp, patch.object(c, "export_parameters", return_value={}):

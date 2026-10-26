@@ -299,7 +299,7 @@ def plan_assets(assets: list[dict], collection: str, options: Options,
     return {"algorithm": ALGORITHM, "created_utc": utc_now(), "collection": collection,
             "options": asdict(options), "summary": summary, "groups": groups,
             "export_settings": {"pyramidingPolicy": {".default": "sample"}, "maxPixels": MAX_PIXELS,
-                                "priority": 50, "overwrite": False, "resampling": "nearest", "resolution_m": 100},
+                                "overwrite": False, "resampling": "nearest", "resolution_m": 100},
             "singletons": singletons, "excluded": excluded, "outside_dates": outside,
             "notes": ["Savings require separate verification and retirement of originals; this tool never deletes them.",
                       "Counts do not estimate bytes or valid coverage, or repair shifts, missing granules, or inherited band mispairing.",
@@ -435,11 +435,12 @@ def export_parameters(ee: Any, group: dict, plan: dict, destination: str) -> dic
         region = ee.Geometry.Rectangle(group["bounds"], group["crs"], False)
     else:
         region = ee.ImageCollection.fromImages([ee.Image(s["asset"]["id"]) for s in contributors(group)]).geometry().bounds(100, ee.Projection(ee_crs(group["crs"])))
+    # Omit priority: custom values require commercial EE registration. Let EE
+    # choose its default for both new plans and plans saved by older releases.
     return {"image": image.set(properties), "description": group["id"],
             "assetId": validate_destination(plan["collection"], destination) + "/" + group["id"],
             "region": region, "crs": ee_crs(group["crs"]), "crsTransform": group["transform"],
-            "pyramidingPolicy": {".default": "sample"}, "maxPixels": MAX_PIXELS, "overwrite": False,
-            "priority": 50}
+            "pyramidingPolicy": {".default": "sample"}, "maxPixels": MAX_PIXELS, "overwrite": False}
 
 
 def save_plan(folder: Path, plan: dict) -> Path:

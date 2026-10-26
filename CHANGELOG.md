@@ -1,5 +1,12 @@
 # Release history
 
+## 0.8.5 — 26 October 2026
+
+- Fix EE Consolidation export rejection on noncommercial projects by omitting the custom task priority and using Earth Engine's default queue priority. Remove the obsolete priority from newly saved plan settings.
+- Cover native UTM, common-grid and incremental exports, including legacy plans with a saved priority, in offline regression tests. Preserve image selection, quality pairing, grids, provenance, no-overwrite rules and duplicate-submission safeguards.
+- Keep the live benchmark paused; full cloud comparison and pixel/timing acceptance remain pending. This patch does not resume tasks or change existing assets.
+- Display v0.8.5 on Home and in the window title; include v0.8.5 in the GitHub release title and description.
+
 ## 0.8.4 — 26 October 2026
 
 - Add vertical page scrolling to Automation so the queue and results remain reachable on smaller screens. The content also expands when more vertical space is available.

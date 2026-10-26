@@ -1,6 +1,8 @@
 # SWOTFlow
 
-Current application version: **v0.8.4** (26 October 2026). The Home page and application window title display this version on the next normal launch.
+Current application version: **v0.8.5** (26 October 2026). The Home page and application window title display this version on the next normal launch.
+
+Fixed in v0.8.5: EE Consolidation uses Earth Engine's default task priority. The previous custom priority was rejected for noncommercial projects. New and incremental exports keep their existing pixel, grid, history and no-overwrite rules. Offline regression coverage includes older saved plans; the live local-versus-EE comparison remains pending.
 
 New in v0.8.4: scroll the Automation tab vertically to reach the queue and results on smaller screens. Use its right-hand scrollbar or the mouse wheel over settings and background; the tile list and results table keep their own scrolling.
 

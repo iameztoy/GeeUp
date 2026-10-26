@@ -1,4 +1,4 @@
-# Earth Engine consolidation — v0.6.1
+# Earth Engine consolidation — v0.8.5
 
 This post-ingestion tool combines already stored SWOT observations to reduce image-asset count. It runs independently of Download, Extraction, local Mosaic, Upload and the audit workers. It uses the existing Earth Engine API connection; no NASA login or source download is required for consolidation itself.
 
@@ -62,4 +62,6 @@ Offline checks (no network or production changes):
 
 One-off live pilots and their evidence are maintained outside this repository. They have tested bounded incremental/one-shot pixel equivalence, including quality ties, masks and source-index remapping. They do not establish the integrity of the entire source collection or a completed asset-ingestion round trip. The common-grid option remains experimental pending wider seam/mask validation.
 
-The running desktop app and audit workers are not reloaded by editing these files. Use the current v0.6.1 release on the next normal application launch after the current update finishes. Plans and evidence are outside the live processing manifests. Export requests retain the existing ten-job batch limit, low priority, fresh contributor fingerprints, quota checks and durable request/task journals. A detected newer revision requires a new preview; ambiguous submission responses are never blindly retried.
+The running desktop app and audit workers are not reloaded by editing these files. Use the current v0.8.5 release on the next normal application launch after the current update finishes. Plans and evidence are outside the live processing manifests. Export requests retain the existing ten-job batch limit, fresh contributor fingerprints, quota checks and durable request/task journals. A detected newer revision requires a new preview; ambiguous submission responses are never blindly retried.
+
+In v0.8.5, exports omit custom task priority and use Earth Engine's default (100). The old priority of 50 caused noncommercial projects to reject submission; custom priorities require commercial registration. New plans omit that setting. Older saved plans remain unchanged, but their obsolete priority is not forwarded in new export requests. Existing task records still block resubmission until their operation/asset status has been reviewed; upgrading does not clear or retry them. Offline checks cover this correction; the live local-versus-EE benchmark remains paused and its complete comparison is still pending.

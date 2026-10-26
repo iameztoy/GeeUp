@@ -56,6 +56,19 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(plan['summary']['extended_groups'],1)
         u.check_saved_group(g,plan)
 
+    def test_incremental_export_uses_default_priority_and_preserves_history(self):
+        plan = self.plan()
+        group = plan['groups'][0]
+        image = Mock()
+        self.assertNotIn('priority', plan['export_settings'])
+        with patch.object(c, 'build_image', return_value=image):
+            parameters = c.export_parameters(Mock(), group, plan, DESTINATION + '_new')
+        self.assertNotIn('priority', parameters)
+        self.assertFalse(parameters['overwrite'])
+        properties = image.set.call_args.args[0]
+        self.assertEqual(properties['consolidation_predecessors'], [self.existing['id']])
+        self.assertEqual(properties['consolidation_sources'], [s['asset']['id'] for s in group['sources']])
+
     def test_represented_originals_are_not_counted_again(self):
         plan = self.plan([self.a,self.b,self.new])
         self.assertEqual(plan['summary']['already_represented'],2)
