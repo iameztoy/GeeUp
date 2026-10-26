@@ -24,6 +24,7 @@ from swotflow.project.updates import campaign_rows as read_update_campaigns
 from swotflow.project.updates import expected_rows as read_update_expected
 from swotflow.project.updates import run_rows as read_update_runs
 from swotflow.project.updates import campaign_is_archived
+from swotflow.project.updates import update_campaign_id
 from swotflow.core.metadata import (
     SWOT_L2_HR_RASTER_PATTERN,
     PRODUCT_IDENTITY_FIELDS,
@@ -132,6 +133,100 @@ class ProjectInsights:
     product_version_audit_rows: List[Dict[str, str]]
     cleanup_candidates: List[CleanupCandidate]
     update_campaign_details: List[Dict[str, Any]] = field(default_factory=list)
+    yearly_automation: Dict[str, Any] = field(default_factory=dict)
+
+
+def yearly_automation_overview(saved: Mapping[str, Any], run_dir: Path) -> Dict[str, Any]:
+    """Summarize a yearly parent checkpoint without counting one tile per year.
+
+    Missing, duplicate or unfamiliar window receipts cannot establish completion.
+    A completed empty search is represented by its explicit complete receipt.
+    This describes pipeline execution, not a pixel-completeness certificate.
+    """
+    config = saved.get("config", {})
+    if not isinstance(config, Mapping) or config.get("process_by_year") is not True:
+        return {}
+    start_text, end_text = str(config.get("start_date", "")), str(config.get("end_date", ""))
+    try:
+        start = datetime.strptime(start_text, "%Y-%m-%d").date()
+        end = datetime.strptime(end_text, "%Y-%m-%d").date()
+    except ValueError:
+        return {}
+    if start > end:
+        return {}
+    raw_tiles = config.get("utm_tiles", [])
+    if not isinstance(raw_tiles, (list, tuple)):
+        return {}
+    tiles = sorted({str(tile).upper() for tile in raw_tiles if UTM_TILE_TOKEN_RE.fullmatch(str(tile).upper())})
+    receipts = saved.get("year_batches", [])
+    receipts = receipts if isinstance(receipts, list) else []
+    statuses = {"pending", "running", "complete", "incomplete", "stopped", "low_space"}
+    batches = []
+    years = list(range(start.year, end.year + 1))
+    for tile in tiles:
+        for year in years:
+            first = max(start_text, f"{year}-01-01")
+            last = min(end_text, f"{year}-12-31")
+            matches = [row for row in receipts if isinstance(row, Mapping)
+                       and str(row.get("tile", "")).upper() == tile
+                       and str(row.get("start_date", "")) == first
+                       and str(row.get("end_date", "")) == last]
+            row = matches[0] if len(matches) == 1 else {}
+            status = str(row.get("status", "pending"))
+            if len(matches) > 1 or status not in statuses:
+                status = "incomplete"
+            batches.append({"tile": tile, "year": year, "start_date": first, "end_date": last,
+                            "status": status, "run_dir": str(row.get("run_dir", ""))})
+    counts = Counter(row["status"] for row in batches)
+    if counts["low_space"]:
+        status = "low_space"
+    elif saved.get("stopped") or counts["stopped"]:
+        status = "stopped"
+    elif counts["running"]:
+        status = "running"
+    elif counts["incomplete"]:
+        status = "incomplete"
+    else:
+        status = "complete" if batches and counts["complete"] == len(batches) else "pending"
+    completed_years = sum(bool(tiles) and all(row["status"] == "complete" for row in batches
+                                             if row["year"] == year) for year in years)
+    completed_tiles = sum(all(row["status"] == "complete" for row in batches
+                              if row["tile"] == tile) for tile in tiles)
+    pending_years = sum(all(row["status"] == "pending" for row in batches
+                            if row["year"] == year) for year in years)
+    base_config = config.get("base_config", {})
+    parent_config = dict(base_config) if isinstance(base_config, Mapping) else {}
+    download_config = parent_config.get("download", {})
+    parent_config["download"] = {**(download_config if isinstance(download_config, Mapping) else {}),
+                                 "start_date": start_text, "end_date": end_text}
+    return {"run_id": str(saved.get("run_id", run_dir.name)), "run_dir": str(run_dir),
+            "start_date": start_text, "end_date": end_text, "tiles": tiles,
+            "unique_tiles": len(tiles), "tiles_complete": completed_tiles,
+            "years_total": len(years), "years_complete": completed_years,
+            "years_pending": pending_years, "years_remaining": len(years) - completed_years,
+            "batches_total": len(batches), "batches_complete": counts["complete"],
+            "batches_pending": counts["pending"], "batches_remaining": len(batches) - counts["complete"],
+            "status": status, "year_batches": batches,
+            "parent_campaign_id": update_campaign_id(parent_config),
+            "note": "A tile is complete only after all its yearly batches; a year is complete only across all selected tiles. Batch completion describes the Automation pipeline; input and pixel verification remain separate evidence."}
+
+
+def read_yearly_automation_overview(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Read the latest unarchived top-level run only; never create project data."""
+    root = processing_path(config, "logs") / "automation_runs"
+    try:
+        candidates = [path for path in root.iterdir() if path.is_dir()
+                      and (path / "automation_run.json").is_file()
+                      and not (path / "archived.json").exists()]
+        if not candidates:
+            return {}
+        latest = max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
+        with (latest / "automation_run.json").open(encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except (OSError, ValueError):
+        # A live checkpoint may be between writes. Refresh rather than use an old run.
+        return {}
+    return yearly_automation_overview(saved, latest) if isinstance(saved, Mapping) else {}
 
 
 def statistics_folder(config: Mapping[str, Any]) -> Path:
@@ -1474,6 +1569,7 @@ def build_update_campaign_coverage(
     extract_rows: Sequence[Mapping[str, str]],
     mosaic_rows: Sequence[Mapping[str, str]],
     upload_rows: Sequence[Mapping[str, str]],
+    yearly_overview: Mapping[str, Any] | None = None,
 ) -> tuple[
     List[tuple[str, str, str, str, str, int, int]],
     Dict[str, List[tuple[str, int, int, int, int, int, str, str, str, str, str, str]]],
@@ -1564,6 +1660,10 @@ def build_update_campaign_coverage(
         )
     visible_ids = {row.get("campaign_id") for row in campaigns if not campaign_is_archived(row)}
     active_id = next((row[0] for row in campaign_summaries if row[0] in visible_ids), "")
+    yearly = read_yearly_automation_overview(config) if yearly_overview is None else yearly_overview
+    parent_id = str(yearly.get("parent_campaign_id", ""))
+    if parent_id and parent_id in visible_ids:
+        active_id = parent_id
     return campaign_summaries, coverage_by_campaign, active_id
 
 
@@ -2227,6 +2327,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         )
         for tile in all_qa_tiles
     ]
+    yearly_automation = read_yearly_automation_overview(config)
     (
         update_campaign_summaries,
         update_coverage_campaign_rows,
@@ -2238,6 +2339,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         extract_rows=extract_rows,
         mosaic_rows=mosaic_rows,
         upload_rows=upload_rows,
+        yearly_overview=yearly_automation,
     )
     update_run_rows = read_update_runs(config)
     campaign_details = []
@@ -2269,6 +2371,13 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
                 if status not in {"complete", "no_expected"}
             )
         )
+    if yearly_automation:
+        metrics["Year-by-year requested period"] = f"{yearly_automation['start_date']} to {yearly_automation['end_date']}"
+        metrics["Year-by-year completed unique tiles"] = f"{yearly_automation['tiles_complete']}/{yearly_automation['unique_tiles']}"
+        metrics["Year-by-year completed tile/year batches"] = f"{yearly_automation['batches_complete']}/{yearly_automation['batches_total']}"
+        metrics["Year-by-year remaining tile/year batches"] = str(yearly_automation["batches_remaining"])
+        metrics["Year-by-year years complete across all tiles"] = f"{yearly_automation['years_complete']}/{yearly_automation['years_total']}"
+        metrics["Year-by-year pipeline status"] = yearly_automation["status"].replace("_", " ")
 
     return ProjectInsights(
         metrics=metrics,
@@ -2303,6 +2412,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         product_version_audit_rows=product_version_audit_rows,
         cleanup_candidates=cleanup_candidates,
         update_campaign_details=campaign_details,
+        yearly_automation=yearly_automation,
     )
 
 
@@ -2554,6 +2664,7 @@ def project_insights_snapshot(insights: ProjectInsights) -> Dict[str, Any]:
         },
         "active_update_campaign_id": insights.active_update_campaign_id,
         "update_campaign_details": insights.update_campaign_details,
+        "yearly_automation": insights.yearly_automation,
         "ready_not_uploaded_rows": [
             {
                 "output_file": output_file,
@@ -2594,6 +2705,9 @@ def write_project_insights_snapshot(config: Mapping[str, Any], insights: Project
                     "complete_tiles", "incomplete_tiles", "no_expected_tiles", "expected_observations",
                     "downloaded_observations", "extracted_observations", "mosaicked_observations", "verified_observations"],
                    insights.update_campaign_details)
+    write_csv_rows(folder / "project_statistics_yearly_automation.csv",
+                   ["tile", "year", "start_date", "end_date", "status", "run_dir"],
+                   insights.yearly_automation.get("year_batches", []))
 
     write_csv_rows(
         folder / "project_statistics_metrics.csv",
@@ -2988,6 +3102,7 @@ def load_project_insights_snapshot(
         },
         active_update_campaign_id=str(snapshot.get("active_update_campaign_id", "")),
         update_campaign_details=list(snapshot.get("update_campaign_details", [])),
+        yearly_automation=dict(snapshot.get("yearly_automation", {}) or {}),
         ready_not_uploaded_rows=[
             (
                 str(row.get("output_file", "")),

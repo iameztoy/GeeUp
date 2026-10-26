@@ -183,6 +183,7 @@ from swotflow.processing.automation import (
     AUTOMATION_STAGES,
     AutomationConfig,
     AutomationRunState,
+    automation_periods,
     load_latest_automation_run_state,
     preflight_automation,
     run_automation,
@@ -356,6 +357,9 @@ class LauncherApp:
         self.automation_cleanup_enabled_var = tk.BooleanVar(
             value=bool(automation_data.get("cleanup_enabled", True))
         )
+        self.automation_process_by_year_var = tk.BooleanVar(
+            value=bool(automation_data.get("process_by_year", False))
+        )
         self.automation_min_free_space_var = tk.StringVar(
             value=str(automation_data.get("min_free_space_gb", 50))
         )
@@ -381,8 +385,12 @@ class LauncherApp:
         self.automation_stop_event: threading.Event | None = None
         self.automation_progress_tiles: list[str] = []
         self.automation_progress_stages: list[str] = []
+        self.automation_progress_years: list[str] = []
         self.automation_progress_completed_keys: set[tuple[str, str]] = set()
         self.automation_progress_total_units = 0
+        self.automation_process_by_year_var.trace_add(
+            "write", lambda *_args: self.invalidate_automation_batch_plan()
+        )
         for date_var in (
             self.download_start_date_var,
             self.download_end_date_var,
@@ -1082,6 +1090,24 @@ class LauncherApp:
             wraplength=980,
             justify="left",
         ).grid(row=4, column=0, columnspan=8, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            settings,
+            text="Process each tile year by year",
+            variable=self.automation_process_by_year_var,
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(
+            settings,
+            text=(
+                "Finish all requested years for one tile before moving to the next tile. "
+                "Uploads wait for Earth Engine confirmation in this mode. "
+                "Space is released only when cleanup is enabled and its checks pass; "
+                "uncertified final mosaics remain local, and one tile-year can still exceed available storage. "
+                "For later local mosaics across UTM tiles, retain the source rasters by disabling cleanup."
+            ),
+            foreground="#555555",
+            wraplength=980,
+            justify="left",
+        ).grid(row=6, column=0, columnspan=8, sticky="ew", pady=(4, 0))
 
         tiles = ttk.LabelFrame(parent, text="Automation UTM Tiles", padding=10)
         tiles.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
@@ -3381,6 +3407,7 @@ class LauncherApp:
         self.automation_include_upload_var.set(bool(automation_data.get("include_upload", False)))
         self.automation_refresh_cmr_var.set(bool(automation_data.get("refresh_cmr", True)))
         self.automation_cleanup_enabled_var.set(bool(automation_data.get("cleanup_enabled", True)))
+        self.automation_process_by_year_var.set(bool(automation_data.get("process_by_year", False)))
         self.automation_min_free_space_var.set(str(automation_data.get("min_free_space_gb", 50)))
         self.automation_continue_on_failure_var.set(
             bool(automation_data.get("continue_on_tile_failure", True))
@@ -4240,6 +4267,15 @@ class LauncherApp:
             return
         self.automation_date_status_var.set(self.automation_date_mismatch_message())
 
+    def invalidate_automation_batch_plan(self) -> None:
+        """Require a new preflight when the user changes the batching mode."""
+        if self.automation_running or self.automation_preflight_running:
+            return
+        self.automation_preflight_state = None
+        if hasattr(self, "automation_start_button"):
+            self.automation_start_button.configure(state=tk.DISABLED)
+        self.automation_status_var.set("Processing order changed. Run preflight for these settings.")
+
     def copy_download_dates_to_automation(self, notify: bool = True) -> None:
         """Copy Download tab dates into Automation without changing selected tiles."""
         self.automation_start_date_var.set(self.download_start_date_var.get().strip())
@@ -4998,6 +5034,7 @@ class LauncherApp:
                 "end_date": self.automation_end_date_var.get().strip(),
                 "include_upload": self.automation_include_upload_var.get(),
                 "cleanup_enabled": self.automation_cleanup_enabled_var.get(),
+                "process_by_year": self.automation_process_by_year_var.get(),
                 "min_free_space_gb": self.parse_float_or_default(
                     self.automation_min_free_space_var.get(),
                     50.0,
@@ -5094,6 +5131,7 @@ class LauncherApp:
             end_date=end_date,
             include_upload=self.automation_include_upload_var.get(),
             cleanup_enabled=self.automation_cleanup_enabled_var.get(),
+            process_by_year=self.automation_process_by_year_var.get(),
             min_free_space_gb=self.parse_float_or_default(
                 self.automation_min_free_space_var.get(),
                 50.0,
@@ -5271,7 +5309,7 @@ class LauncherApp:
                 tk.END,
                 values=(
                     result.tile,
-                    result.stage,
+                    self.automation_result_stage_key(result).replace("/", " / "),
                     result.status,
                     counts,
                     self.compact_automation_result_message(result),
@@ -5327,9 +5365,17 @@ class LauncherApp:
     def compact_automation_result_message(self, result: AutomationStageResult) -> str:
         """Return a concise stage-result message for the Automation queue."""
         message = self.compact_automation_tree_message(result.message)
+        if getattr(result, "period_start", ""):
+            message = f"{result.period_start} to {result.period_end}: {message}"
         if result.log_path and "see tile log" not in message.lower() and result.status.lower() in {"failed", "warning"}:
             return f"{message} Log: {Path(result.log_path).name}"
         return message
+
+    @staticmethod
+    def automation_result_stage_key(result: AutomationStageResult) -> str:
+        """Keep progress for repeated tile stages distinct across calendar years."""
+        start = getattr(result, "period_start", "")
+        return f"{start[:4]}/{result.stage}" if start else result.stage
 
     def apply_automation_run_state(
         self,
@@ -5349,6 +5395,7 @@ class LauncherApp:
         self.automation_end_date_var.set(config.end_date)
         self.automation_include_upload_var.set(bool(config.include_upload))
         self.automation_cleanup_enabled_var.set(bool(config.cleanup_enabled))
+        self.automation_process_by_year_var.set(bool(config.process_by_year))
         self.automation_min_free_space_var.set(str(config.min_free_space_gb))
         self.automation_continue_on_failure_var.set(bool(config.continue_on_tile_failure))
         self.automation_prevent_sleep_var.set(bool(config.prevent_system_sleep))
@@ -5366,7 +5413,13 @@ class LauncherApp:
         else:
             self.set_automation_progress_text("latest automation run loaded")
         if not status_text:
-            failed = sum(1 for result in state.stage_results if result.status == "failed")
+            current_results = state.stage_results
+            if state.config.process_by_year:
+                current_results = list({
+                    (result.tile, result.period_start, result.period_end, result.stage): result
+                    for result in state.stage_results
+                }.values())
+            failed = sum(1 for result in current_results if result.status == "failed")
             status_text = (
                 f"Loaded automation run {state.run_id}: {len(state.tile_plans)} tile(s), "
                 f"{len(state.stage_results)} stage row(s), failed stages {failed}. "
@@ -5404,17 +5457,17 @@ class LauncherApp:
                     "No saved automation run was found for this project. Run Preflight to create one.",
                 )
             return False
-        request_changed = (state.config.start_date, state.config.end_date, sorted(state.config.utm_tiles)) != (
-            self.automation_start_date_var.get(), self.automation_end_date_var.get(), sorted(self.automation_selected_tiles)
+        request_changed = (state.config.start_date, state.config.end_date, sorted(state.config.utm_tiles), state.config.process_by_year) != (
+            self.automation_start_date_var.get(), self.automation_end_date_var.get(), sorted(self.automation_selected_tiles), self.automation_process_by_year_var.get()
         )
         if request_changed and not notify:
-            self.automation_status_var.set("Saved project dates/tiles differ from the last run. Run Preflight for the displayed settings.")
+            self.automation_status_var.set("Saved project dates, tiles, or processing order differ from the last run. Run Preflight for the displayed settings.")
             return False
         if request_changed and not messagebox.askyesno(
             "Resume saved update?",
             f"Resume run {state.run_id}: {state.config.start_date} to {state.config.end_date} "
             f"({len(state.config.utm_tiles)} tiles)?\n"
-            "This replaces the displayed date range and tile selection. Choose No to keep the displayed settings and run Preflight.",
+            "This restores the saved date range, tile selection and processing order. Choose No to keep the displayed settings and run Preflight.",
         ):
             return False
         self.apply_automation_run_state(state)
@@ -5459,11 +5512,12 @@ class LauncherApp:
             messagebox.showerror("Automation setup failed", str(exc))
             return
         automation_config.run_id = self.automation_preflight_state.run_id
-        if (automation_config.start_date, automation_config.end_date, sorted(automation_config.utm_tiles), automation_config.include_upload) != (
+        if (automation_config.start_date, automation_config.end_date, sorted(automation_config.utm_tiles), automation_config.include_upload, automation_config.process_by_year) != (
             self.automation_preflight_state.config.start_date, self.automation_preflight_state.config.end_date,
             sorted(self.automation_preflight_state.config.utm_tiles), self.automation_preflight_state.config.include_upload,
+            self.automation_preflight_state.config.process_by_year,
         ):
-            messagebox.showwarning("Preflight required", "Dates, tiles, or upload scope changed after preflight. Run Preflight for these settings.")
+            messagebox.showwarning("Preflight required", "Dates, tiles, upload scope, or processing order changed after preflight. Run Preflight for these settings.")
             return
         automation_config.run_dir = self.automation_preflight_state.run_dir
         self.automation_running = True
@@ -5517,9 +5571,13 @@ class LauncherApp:
                 and normalized_status in {"success", "skipped", "warning"}
             ):
                 self.automation_progress_completed_keys.add((tile, stage))
+            elif self.automation_progress_years and normalized_status in {"running", "failed"}:
+                self.automation_progress_completed_keys.discard((tile, stage))
             self.set_automation_progress_text(
                 f"{self.automation_tile_position_text(tile)}{tile} / {stage} / {status}"
             )
+            if self.automation_progress_years:
+                self.automation_activity_var.set(f"Execution: running | {tile} | {stage} | {status}")
         else:
             self.automation_progress_text_var.set(f"Progress: {tile} / {stage} / {status}")
         self.automation_status_var.set(self.compact_live_status_message(message))
@@ -5545,19 +5603,40 @@ class LauncherApp:
     def initialize_automation_progress_tracker(self, state: AutomationRunState) -> None:
         """Initialize aggregate progress from persisted results and preflight-complete tiles."""
         self.automation_progress_tiles = list(state.config.utm_tiles)
-        self.automation_progress_stages = self.automation_stage_names(state.config.include_upload)
+        stages = self.automation_stage_names(state.config.include_upload)
+        self.automation_progress_years = (
+            [start[:4] for start, _end in automation_periods(state.config)]
+            if state.config.process_by_year else []
+        )
+        self.automation_progress_stages = (
+            [f"{year}/{stage}" for year in self.automation_progress_years for stage in stages]
+            if self.automation_progress_years else stages
+        )
         valid_tiles = set(self.automation_progress_tiles)
         valid_stages = set(self.automation_progress_stages)
         terminal_statuses = {"success", "skipped", "warning"}
-        self.automation_progress_completed_keys = {
-            (result.tile, result.stage)
-            for result in state.stage_results
-            if result.tile in valid_tiles
-            and result.stage in valid_stages
-            and str(result.status or "").lower() in terminal_statuses
-        }
+        if self.automation_progress_years:
+            latest_results = {
+                (result.tile, self.automation_result_stage_key(result)): result
+                for result in state.stage_results
+            }
+            self.automation_progress_completed_keys = {
+                key for key, result in latest_results.items()
+                if key[0] in valid_tiles and key[1] in valid_stages
+                and str(result.status or "").lower() in terminal_statuses
+            }
+        else:
+            self.automation_progress_completed_keys = {
+                (result.tile, result.stage)
+                for result in state.stage_results
+                if result.tile in valid_tiles
+                and result.stage in valid_stages
+                and str(result.status or "").lower() in terminal_statuses
+            }
         for plan in state.tile_plans:
-            if plan.tile not in valid_tiles:
+            # Annual children revalidate each scoped window. A full-range parent
+            # preflight classification is not an executed tile/year receipt.
+            if self.automation_progress_years or plan.tile not in valid_tiles:
                 continue
             if plan.classification == "already complete" and plan.pending_downloads == 0:
                 self.automation_progress_completed_keys.update(
@@ -5604,9 +5683,19 @@ class LauncherApp:
         tile_total = len(self.automation_progress_tiles)
         tile_detail = ""
         if tile_total:
+            tile_label = "tiles through all years" if self.automation_progress_years else "tiles complete"
             tile_detail = (
-                f"; {self.completed_automation_tile_count()}/{tile_total} tiles complete"
+                f"; {self.completed_automation_tile_count()}/{tile_total} {tile_label}"
             )
+        if self.automation_progress_years:
+            finished_batches = sum(
+                all((tile, stage) in self.automation_progress_completed_keys
+                    for stage in self.automation_progress_stages if stage.startswith(year + "/"))
+                for tile in self.automation_progress_tiles
+                for year in self.automation_progress_years
+            )
+            batch_total = len(self.automation_progress_tiles) * len(self.automation_progress_years)
+            tile_detail += f"; {finished_batches}/{batch_total} tile/year batches through stages"
         self.automation_progress_text_var.set(
             f"Stage execution: {percentage:.1f}% ({completed}/{total} stages{tile_detail}) | {detail}"
         )
@@ -5637,11 +5726,18 @@ class LauncherApp:
         self.automation_preflight_state = state
         self.populate_automation_tree(state)
         self.initialize_automation_progress_tracker(state)
-        failed_results = [result for result in state.stage_results if result.status == "failed"]
-        warning_results = [result for result in state.stage_results if result.status == "warning"]
+        current_results = state.stage_results
+        run_errors = state.errors if state.config.process_by_year else []
+        if state.config.process_by_year:
+            current_results = list({
+                (result.tile, result.period_start, result.period_end, result.stage): result
+                for result in state.stage_results
+            }.values())
+        failed_results = [result for result in current_results if result.status == "failed"]
+        warning_results = [result for result in current_results if result.status == "warning"]
         failed = len(failed_results)
         warnings = len(warning_results)
-        result_label = "paused" if state.stopped else ("finished with outstanding work" if failed or warnings or state.unresolved_upload_count else "finished")
+        result_label = "paused" if state.stopped else ("finished with outstanding work" if failed or warnings or run_errors or state.unresolved_upload_count else "finished")
         self.automation_activity_var.set(f"Execution: idle | {result_label} | {state.config.start_date} to {state.config.end_date}")
         self.set_automation_progress_text(
             "automation stopped" if state.stopped else "automation finished"
@@ -5650,7 +5746,9 @@ class LauncherApp:
         first_failure = ""
         if failed_results:
             result = failed_results[0]
-            first_failure = f" First failure: {result.tile}/{result.stage}: {result.message[:300]}"
+            first_failure = f" First failure: {result.tile}/{self.automation_result_stage_key(result)}: {result.message[:300]}"
+        elif run_errors:
+            first_failure = f" Outstanding yearly-run error: {run_errors[0][:300]}"
         pending_notice = ""
         if state.unresolved_upload_count:
             pending_notice = (
@@ -5675,6 +5773,8 @@ class LauncherApp:
                 f"Stopped: {'yes' if state.stopped else 'no'}\n"
                 f"Failed stages: {failed}\n"
                 f"Warning stages: {warnings}\n"
+                + (f"Yearly-run errors: {len(run_errors)}\n" if state.config.process_by_year else "")
+                +
                 f"Unverified retryable mosaics: {state.unresolved_upload_count}\n"
                 f"Affected tiles: {self.compact_tile_list(state.unresolved_upload_tiles)}\n"
                 f"{first_failure.strip()}\n"

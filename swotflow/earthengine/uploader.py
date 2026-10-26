@@ -11,6 +11,7 @@ Or run without a config file for interactive prompts:
 """
 
 from __future__ import annotations
+from swotflow.core.temporal import acquisition_window, validate_acquisition_window, within_acquisition_window
 
 import argparse
 import csv
@@ -471,6 +472,8 @@ class AppConfig:
     mosaic_manifest_csv: Optional[Path]
     base_dir: Path
     verified_workflow: bool = False
+    acquisition_start_date: str = ""
+    acquisition_end_date: str = ""
 
 
 @dataclass
@@ -944,6 +947,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
     if completion_mode not in VALID_UPLOAD_COMPLETION_MODES:
         completion_mode = UPLOAD_COMPLETION_WAIT_FOR_EE
 
+    acquisition_start, acquisition_end = acquisition_window(data)
     config = AppConfig(
         earth_engine_url=str(data.get("earth_engine_url", DEFAULT_CONFIG["earth_engine_url"])),
         input_folder=resolve_path(data.get("input_folder", ""), base_dir),
@@ -1029,6 +1033,8 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
         ),
         base_dir=base_dir,
         verified_workflow=bool(data.get("download", {}).get("verified_downloads", False)),
+        acquisition_start_date=acquisition_start,
+        acquisition_end_date=acquisition_end,
     )
     validate_config(config)
     return config
@@ -2094,11 +2100,13 @@ class EarthEngineUIUploader:
     def collect_input_files(self) -> List[Path]:
         """Return sorted GeoTIFF files from the input directory."""
         extensions = {ext.lower() for ext in self.config.upload.extensions}
+        start, end = validate_acquisition_window(self.config.acquisition_start_date, self.config.acquisition_end_date)
         globber = self.config.input_folder.rglob if self.config.upload.recursive else self.config.input_folder.glob
         files = [
             path.resolve()
             for path in globber("*")
             if path.is_file() and path.suffix.lower() in extensions
+            and within_acquisition_window(path, start, end)
         ]
         return sorted(files)
 

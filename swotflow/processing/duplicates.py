@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
+from swotflow.core.temporal import acquisition_window, validate_acquisition_window, within_acquisition_window
 
 from swotflow.core.metadata import (
     ParsedMetadata,
@@ -95,6 +96,8 @@ class DuplicateConfig:
     recursive: bool = False
     utm_tiles: List[str] = field(default_factory=list)
     base_dir: Path = Path.cwd()
+    acquisition_start_date: str = ""
+    acquisition_end_date: str = ""
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -127,6 +130,7 @@ def load_config_file(config_path: Path) -> DuplicateConfig:
 def parse_config(data: Dict[str, Any], base_dir: Path) -> DuplicateConfig:
     """Convert raw config data into a DuplicateConfig."""
     duplicate_data = data.get("duplicates", {})
+    acquisition_start, acquisition_end = acquisition_window(data)
     processing_data = data.get("processing", {})
     input_folder = (
         duplicate_data.get("input_folder")
@@ -145,6 +149,8 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> DuplicateConfig:
         recursive=bool(duplicate_data.get("recursive", False)),
         utm_tiles=normalize_utm_tiles(duplicate_data.get("utm_tiles", [])),
         base_dir=base_dir,
+        acquisition_start_date=acquisition_start,
+        acquisition_end_date=acquisition_end,
     )
     validate_config(config)
     return config
@@ -190,6 +196,7 @@ def is_relative_to(path: Path, parent: Path) -> bool:
 def collect_files(config: DuplicateConfig) -> Tuple[List[CandidateFile], List[Path]]:
     """Return duplicate candidates and unmatched files from the configured folder."""
     input_folder = config.input_folder.resolve()
+    start, end = validate_acquisition_window(config.acquisition_start_date, config.acquisition_end_date)
     if not input_folder.exists():
         return [], []
 
@@ -203,6 +210,8 @@ def collect_files(config: DuplicateConfig) -> Tuple[List[CandidateFile], List[Pa
         resolved = path.resolve()
         relative_parent = resolved.parent.relative_to(input_folder)
         if config.moved_folder_name in relative_parent.parts:
+            continue
+        if not within_acquisition_window(resolved, start, end):
             continue
         candidate = split_filename(resolved)
         if candidate is None:

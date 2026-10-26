@@ -25,6 +25,7 @@ from urllib.parse import urlsplit, urlunsplit
 from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
 
 from swotflow.core.metadata import parse_swot_l2_hr_raster_metadata, product_identity_key, processing_level_rank
+from swotflow.core.temporal import validate_acquisition_window
 
 SCHEMA = 1
 POLICY = "swot_metadata.crid_then_product_counter_v1"
@@ -239,6 +240,10 @@ def search_with_history(config: Any, earthaccess: Any = None, progress: Callable
              "filter": config.product_version_filter, "policy": POLICY, "provider": "POCLOUD",
              "ranking_code_sha256": hashlib.sha256(module_path("swotflow.core.metadata").read_bytes()).hexdigest(),
              "endpoint": "https://cmr.earthdata.nasa.gov/search/granules.umm_json"}
+    acquisition_start, acquisition_end = validate_acquisition_window(
+        config.acquisition_start_date, config.acquisition_end_date)
+    if acquisition_start:
+        scope.update(acquisition_start_date=acquisition_start, acquisition_end_date=acquisition_end)
     scan = ledger.begin(scope)
     results, status = [], "complete"
     try:
@@ -317,6 +322,7 @@ def search_with_history(config: Any, earthaccess: Any = None, progress: Callable
         returned = list(granules.values())
         eligible = returned if config.max_granules is None else returned[:config.max_granules]
         d.apply_product_version_filter(eligible, config.product_version_filter)
+        d.apply_acquisition_window_filter(eligible, config)
         for g in returned[len(eligible):]:
             g.selected_for_download = False
             g.duplicate_filter_status = "excluded_search_limit"

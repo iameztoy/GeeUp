@@ -467,6 +467,164 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_yearly_automation_is_optional_and_survives_project_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project_root = Path(temp) / "Project"
+            config_data = self.sample_config(project_root)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with mock.patch("swotflow.ui.main.load_config", return_value=config_data):
+                    app = LauncherApp(root)
+                self.assertFalse(app.automation_process_by_year_var.get())
+                self.assertFalse(app.build_config()["automation"]["process_by_year"])
+                self.assertIn("Process each tile year by year", collect_label_texts(root))
+                config_data["automation"] = {
+                    "process_by_year": True, "utm_tiles": ["UTM34M"],
+                    "start_date": "2023-07-01", "end_date": "2026-09-30",
+                }
+                project = create_project(project_root, "Project", config_data)
+                app.apply_project(project)
+                self.assertTrue(app.automation_process_by_year_var.get())
+                self.assertTrue(app.build_config()["automation"]["process_by_year"])
+                self.assertTrue(app.automation_config_from_ui().process_by_year)
+                saved = app.build_config()
+                app.automation_process_by_year_var.set(False)
+                app.apply_config_to_ui(saved)
+                self.assertTrue(app.automation_process_by_year_var.get())
+            finally:
+                root.destroy()
+
+    def test_changing_yearly_mode_invalidates_preflight(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            app.automation_preflight_state = SimpleNamespace(preflight_ok=True)
+            app.automation_start_button.configure(state=tk.NORMAL)
+            app.automation_process_by_year_var.set(True)
+            self.assertIsNone(app.automation_preflight_state)
+            self.assertTrue(app.automation_start_button.instate(["disabled"]))
+            self.assertIn("Run preflight", app.automation_status_var.get())
+        finally:
+            root.destroy()
+
+    def test_start_rejects_yearly_mode_changed_during_preflight(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            original = AutomationConfig(Path("."), {}, ["UTM34M"], "2023-01-01", "2024-12-31")
+            state = AutomationRunState("run", Path("run"), original, preflight_ok=True)
+            app.automation_preflight_state = state
+            changed = AutomationConfig(Path("."), {}, ["UTM34M"], "2023-01-01", "2024-12-31",
+                                       process_by_year=True)
+            with mock.patch.object(app, "automation_config_from_ui", return_value=changed), \
+                 mock.patch("swotflow.ui.main.messagebox.showwarning") as warning, \
+                 mock.patch("swotflow.ui.main.threading.Thread") as thread:
+                app.start_automation()
+            warning.assert_called_once()
+            self.assertIn("processing order", warning.call_args.args[1])
+            thread.assert_not_called()
+            self.assertFalse(app.automation_running)
+        finally:
+            root.destroy()
+
+    def test_yearly_progress_keeps_years_distinct_and_tiles_unique(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = AutomationConfig(Path("."), {}, ["UTM34M", "UTM35M"],
+                                      "2023-07-01", "2024-09-30", process_by_year=True)
+            stages = app.automation_stage_names(False)
+            results = [AutomationStageResult("run", "UTM34M", stage, "success",
+                        period_start="2023-07-01", period_end="2023-12-31") for stage in stages]
+            state = AutomationRunState("run", Path("run"), config, stage_results=results,
+                                       preflight_ok=True)
+            app.apply_automation_run_state(state)
+            self.assertTrue(app.automation_process_by_year_var.get())
+            self.assertEqual(app.automation_progress_total_units, 24)
+            self.assertAlmostEqual(app.automation_progress_var.get(), 25)
+            self.assertEqual(app.completed_automation_tile_count(), 0)
+            self.assertTrue(all("2023 / " in app.automation_tree.item(item, "values")[1]
+                                for item in app.automation_tree.get_children()))
+            app.automation_running = True
+            for stage in stages:
+                app.update_automation_progress("UTM35M", f"2023/{stage}", "success", "done")
+            self.assertAlmostEqual(app.automation_progress_var.get(), 50)
+            self.assertIn("0/2 tiles through all years", app.automation_progress_text_var.get())
+            self.assertIn("2/4 tile/year batches through stages", app.automation_progress_text_var.get())
+            app.update_automation_progress("UTM34M", "2024/download", "success", "done")
+            self.assertEqual(len(app.automation_progress_completed_keys), 13)
+            self.assertIn("2024/download", app.automation_activity_var.get())
+            app.update_automation_progress("UTM34M", "2024/download", "failed", "retry failed")
+            self.assertEqual(len(app.automation_progress_completed_keys), 12)
+            app.automation_running = False
+            state.stage_results.append(AutomationStageResult("run", "UTM34M", "download", "failed",
+                                       period_start="2023-07-01", period_end="2023-12-31"))
+            app.initialize_automation_progress_tracker(state)
+            self.assertNotIn(("UTM34M", "2023/download"), app.automation_progress_completed_keys)
+            state.tile_plans = [AutomationTilePlan("UTM34M", "already complete", "old preflight")]
+            app.initialize_automation_progress_tracker(state)
+            self.assertNotIn(("UTM34M", "2023/download"), app.automation_progress_completed_keys)
+            self.assertLess(app.automation_progress_var.get(), 100)
+        finally:
+            root.destroy()
+
+    def test_yearly_progress_counts_completed_tile_year_batches(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = AutomationConfig(Path("."), {}, ["UTM34M", "UTM35M"],
+                                      "2023-07-01", "2024-09-30", process_by_year=True)
+            results = [AutomationStageResult("run", "UTM34M", stage, "success",
+                       period_start=start, period_end=end)
+                       for start, end in [("2023-07-01", "2023-12-31"), ("2024-01-01", "2024-09-30")]
+                       for stage in app.automation_stage_names(False)]
+            state = AutomationRunState("run", Path("run"), config, tile_plans=[
+                AutomationTilePlan(tile, "already complete", "full-range preflight")
+                for tile in config.utm_tiles
+            ])
+            app.apply_automation_run_state(state)
+            self.assertEqual(app.automation_progress_var.get(), 0)
+            self.assertEqual(app.completed_automation_tile_count(), 0)
+            self.assertIn("0/4 tile/year batches through stages", app.automation_progress_text_var.get())
+            state.stage_results = results
+            app.apply_automation_run_state(state)
+            self.assertAlmostEqual(app.automation_progress_var.get(), 50)
+            self.assertIn("1/2 tiles through all years", app.automation_progress_text_var.get())
+            self.assertIn("2/4 tile/year batches through stages", app.automation_progress_text_var.get())
+        finally:
+            root.destroy()
+
+    def test_yearly_finish_uses_latest_attempt_and_reports_run_errors(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = AutomationConfig(Path("."), {}, ["UTM34M"], "2023-01-01", "2024-12-31",
+                                      process_by_year=True)
+            state = AutomationRunState("run", Path("run"), config, stage_results=[
+                AutomationStageResult("run", "UTM34M", "download", status,
+                                      period_start="2023-01-01", period_end="2023-12-31")
+                for status in ("failed", "success")
+            ])
+            app.apply_automation_run_state(state)
+            self.assertIn("failed stages 0", app.automation_status_var.get())
+            with mock.patch("swotflow.ui.main.messagebox.showinfo"), \
+                 mock.patch.object(app, "refresh_project_statistics_if_active"):
+                app.finish_automation(state)
+                self.assertIn("Failed stages: 0", app.automation_status_var.get())
+                self.assertNotIn("First failure", app.automation_status_var.get())
+                state.errors = ["2024 boundary has unresolved uploads"]
+                app.finish_automation(state)
+                self.assertIn("2024 boundary has unresolved uploads", app.automation_status_var.get())
+                self.assertIn("outstanding work", app.automation_activity_var.get())
+        finally:
+            root.destroy()
+
     def test_automation_map_uses_cached_statistics_overlay(self) -> None:
         root = tk.Tk()
         root.withdraw()

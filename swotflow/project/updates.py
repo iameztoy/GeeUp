@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from swotflow.project.database import ProjectDatabase, database_path_for, read_project_rows, upsert_project_rows
 from swotflow.project.lock import automation_lock
+from swotflow.core.temporal import acquisition_scope
 
 
 def now_iso() -> str:
@@ -28,6 +29,8 @@ def config_mapping(config: Any) -> Mapping[str, Any]:
             "start_date": str(getattr(config, "start_date", "") or ""),
             "end_date": str(getattr(config, "end_date", "") or ""),
             "utm_tiles": list(getattr(config, "utm_tiles", []) or []),
+            **acquisition_scope({"acquisition_start_date": getattr(config, "acquisition_start_date", ""),
+                                 "acquisition_end_date": getattr(config, "acquisition_end_date", "")}),
         },
     }
 
@@ -47,7 +50,8 @@ def update_runs_path(config: Any) -> Path:
 
 
 def campaign_fields(config: Any) -> dict[str, str]:
-    download = config_mapping(config).get("download", {})
+    mapped = config_mapping(config)
+    download = mapped.get("download", {})
     if not isinstance(download, Mapping):
         download = {}
     return {
@@ -55,6 +59,7 @@ def campaign_fields(config: Any) -> dict[str, str]:
         "product_version_filter": str(download.get("product_version_filter", "best") or "best").strip(),
         "start_date": str(download.get("start_date", "") or "").strip()[:10],
         "end_date": str(download.get("end_date", "") or "").strip()[:10],
+        **acquisition_scope(mapped),
     }
 
 
@@ -68,6 +73,8 @@ def update_campaign_id(config: Any) -> str:
             fields["end_date"],
         )
     )
+    if fields.get("acquisition_start_date"):
+        identity += "|acquisition_start|" + fields["acquisition_start_date"] + "|" + fields["acquisition_end_date"]
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
 
 
@@ -324,7 +331,9 @@ def preview_rows(preview: Any) -> list[dict[str, Any]]:
     for granule in getattr(preview, "granules", []) or []:
         rows.append(
             {
-                "status": "MATCHED" if getattr(granule, "selected_for_download", True) else "EXCLUDED_OLDER_VERSION",
+                "status": ("MATCHED" if getattr(granule, "selected_for_download", True) else
+                           "EXCLUDED_ACQUISITION_WINDOW" if getattr(granule, "duplicate_filter_status", "") == "excluded_acquisition_window"
+                           else "EXCLUDED_OLDER_VERSION"),
                 "file_name": str(getattr(granule, "file_name", "") or ""),
                 "utm_tile": str(getattr(granule, "utm_tile", "") or ""),
                 "start_time": str(getattr(granule, "start_time", "") or ""),
@@ -351,3 +360,162 @@ def record_update_preview(
         source=source,
         campaign_tiles=campaign_tiles,
     )
+
+
+def synchronize_yearly_expectations(
+    parent_config: Any, child_config: Any, *,
+    preview_rows: Sequence[Mapping[str, Any]] | None = None, download_complete: bool = False,
+) -> dict[str, Any]:
+    """Replace one parent tile/window with authoritative current NASA selections.
+
+    A complete exact-scope catalogue snapshot is preferred. Legacy callers must
+    supply the fresh child preview and evidence that its download stage completed.
+    Replaced rows and replacements are retained atomically as audit history; other
+    tiles/windows and immutable NASA snapshots remain unchanged. This is called
+    by the running pipeline, never by opening Statistics.
+    """
+    from swotflow.catalog.history import CatalogHistory, canonical_name, history_path
+    from swotflow.core.metadata import parse_swot_l2_hr_raster_metadata
+    from swotflow.core.temporal import within_acquisition_window
+
+    def mapping(value: Any) -> dict[str, Any]:
+        if hasattr(value, "base_config"):
+            result = dict(value.base_config)
+            result["download"] = {**result.get("download", {}), "start_date": value.start_date,
+                                  "end_date": value.end_date, "utm_tiles": list(value.utm_tiles)}
+            return result
+        return dict(config_mapping(value))
+
+    parent, child = mapping(parent_config), mapping(child_config)
+    parent_fields, child_fields = campaign_fields(parent), campaign_fields(child)
+    start, end = child_fields["start_date"], child_fields["end_date"]
+    tiles = normalized_tiles(child.get("download", {}).get("utm_tiles", []))
+    parent_tiles = normalized_tiles(parent.get("download", {}).get("utm_tiles", []))
+    if (len(tiles) != 1 or tiles[0] not in parent_tiles or not start or not end
+            or not parent_fields["start_date"] <= start <= end <= parent_fields["end_date"]
+            or any(parent_fields[key] != child_fields[key]
+                   for key in ("collection_short_name", "product_version_filter"))):
+        raise ValueError("Annual expectation refresh requires one tile/window inside the parent request.")
+    tile = tiles[0]
+    ownership = acquisition_scope(child)
+    if ownership != {"acquisition_start_date": start, "acquisition_end_date": end}:
+        raise ValueError("Annual expectation refresh requires exact acquisition-start ownership.")
+    campaigns_path, expected_path = update_paths(parent)
+    child_campaigns_path, _ = update_paths(child)
+    if database_path_for(expected_path).resolve() != database_path_for(child_campaigns_path).resolve():
+        raise ValueError("Parent and annual child must share the project history database.")
+    manifest = Path(str(child.get("download", {}).get("manifest_csv", "") or
+                        child_campaigns_path.parent / "download_manifest.csv"))
+    ledger = CatalogHistory(history_path(manifest))
+    matching = []
+    for row in ledger.scans():
+        scope = json.loads(row["scope"])
+        if (scope.get("start") == start and scope.get("end") == end
+                and scope.get("tiles") == tiles
+                and scope.get("filter") == child_fields["product_version_filter"]
+                and all(scope.get(key, "") == value for key, value in ownership.items())
+                and child_fields["collection_short_name"] in scope.get("collections", [])):
+            matching.append(row)
+    # Do not silently fall back to an older successful snapshot after a failed refresh.
+    latest = matching[0] if matching else None
+    scan_id = ""
+    if latest is not None and latest["status"] == "complete":
+        snapshot = ledger.snapshot(latest["id"])
+        scan_id = str(snapshot["id"])
+        candidates = {canonical_name(row["filename"]): row for row in snapshot["candidates"]}
+        source_rows = []
+        for selected in snapshot["selections"]:
+            if selected["selected"]:
+                name = canonical_name(selected["filename"])
+                if name not in candidates:
+                    raise ValueError("Selected NASA product has no retained catalogue metadata.")
+                candidate = candidates[name]
+                source_rows.append({"file_name": name, "granule_id": candidate.get("concept_id", ""),
+                                    "selected_for_download": "yes"})
+        origin = "catalogue_snapshot"
+    elif preview_rows is not None and download_complete:
+        source_rows = list(preview_rows)
+        origin = "completed_download_preview"
+    else:
+        raise ValueError("No complete current annual NASA selection or successful fresh download preview.")
+
+    parent_id, child_id = update_campaign_id(parent), update_campaign_id(child)
+    timestamp = now_iso()
+    selected_rows: dict[str, dict[str, str]] = {}
+    for row in source_rows:
+        if (str(row.get("selected_for_download", "yes")).lower() == "no"
+                or str(row.get("status", "")).upper().startswith("EXCLUDED_")
+                or str(row.get("duplicate_filter_status", "")).lower().startswith("excluded_")):
+            continue
+        name = canonical_name(str(row.get("file_name", "")))
+        parsed = parse_swot_l2_hr_raster_metadata(name)
+        if (parsed is None or parsed.fields["coordinate_system"] != tile
+                or not within_acquisition_window(name, start, end)):
+            raise ValueError("Fresh annual selection contains an unknown or out-of-scope filename.")
+        fields = parsed.fields
+        beginning = datetime.strptime(fields["range_beginning"], "%Y%m%dT%H%M%S").isoformat() + "Z"
+        ending = datetime.strptime(fields["range_ending"], "%Y%m%dT%H%M%S").isoformat() + "Z"
+        selected_rows[name] = {
+            "record_id": f"{parent_id}|{name}", "campaign_id": parent_id, "status": "EXPECTED",
+            "file_name": name, "granule_id": str(row.get("granule_id", "")), "utm_tile": tile,
+            "start_time": beginning, "end_time": ending, "size_mb": str(row.get("size_mb", "")),
+            "downloaded": str(row.get("downloaded", "")), "source": "yearly_scope_refresh",
+            "origin_scan_id": scan_id, "origin_campaign_id": child_id, "origin_kind": origin,
+            "updated_at": timestamp,
+        }
+    database = ProjectDatabase(database_path_for(expected_path))
+    database.ensure_imported("update_campaigns", campaigns_path)
+    database.ensure_imported("update_expected", expected_path)
+    with database.session() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        stored = connection.execute(
+            "SELECT record_key,payload_json FROM records WHERE dataset='update_expected' "
+            "AND utm_tile IN (?, '') AND record_key LIKE ?",
+            (tile, f"{parent_id}|%")).fetchall()
+        replaced = []
+        for row in stored:
+            payload = json.loads(row["payload_json"])
+            name = payload.get("file_name", "")
+            parsed = parse_swot_l2_hr_raster_metadata(name)
+            if (parsed is not None and parsed.fields["coordinate_system"] == tile
+                    and within_acquisition_window(name, start, end)):
+                replaced.append((row["record_key"], payload))
+        history_payload = {"parent_campaign_id": parent_id, "child_campaign_id": child_id,
+                           "tile": tile, "start_date": start, "end_date": end,
+                           "origin_scan_id": scan_id, "origin_kind": origin,
+                           "previous_rows": [row for _, row in replaced],
+                           "selected_rows": list(selected_rows.values()), "status": "APPLIED"}
+        history_id = hashlib.sha256(json.dumps(history_payload, sort_keys=True).encode()).hexdigest()
+
+        def write_record(dataset: str, key: str, value: Mapping[str, Any]) -> None:
+            connection.execute(
+                "INSERT OR REPLACE INTO records(dataset,record_key,status,utm_tile,event_date,source_path,"
+                "output_path,updated_at,payload_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                (dataset, key, str(value.get("status", "")), str(value.get("utm_tile", value.get("tile", ""))),
+                 str(value.get("start_time", value.get("start_date", "")))[:10], "", "", timestamp,
+                 json.dumps(value, sort_keys=True)))
+
+        for key, _ in replaced:
+            connection.execute("DELETE FROM records WHERE dataset='update_expected' AND record_key=?", (key,))
+        for row in selected_rows.values():
+            write_record("update_expected", row["record_id"], row)
+        write_record("yearly_expectation_history", history_id, {**history_payload, "updated_at": timestamp})
+        old_campaign = connection.execute(
+            "SELECT payload_json FROM records WHERE dataset='update_campaigns' AND record_key=?", (parent_id,)).fetchone()
+        campaign = json.loads(old_campaign[0]) if old_campaign else {}
+        expected_count = connection.execute(
+            "SELECT COUNT(*) FROM records WHERE dataset='update_expected' AND record_key LIKE ?", (f"{parent_id}|%",)).fetchone()[0]
+        campaign.update(campaign_id=parent_id, status="ACTIVE", **parent_fields,
+                        label=campaign_label(parent_fields), tiles=json.dumps(parent_tiles),
+                        expected_granules=str(expected_count), source="yearly_scope_refresh",
+                        created_at=campaign.get("created_at", timestamp), updated_at=timestamp)
+        write_record("update_campaigns", parent_id, campaign)
+        database.mark_dataset_initialized("update_expected", connection=connection)
+        database.mark_dataset_initialized("update_campaigns", connection=connection)
+        database._bump_revision(connection)
+        connection.commit()
+    database.export_csv("update_campaigns", campaigns_path)
+    return {"campaign_id": parent_id, "tile": tile, "start_date": start, "end_date": end,
+            "selected_count": len(selected_rows), "replaced_count": len(replaced),
+            "expected_count": expected_count, "origin_scan_id": scan_id,
+            "origin_kind": origin, "history_id": history_id}

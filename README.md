@@ -1,6 +1,8 @@
 # SWOTFlow
 
-Current application version: **v0.8.0** (25 October 2026). The Home page and application window title display this version on the next normal launch.
+Current application version: **v0.8.2** (26 October 2026). The Home page and application window title display this version on the next normal launch.
+
+New in v0.8.2: optional **Process each tile year by year** scheduling in Automation. Finish one tile's requested calendar years before moving to the next tile, with inclusive acquisition-start boundaries, independent tile/year checkpoints and cumulative project history. The option is off by default. Uploads wait for Earth Engine confirmation; failed batches block later years of the affected tile. Statistics retains the full requested period and counts unique tiles separately from tile/year batches. See [yearly Automation, storage limits and cleanup requirements](YEARLY_AUTOMATION.md).
 
 New in v0.8.0: organize implementation modules into the `swotflow/` package by function. The existing `python swotflow_gui.py` launcher remains; `python -m swotflow` also launches the GUI. Worker commands and resource paths use the new package layout. The v0.7.3 processing, version-selection, verification and cleanup rules are unchanged. See [development layout and command migration](DEVELOPMENT.md).
 
@@ -39,7 +41,7 @@ For each release, keep the Home-page version, README and relevant release docume
 - **Projects:** one folder per AOI or workflow, with project-specific raw downloads, extracted GeoTIFFs, mosaics, logs, presets, and settings.
 - **Project relocation:** validate and rebase a copied project's paths while preserving its processing history. See [moving a project](./GETTING_STARTED.md#move-a-project-to-another-computer).
 - **Home:** a visual landing tab with project status, workflow shortcuts, GitHub access, and selected-tile summary.
-- **Automation:** runs the project workflow tile by tile after a required preflight, with resumable manifests and verified-stage cleanup.
+- **Automation:** runs the project workflow tile by tile after a required preflight, with resumable manifests and verified-stage cleanup. An optional mode completes each tile in calendar-year batches before moving to the next tile.
 - **Download:** searches and downloads PO.DAAC SWOT L2 HR Raster 100 m data through `earthaccess`, with date and UTM tile filtering.
 - **Duplicate Removal:** moves older local raw granule versions when several CRID/product-counter versions exist.
 - **Extraction:** converts SWOT NetCDF files into two-band GeoTIFFs with `wse` and `wse_qual`, with optional worker-based parallelism.

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
+from swotflow.core.temporal import acquisition_scope, acquisition_window, validate_acquisition_window, within_acquisition_window
 
 from swotflow.core.gdal import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
 from swotflow.project.database import dataset_for_path, read_project_rows, upsert_project_rows
@@ -145,6 +146,8 @@ class MosaicConfig:
     selection_scan_id: str = ""
     expected_sources: Optional[Dict[str, dict]] = None
     base_dir: Path = Path.cwd()
+    acquisition_start_date: str = ""
+    acquisition_end_date: str = ""
 
 
 @dataclass
@@ -218,6 +221,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> MosaicConfig:
     """Convert raw config data into a validated MosaicConfig."""
     mosaic_data = data.get("mosaic", {})
     input_folder = mosaic_data.get("input_folder") or data.get("input_folder", "")
+    acquisition_start, acquisition_end = acquisition_window(data)
     config = MosaicConfig(
         input_folder=resolve_path(input_folder, base_dir),
         output_folder=resolve_path(mosaic_data.get("output_folder", "./mosaics"), base_dir),
@@ -250,11 +254,14 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> MosaicConfig:
         require_all_inputs=bool(data.get("download", {}).get("verified_downloads", False)),
         verified_workflow=bool(data.get("download", {}).get("verified_downloads", False)),
         base_dir=base_dir,
+        acquisition_start_date=acquisition_start,
+        acquisition_end_date=acquisition_end,
     )
     validate_config(config)
     if config.verified_workflow:
         from swotflow.verification.pipeline import catalogue_selection
-        selection = catalogue_selection(config.manifest_csv.parent, data.get("download", {}), mosaic_data.get("selection_scan_id", ""))
+        download_scope = {**data.get("download", {}), **acquisition_scope(data)}
+        selection = catalogue_selection(config.manifest_csv.parent, download_scope, mosaic_data.get("selection_scan_id", ""))
         if selection is not None:
             config.selection_scan_id, config.expected_sources = selection
     return config
@@ -298,11 +305,14 @@ def normalize_workers(value: Any) -> int:
 def collect_input_files(config: MosaicConfig) -> List[Path]:
     """Return sorted GeoTIFF inputs, excluding the configured output folder."""
     extensions = {ext.lower() for ext in config.extensions}
+    start, end = validate_acquisition_window(config.acquisition_start_date, config.acquisition_end_date)
     globber = config.input_folder.rglob if config.recursive else config.input_folder.glob
     output_folder = config.output_folder.resolve()
     files: List[Path] = []
     for path in globber("*"):
         if not path.is_file() or path.suffix.lower() not in extensions:
+            continue
+        if not within_acquisition_window(path, start, end):
             continue
         resolved = path.resolve()
         if is_relative_to(resolved, output_folder):

@@ -357,6 +357,10 @@ automation:
   end_date: ""
   include_upload: false
   cleanup_enabled: true
+  # Optional: process each tile in clipped calendar years; finish its years
+  # before moving to the next tile. Existing full-range tile workflow stays
+  # the default. Cleanup must be enabled and verified to release disk space.
+  process_by_year: false
   min_free_space_gb: 50
   continue_on_tile_failure: true
   # Retry CMR/download-search timeout failures after the first tile pass. This

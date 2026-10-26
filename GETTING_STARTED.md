@@ -2,6 +2,10 @@
 
 This guide covers installation, first launch, project setup, and the normal GUI workflow. Detailed processing rules are kept in [SWOT_PROCESSING_GUIDE.md](./SWOT_PROCESSING_GUIDE.md).
 
+The **v0.8.2 development candidate** adds optional yearly Automation scheduling.
+Its Home banner and application title use the shared version number. This feature
+is independent of the separately evaluated v0.8.1 projection changes.
+
 ## Environment Strategy
 
 SWOTFlow uses two Python environments on purpose:
@@ -99,6 +103,39 @@ Use this restart rule:
 - **Stopped with `Stop After Current Stage`:** reopen the same project, authenticate Earthdata if needed, then click `Resume Run`.
 - **Complete update campaign:** keep the saved campaign for Statistics. Set the next date range, run a new preflight, then start a new Automation run.
 - **Power loss or unexpected shutdown:** reopen the same project and normally use `Resume Run`. If upload was active, wait for Earth Engine tasks to settle, run a fresh preflight so its automatic EE sync verifies submitted assets, then click `Start Automation`.
+
+### Optional yearly processing within each tile
+
+Enable **Process each tile year by year** before running Preflight when a long
+date range would leave too much data awaiting downstream processing. The option
+is off by default. For two tiles over 2023–2026, Automation completes tile A's
+2023 pipeline, then A's 2024, 2025 and 2026 pipelines, before beginning tile B.
+Each batch uses the existing download, extraction, mosaic and optional upload
+stages. The first and last years are clipped to your dates, inclusively; a granule
+belongs to the year containing its filename's acquisition start, even if it ends
+after midnight in the following year.
+
+This mode waits for Earth Engine confirmation when uploading, overriding the
+manual `Upload completion mode` for the run. Unresolved uploads or failed input
+accounting prevent later years of that tile from starting. Other tiles may
+continue if **Continue on tile failure** is enabled. Low space or a user stop
+pauses the entire queue. Resume uses separate tile/year checkpoints while project
+manifests and filename/version history remain cumulative. Run a new preflight
+after changing the run's scope or processing settings.
+
+Cleanup still requires verified downstream evidence. Raw and extracted files
+can be released when eligible; final mosaics can remain until full pixel checks
+permit their deletion. Free-space checks examine each stage's actual output
+volume before that stage starts, but do not predict its peak disk use. One
+tile-year can still exceed capacity. With cleanup disabled, files accumulate.
+
+Automation's local mosaics remain scoped to one UTM tile. If you plan to combine
+UTM tiles locally later, retain the necessary source rasters by disabling cleanup;
+otherwise use the separate **EE Consolidation** workflow after upload. Statistics
+keeps the full requested date window and unique tile count, with separate
+completed and remaining tile/year batches. Stage completion is not pixel
+certification. See [the yearly Automation guide](YEARLY_AUTOMATION.md) for the
+complete behavior and storage limitations.
 
 ## Create Or Open A Project
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
+from swotflow.core.temporal import acquisition_window, validate_acquisition_window, within_acquisition_window
 
 from swotflow.core.gdal import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
 from swotflow.project.database import read_project_rows, upsert_project_rows
@@ -127,6 +128,8 @@ class ExtractConfig:
     base_dir: Path = Path.cwd()
     verified_workflow: bool = False
     verification_run_id: str = ""
+    acquisition_start_date: str = ""
+    acquisition_end_date: str = ""
 
 
 @dataclass
@@ -177,6 +180,7 @@ def load_config_file(config_path: Path) -> ExtractConfig:
 def parse_config(data: Dict[str, Any], base_dir: Path) -> ExtractConfig:
     """Convert raw config data into a validated ExtractConfig."""
     extract_data = data.get("extract", {})
+    acquisition_start, acquisition_end = acquisition_window(data)
     processing_data = data.get("processing", {})
     input_folder = (
         extract_data.get("input_folder")
@@ -212,6 +216,8 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> ExtractConfig:
         ),
         base_dir=base_dir,
         verified_workflow=bool(data.get("download", {}).get("verified_downloads", False)),
+        acquisition_start_date=acquisition_start,
+        acquisition_end_date=acquisition_end,
     )
     validate_config(config)
     return config
@@ -288,6 +294,7 @@ def build_output_path(nc_path: Path, output_folder: Path, target_crs_mode: str) 
 def build_extraction_plan(config: ExtractConfig) -> ExtractPlan:
     """Scan NetCDF inputs, parse SWOT names, and apply the year/limit filters."""
     selected_years = normalize_year_selection(config.year_selection)
+    start, end = validate_acquisition_window(config.acquisition_start_date, config.acquisition_end_date)
     selected_tiles = set(config.utm_tiles)
     all_nc_files = sorted(config.input_folder.glob("*.nc")) if config.input_folder.exists() else []
     selected: List[ExtractSource] = []
@@ -304,6 +311,8 @@ def build_extraction_plan(config: ExtractConfig) -> ExtractPlan:
             continue
         tile = f"UTM{metadata['utm_zone']}{metadata['mgrs_band']}"
         if selected_tiles and tile not in selected_tiles:
+            continue
+        if not within_acquisition_window(path, start, end):
             continue
         selected.append(ExtractSource(path=path, metadata=metadata))
 

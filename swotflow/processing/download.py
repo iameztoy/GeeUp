@@ -20,6 +20,7 @@ from swotflow.project.lock import download_folder_lock
 from swotflow.project.updates import record_update_preview
 from swotflow.core.metadata import parse_swot_l2_hr_raster_metadata, product_identity_parts, swot_product_rank
 from swotflow.project.manifest import upsert_workflow_manifest, workflow_manifest_path
+from swotflow.core.temporal import acquisition_window, validate_acquisition_window, within_acquisition_window
 
 
 PROGRESS_PREFIX = "GEEUP_PROGRESS"
@@ -57,6 +58,7 @@ PRODUCT_VERSION_FILTER_LABEL_BY_VALUE = {
     value: label for label, value in PRODUCT_VERSION_FILTER_LABELS.items()
 }
 EXCLUDED_OLDER_VERSION_STATUS = "EXCLUDED_OLDER_VERSION"
+EXCLUDED_ACQUISITION_WINDOW_STATUS = "EXCLUDED_ACQUISITION_WINDOW"
 MGRS_LATITUDE_BANDS = "CDEFGHJKLMNPQRSTUVWX"
 UTM_TILE_RE = re.compile(r"^UTM(?P<zone>0[1-9]|[1-5]\d|60)(?P<band>[C-HJ-NP-X])$")
 CMR_PAGE_SIZE = 2000
@@ -95,6 +97,8 @@ class DownloadConfig:
     destination_parent: str = ""
     _verification_cache: dict = field(default_factory=dict, repr=False, compare=False, init=False)
     base_dir: Path = Path.cwd()
+    acquisition_start_date: str = ""
+    acquisition_end_date: str = ""
 
 
 @dataclass
@@ -326,6 +330,7 @@ def load_config_file(config_path: Path) -> DownloadConfig:
 def parse_config(data: Dict[str, Any], base_dir: Path) -> DownloadConfig:
     """Convert raw config data into a validated DownloadConfig."""
     processing_data = data.get("processing", {})
+    acquisition_start, acquisition_end = acquisition_window(data)
     download_data = data.get("download", {})
     output_folder = (
         download_data.get("output_folder")
@@ -378,6 +383,8 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> DownloadConfig:
             ),
         ),
         base_dir=base_dir,
+        acquisition_start_date=acquisition_start,
+        acquisition_end_date=acquisition_end,
     )
     validate_config(config)
     return config
@@ -386,9 +393,13 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> DownloadConfig:
 def validate_config(config: DownloadConfig) -> None:
     """Raise ValueError when download configuration is invalid."""
     start = validate_date_text(config.start_date, "start_date")
+    acquisition_start, acquisition_end = validate_acquisition_window(
+        config.acquisition_start_date, config.acquisition_end_date)
     end = validate_date_text(config.end_date, "end_date")
     if start > end:
         raise ValueError("download.start_date cannot be after download.end_date.")
+    if acquisition_start and (acquisition_start < config.start_date or acquisition_end > config.end_date):
+        raise ValueError("Acquisition ownership must be within the NASA query date range.")
     if not config.collection_short_name:
         raise ValueError("download.collection_short_name is required.")
     if not config.utm_tiles:
@@ -995,6 +1006,25 @@ def apply_product_version_filter(
     return list(granules)
 
 
+def apply_acquisition_window_filter(granules: Sequence[DownloadGranule], config: DownloadConfig) -> None:
+    """Retain returned boundary records while excluding other batches' observations."""
+    start, end = validate_acquisition_window(config.acquisition_start_date, config.acquisition_end_date)
+    if not start:
+        return
+    for granule in granules:
+        if not within_acquisition_window(granule.file_name, start, end):
+            granule.selected_for_download = False
+            granule.duplicate_filter_status = "excluded_acquisition_window"
+            reason = f"Acquisition start is outside {start} to {end}; assigned to its own start-date batch."
+            granule.duplicate_reason = " ".join(part for part in (granule.duplicate_reason, reason) if part)
+
+
+def excluded_granule_status(granule: DownloadGranule) -> str:
+    """Keep date ownership exclusions distinct from superseded versions."""
+    return (EXCLUDED_ACQUISITION_WINDOW_STATUS if granule.duplicate_filter_status == "excluded_acquisition_window"
+            else EXCLUDED_OLDER_VERSION_STATUS)
+
+
 def build_download_preview(
     config: DownloadConfig,
     earthaccess_module: Any = None,
@@ -1033,6 +1063,7 @@ def build_download_preview(
             )
     granules = sorted(granules, key=lambda granule: granule.file_name.lower())
     apply_product_version_filter(granules, config.product_version_filter)
+    apply_acquisition_window_filter(granules, config)
     if progress_callback is not None:
         selected_count = sum(1 for granule in granules if granule.selected_for_download)
         progress_callback(
@@ -1190,6 +1221,8 @@ def write_download_manifest(
     rows = read_download_manifest(manifest_csv)
     timestamp = datetime.now().replace(microsecond=0).isoformat()
     for granule in preview.granules:
+        if granule.duplicate_filter_status == "excluded_acquisition_window":
+            continue  # Search history/report retain it; do not overwrite another batch's transfer state.
         key = manifest_key(granule)
         existing = rows.get(key, {})
         status, local_path = statuses.get(key, statuses.get(granule.identity, ("MATCHED", "")))
@@ -1239,6 +1272,8 @@ def write_download_workflow_manifest(
     """Update the shared project workflow manifest with download status rows."""
     rows = []
     for granule in preview.granules:
+        if granule.duplicate_filter_status == "excluded_acquisition_window":
+            continue
         status, local_path = statuses.get(granule.identity, ("MATCHED", ""))
         raw_path = local_complete_path(config, granule)
         rows.append(
@@ -1270,11 +1305,11 @@ def update_statuses_from_local_files(
     for granule in preview.granules:
         if statuses.get(granule.identity, ("", ""))[0] == "SKIPPED_VERIFIED_EE":
             continue
-        complete_path = local_complete_path(config, granule)
         current_status, current_path = statuses.get(granule.identity, ("", ""))
-        if not granule.selected_for_download or current_status == EXCLUDED_OLDER_VERSION_STATUS:
-            statuses[granule.identity] = (EXCLUDED_OLDER_VERSION_STATUS, current_path)
+        if not granule.selected_for_download or current_status in {EXCLUDED_OLDER_VERSION_STATUS, EXCLUDED_ACQUISITION_WINDOW_STATUS}:
+            statuses[granule.identity] = (excluded_granule_status(granule), current_path)
             continue
+        complete_path = local_complete_path(config, granule)
         if complete_path is not None:
             if current_status in {"DOWNLOADED", "SKIPPED_EXISTING"}:
                 statuses[granule.identity] = (current_status, str(complete_path))
@@ -1303,7 +1338,7 @@ def preview_statuses_from_existing(
     manifest = read_download_manifest(effective_manifest_csv(config))
     for granule in preview.granules:
         if not granule.selected_for_download:
-            statuses[granule.identity] = (EXCLUDED_OLDER_VERSION_STATUS, "")
+            statuses[granule.identity] = (excluded_granule_status(granule), "")
             continue
         existing = existing_download_path(config, granule)
         if existing is not None:
@@ -1350,7 +1385,11 @@ def write_download_report(
     report_rows = []
     for granule in preview.granules:
         status, local_path = statuses.get(granule.identity, ("MATCHED", ""))
-        raw_exists = local_complete_path(config, granule) is not None
+        # A boundary record is reported, but must not trigger download verification
+        # or overwrite verification evidence belonging to the adjacent batch.
+        raw_exists = (file_appears_complete(config.output_folder / granule.file_name, granule.size_mb)
+                      if granule.duplicate_filter_status == "excluded_acquisition_window"
+                      else local_complete_path(config, granule) is not None)
         known_from_manifest = status == "SKIPPED_MANIFEST"
         downloaded = (
             "yes"
@@ -1444,7 +1483,7 @@ def _run_download(
         reusable = reusable_download_groups(preview.selected_granules, store, config.destination_parent)
     for granule in preview.granules:
         if not granule.selected_for_download:
-            statuses[granule.identity] = (EXCLUDED_OLDER_VERSION_STATUS, "")
+            statuses[granule.identity] = (excluded_granule_status(granule), "")
             continue
         if granule.file_name in reusable:
             statuses[granule.identity] = ("SKIPPED_VERIFIED_EE", "")
@@ -1596,7 +1635,10 @@ def print_preview_summary(preview: DownloadPreview, report_csv: Path) -> None:
     print(f"Patterns: {', '.join(preview.query.granule_patterns)}")
     print(f"Granules matched: {len(preview.granules)}")
     print(f"Selected for download: {len(preview.selected_granules)}")
-    print(f"Excluded older versions: {len(preview.excluded_granules)}")
+    exclusion_label = ("Excluded files (versions/date scope)" if any(
+        granule.duplicate_filter_status == "excluded_acquisition_window" for granule in preview.excluded_granules
+    ) else "Excluded older versions")
+    print(f"{exclusion_label}: {len(preview.excluded_granules)}")
     print(
         "Selected known size: "
         f"{format_size(preview.selected_known_size_mb, preview.selected_missing_size_count)}"
@@ -1613,7 +1655,10 @@ def print_download_summary(result: DownloadResult) -> None:
     """Print a concise download summary for CLI users."""
     print(f"Granules matched: {len(result.preview.granules)}")
     print(f"Selected for download: {len(result.preview.selected_granules)}")
-    print(f"Excluded older versions: {len(result.preview.excluded_granules)}")
+    exclusion_label = ("Excluded files (versions/date scope)" if any(
+        granule.duplicate_filter_status == "excluded_acquisition_window" for granule in result.preview.excluded_granules
+    ) else "Excluded older versions")
+    print(f"{exclusion_label}: {len(result.preview.excluded_granules)}")
     print(f"Accounted for: {result.complete_count}")
     print(f"Downloaded files: {len(result.downloaded_files)}")
     print(f"Skipped existing: {len(result.skipped_existing)}")

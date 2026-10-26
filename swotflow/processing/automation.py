@@ -11,11 +11,12 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
@@ -74,6 +75,8 @@ AUTOMATION_RUN_COLUMNS = [
     "log_path",
     "deleted_files",
     "deleted_bytes",
+    "period_start",
+    "period_end",
 ]
 RETRYABLE_DOWNLOAD_FAILURE_MARKERS = (
     "cmr search failed",
@@ -133,6 +136,7 @@ class AutomationConfig:
     run_id: str = ""
     run_dir: Optional[Path] = None
     refresh_cmr: bool = False
+    process_by_year: bool = False
 
 
 @dataclass
@@ -173,6 +177,8 @@ class AutomationStageResult:
     log_path: str = ""
     deleted_files: int = 0
     deleted_bytes: int = 0
+    period_start: str = ""
+    period_end: str = ""
 
 
 @dataclass
@@ -192,6 +198,7 @@ class AutomationRunState:
     stopped: bool = False
     unresolved_upload_count: int = 0
     unresolved_upload_tiles: list[str] = field(default_factory=list)
+    year_batches: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def csv_path(self) -> Path:
@@ -253,6 +260,7 @@ def normalize_automation_config(config: AutomationConfig) -> AutomationConfig:
         run_id=config.run_id,
         run_dir=Path(config.run_dir) if config.run_dir is not None else None,
         refresh_cmr=config.refresh_cmr,
+        process_by_year=bool(config.process_by_year),
     )
     if not normalized.project_root:
         raise ValueError("Automation requires an open project root.")
@@ -260,7 +268,30 @@ def normalize_automation_config(config: AutomationConfig) -> AutomationConfig:
         raise ValueError("Automation requires at least one UTM tile.")
     if not normalized.start_date or not normalized.end_date:
         raise ValueError("Automation requires a start date and end date.")
+    if normalized.process_by_year:
+        automation_periods(normalized)
+        for section, key in (("download", "max_granules"), ("extract", "limit_files")):
+            if normalized.base_config.get(section, {}).get(key) not in (None, ""):
+                raise ValueError(f"Yearly Automation requires complete inputs: clear {section}.{key} first.")
+        for section in ("processing", "download"):
+            normalized.base_config.setdefault(section, {}).update(
+                acquisition_start_date=normalized.start_date,
+                acquisition_end_date=normalized.end_date,
+            )
+        normalized.base_config["download"].update(start_date=normalized.start_date,
+                                                   end_date=normalized.end_date, utm_tiles=normalized.utm_tiles)
     return normalized
+
+
+def automation_periods(config: AutomationConfig) -> list[tuple[str, str]]:
+    """Return inclusive calendar windows; off preserves the single original scope."""
+    if not config.process_by_year:
+        return [(config.start_date, config.end_date)]
+    start, end = date.fromisoformat(config.start_date), date.fromisoformat(config.end_date)
+    if end < start:
+        raise ValueError("Automation start date cannot be after its end date.")
+    return [(max(start, date(year, 1, 1)).isoformat(),
+             min(end, date(year, 12, 31)).isoformat()) for year in range(start.year, end.year + 1)]
 
 
 def project_manifest_path(config: Mapping[str, Any], section: str, key: str) -> Path:
@@ -447,6 +478,8 @@ def retryable_upload_candidates(
 ) -> list[Path]:
     """Return local mosaics whose upload is unresolved and safe to retry."""
     wanted = set(normalize_utm_tiles(list(selected_tiles)))
+    from swotflow.core.temporal import acquisition_window, within_acquisition_window
+    start, end = acquisition_window(base_config)
     candidates: list[Path] = []
     for row in read_project_rows(upload_report_path(base_config), "upload_report"):
         status = str(row.get("final_status", "") or "").strip().upper()
@@ -454,6 +487,8 @@ def retryable_upload_candidates(
             continue
         local_file = Path(str(row.get("local_file", "") or ""))
         if not local_file.is_file() or local_file.suffix.lower() not in {".tif", ".tiff"}:
+            continue
+        if not within_acquisition_window(local_file, start, end):
             continue
         if wanted and not (wanted & set(upload_row_tiles(row))):
             continue
@@ -745,6 +780,14 @@ def _preflight_automation(
         state.errors.append(f"Configured GDAL Python does not exist: {gdal_python}")
 
     state.warnings.extend(windows_automation_reboot_warnings())
+    if normalized.process_by_year:
+        state.warnings.append(
+            "Calendar-year mode finishes each tile year by year before moving to the next tile. "
+            "One tile/year can still exceed available storage. Raw/extracted cleanup "
+            "keeps its existing proof checks; final mosaics remain until pixel-verification evidence permits deletion."
+        )
+        if not normalized.cleanup_enabled:
+            state.warnings.append("Cleanup is disabled: files will accumulate across years.")
 
     try:
         usage = shutil.disk_usage(normalized.project_root)
@@ -852,7 +895,10 @@ def _preflight_automation(
                     estimated_mosaic_groups=len(estimated_mosaic_names),
                     recorded_mosaic_groups=recorded_mosaics,
                     pending_mosaic_groups=pending_mosaics,
-                    excluded_older_versions=len(preview.excluded_granules),
+                    excluded_older_versions=sum(
+                        getattr(granule, "duplicate_filter_status", "") != "excluded_acquisition_window"
+                        for granule in preview.excluded_granules
+                    ),
                     downloaded=downloaded,
                     extracted=extracted,
                     mosaic_sources=mosaic_sources,
@@ -1131,9 +1177,17 @@ def cleanup_stage(
     currently verified mosaics.
     """
     candidates = []
+    from swotflow.core.temporal import acquisition_window, within_acquisition_window
+    window_start, window_end = acquisition_window(config)
     for candidate in plan_cleanup_candidates(config, include_partial_downloads=False):
         if candidate.stage != stage:
             continue
+        if not within_acquisition_window(candidate.path, window_start, window_end):
+            continue
+        if config.get("automation", {}).get("yearly_batch", False):
+            scoped_tiles = config.get("download", {}).get("utm_tiles", [])
+            if scoped_tiles and not any(path_mentions_tile(candidate.path, scoped_tile) for scoped_tile in scoped_tiles):
+                continue
         if stage != "mosaic" and not path_mentions_tile(candidate.path, tile):
             continue
         candidates.append(candidate)
@@ -1167,9 +1221,26 @@ def write_run_state(state: AutomationRunState) -> None:
         "stopped": state.stopped,
         "unresolved_upload_count": state.unresolved_upload_count,
         "unresolved_upload_tiles": state.unresolved_upload_tiles,
+        "year_batches": state.year_batches,
     }
-    with state.json_path.open("w", encoding="utf-8") as handle:
-        json.dump(serializable, handle, indent=2, default=str)
+    yearly = state.config.process_by_year or state.config.base_config.get("automation", {}).get("yearly_batch", False)
+    if yearly:
+        # A stopped process or full disk must not truncate the previous resume checkpoint.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=state.run_dir,
+                                             prefix="automation_run_", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                json.dump(serializable, handle, indent=2, default=str)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, state.json_path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    else:
+        with state.json_path.open("w", encoding="utf-8") as handle:
+            json.dump(serializable, handle, indent=2, default=str)
     with state.csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=AUTOMATION_RUN_COLUMNS)
         writer.writeheader()
@@ -1189,7 +1260,7 @@ def _automation_config_from_mapping(data: Mapping[str, Any]) -> AutomationConfig
         end_date=str(data.get("end_date", "") or ""),
         include_upload=bool(data.get("include_upload", False)),
         cleanup_enabled=bool(data.get("cleanup_enabled", True)),
-        min_free_space_gb=float(data.get("min_free_space_gb", 50.0) or 50.0),
+        min_free_space_gb=float(50.0 if data.get("min_free_space_gb") is None else data["min_free_space_gb"]),
         continue_on_tile_failure=bool(data.get("continue_on_tile_failure", True)),
         deferred_download_retry_passes=max(
             0,
@@ -1200,6 +1271,7 @@ def _automation_config_from_mapping(data: Mapping[str, Any]) -> AutomationConfig
         run_id=str(data.get("run_id", "") or ""),
         run_dir=Path(run_dir_text) if run_dir_text else None,
         refresh_cmr=bool(data.get("refresh_cmr", False)),
+        process_by_year=bool(data.get("process_by_year", False)),
     )
 
 
@@ -1248,6 +1320,8 @@ def _stage_result_from_mapping(data: Mapping[str, Any]) -> AutomationStageResult
         log_path=str(data.get("log_path", "") or ""),
         deleted_files=_coerce_int(data.get("deleted_files")),
         deleted_bytes=_coerce_int(data.get("deleted_bytes")),
+        period_start=str(data.get("period_start", "") or ""),
+        period_end=str(data.get("period_end", "") or ""),
     )
 
 
@@ -1279,6 +1353,7 @@ def load_automation_run_state(path: str | Path) -> AutomationRunState:
         unresolved_upload_tiles=[
             str(value) for value in data.get("unresolved_upload_tiles", []) or []
         ],
+        year_batches=[dict(row) for row in data.get("year_batches", []) or []],
     )
     return state
 
@@ -1537,6 +1612,10 @@ def _run_automation_normalized(
     stop_event: Any = None,
 ) -> AutomationRunState:
     """Run automation with a normalized config while the caller owns power policy."""
+    if normalized.process_by_year:
+        from swotflow.processing.automation_years import run_yearly_automation
+        return run_yearly_automation(normalized, preflight_state=preflight_state,
+                                     progress_callback=progress_callback, stop_event=stop_event)
     state = preflight_state if preflight_state is not None else _preflight_automation(normalized, build_download_preview, progress_callback)
     if not state.preflight_ok:
         return state
@@ -1586,6 +1665,16 @@ def _run_automation_normalized(
                 continue
             if progress_callback is not None:
                 progress_callback(tile, stage, "running", f"Starting {stage}")
+            if normalized.base_config.get("automation", {}).get("yearly_batch", False):
+                from swotflow.processing.automation_years import storage_reserve_failure
+                blocked = storage_reserve_failure(state, tile_config, tile, stage)
+                if blocked is not None:
+                    append_stage_result(state, blocked)
+                    latest_results[(tile, stage)] = blocked
+                    state.stopped = True
+                    if progress_callback is not None:
+                        progress_callback(tile, stage, blocked.status, blocked.message)
+                    return True
             if stage.endswith("_cleanup"):
                 if normalized.cleanup_enabled:
                     result = execute_cleanup_result(state, tile_config, tile, stage)
@@ -1762,12 +1851,16 @@ def reconcile_verified_run(state: AutomationRunState) -> None:
     store = VerificationStore(project_manifest_path(config, "download", "manifest_csv").parent)
     ledger = CatalogHistory(store.logs / "nasa_catalog_history.sqlite3")
     inventory = load_inventory(store, str(config.get("destination_parent", "")))
+    from swotflow.core.temporal import acquisition_scope
+    ownership = acquisition_scope(config)
     for tile in state.config.utm_tiles:
         started = now_text()
         try:
             scans = [r for r in ledger.scans() if r["status"] == "complete" and
                      (scope := json.loads(r["scope"])).get("start") == state.config.start_date and
-                     scope.get("end") == state.config.end_date and scope.get("tiles") == [tile]]
+                     scope.get("end") == state.config.end_date and scope.get("tiles") == [tile] and
+                     all(scope.get(key, "") == ownership.get(key, "")
+                         for key in ("acquisition_start_date", "acquisition_end_date"))]
             if not scans:
                 raise ValueError("No complete retained NASA search for this exact tile/date scope")
             if not state.config.include_upload:
@@ -1793,4 +1886,7 @@ def reconcile_verified_run(state: AutomationRunState) -> None:
             message = str(exc)
             state.errors.append(f"{tile}: reconciliation incomplete: {message}")
             result = AutomationStageResult(state.run_id, tile, "reconciliation", "failed", started, now_text(), return_code=2, message=message)
+        if ownership:
+            result.period_start = state.config.start_date
+            result.period_end = state.config.end_date
         append_stage_result(state, result)

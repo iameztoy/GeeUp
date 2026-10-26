@@ -338,6 +338,8 @@ def catalogue_selection(logs: Path, config: dict, scan_id: str = "") -> tuple[st
     """Bind the mosaic planner to the completed NASA selection for this run scope."""
     from swotflow.catalog.history import CatalogHistory
     from swotflow.processing.download import normalize_utm_tiles
+    from swotflow.core.temporal import acquisition_scope
+    ownership = acquisition_scope(config)
     start, end = config.get("start_date"), config.get("end_date")
     if not start or not end:
         return None  # Direct local workflows still apply processing-rank selection.
@@ -345,7 +347,8 @@ def catalogue_selection(logs: Path, config: dict, scan_id: str = "") -> tuple[st
     tiles = sorted(normalize_utm_tiles(config.get("utm_tiles", [])))
     scans = [s for s in ledger.scans() if (not scan_id or s["id"] == scan_id) and s["status"] == "complete" and
              (scope := json.loads(s["scope"])).get("start") == start and scope.get("end") == end
-             and sorted(scope.get("tiles", [])) == tiles]
+             and sorted(scope.get("tiles", [])) == tiles
+             and {k: scope[k] for k in ("acquisition_start_date", "acquisition_end_date") if scope.get(k)} == ownership]
     if not scans:
         raise ValueError("No complete NASA selection for this exact mosaic tile/date scope; run Download first.")
     snapshot = ledger.snapshot(scans[0]["id"])

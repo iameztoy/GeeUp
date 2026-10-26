@@ -164,12 +164,14 @@ class UpdateRecoveryTests(unittest.TestCase):
         app.automation_end_date_var = mock.Mock()
         app.automation_start_date_var.get.return_value = "2026-06-30"
         app.automation_end_date_var.get.return_value = "2026-08-10"
+        app.automation_process_by_year_var = tk.BooleanVar(master=tk.Tcl(), value=False)
         app.automation_selected_tiles = ["UTM34M"]
         app.automation_status_var = mock.Mock()
         state = mock.Mock()
         state.config.start_date = "2026-08-10"
         state.config.end_date = "2026-09-10"
         state.config.utm_tiles = ["UTM34M"]
+        state.config.process_by_year = False
         with mock.patch.object(app, "build_config", return_value={}), mock.patch("swotflow.ui.main.load_latest_automation_run_state", return_value=state), mock.patch.object(app, "apply_automation_run_state") as apply:
             self.assertFalse(app.load_latest_automation_run_for_project())
             apply.assert_not_called()

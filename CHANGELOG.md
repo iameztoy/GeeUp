@@ -1,5 +1,17 @@
 # Release history
 
+## 0.8.2 — 26 October 2026
+
+- Add optional **Process each tile year by year** scheduling to Automation, off by default. Complete one tile's requested years before moving to the next tile; leave the existing full-range tile workflow unchanged when disabled.
+- Clip the first and last calendar years to the requested range. Assign granules to their inclusive acquisition-start window, including midnight spans, and retain excluded boundary records in the project history.
+- Preserve cumulative catalogue, download, extraction, mosaic and upload records while saving independent tile/year checkpoints. Guard completed checkpoint reuse against changed source, processing or output settings. Reconcile input accounting before advancing.
+- Require Earth Engine confirmation when uploads are enabled. Block later years of an incomplete tile; other tiles follow the existing continue-on-failure setting. Low-storage and user-stop events pause all further batches.
+- Check the actual download, extraction and mosaic output volumes before consuming stages. This reserve is not a peak-space prediction: one tile-year can still exceed capacity, cleanup remains evidence-gated, and uncertified final mosaics may remain local.
+- Distinguish unique tiles from tile/year stage batches in Automation and Statistics, retaining the full requested date window. Keep pipeline completion separate from input and pixel certification.
+- Retain Automation's per-UTM local mosaic scope. Later local mosaicking across UTM tiles needs retained source rasters; EE Consolidation remains a separate option after upload. See [the yearly Automation guide](YEARLY_AUTOMATION.md).
+- Display **v0.8.2** through the shared version source on Home and in the application title. Add maintained scheduling, date-boundary, checkpoint, progress and Statistics regression coverage. No production rebuild or new live-upload acceptance result is claimed by this release.
+- Preserve the released projection and mosaic algorithms; the separate v0.8.1 projection candidate remains under evaluation. Use **v0.8.2** in the GitHub release title and description.
+
 ## 0.8.0 — 25 October 2026
 
 - Organize application implementation under `swotflow/` packages for processing, consolidation, Earth Engine upload, catalogue history, verification, project management, core helpers, interface and tools. Keep `swotflow_gui.py` as the simple top-level launcher and add `python -m swotflow`.
