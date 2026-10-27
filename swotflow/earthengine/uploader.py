@@ -2034,13 +2034,20 @@ class EarthEngineUIUploader:
         if path is None:
             return {}
         lookup: Dict[str, List[str]] = {}
+        self._mosaic_version_lookup = {}
         for row in read_project_rows(path, "mosaic_manifest"):
             output = str(row.get("output_file", "") or "").strip()
             if not output:
                 continue
             tiles: set[str] = set()
+            fields = []
             for source in parse_csv_path_list(row.get("input_files", "")):
                 tiles.update(source_tiles_from_file_name(source))
+                parsed = parse_swot_l2_hr_raster_metadata(source)
+                if parsed is not None:
+                    fields.append(parsed.fields)
+            from swotflow.core.metadata import processing_version_summary
+            self._mosaic_version_lookup[Path(output).name] = processing_version_summary(fields)
             if not tiles:
                 continue
             sorted_tiles = sorted(tiles)
@@ -3286,6 +3293,10 @@ class EarthEngineUIUploader:
                 raise RetryableUIError(message) from exc
             return ParsedMetadata(status="METADATA_NOT_PARSED", error_message=message)
         if parsed is not None:
+            if not hasattr(self, "_mosaic_version_lookup"):
+                self.load_mosaic_source_tile_lookup()
+            summary = getattr(self, "_mosaic_version_lookup", {}).get(item.local_file.name, {})
+            parsed.properties.update({"swot_" + k: v for k, v in summary.items()})
             return parsed
 
         message = (

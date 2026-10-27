@@ -20,6 +20,7 @@ from swotflow.core.temporal import acquisition_scope, acquisition_window, valida
 from swotflow.core.gdal import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
 from swotflow.project.database import dataset_for_path, read_project_rows, upsert_project_rows
 from swotflow.processing.download import normalize_utm_tiles
+from swotflow.core.metadata import processing_version_summary
 from swotflow.core.metadata import ParsedMetadata, parse_swot_l2_hr_raster_metadata, swot_product_rank, product_identity_key, processing_level_rank
 from swotflow.project.manifest import (
     source_signature,
@@ -90,6 +91,9 @@ REPORT_COLUMNS = [
     "source_product_counters",
     "dominant_crid",
     "preferred_crid",
+    "processing_min",
+    "processing_max",
+    "processing_levels",
     "source_signature",
     "output_exists",
     "known_from_manifest",
@@ -439,13 +443,21 @@ def build_mosaic_plan(config: MosaicConfig) -> MosaicPlan:
             grouped.setdefault(group_key(chosen.metadata, config), []).append(chosen)
 
     groups = []
+    existing_names = set(read_mosaic_manifest(config.manifest_csv))
     for key, sources in sorted(grouped.items(), key=lambda item: group_sort_key(item[0])):
         sorted_sources = sorted(sources, key=lambda source: source.path.name.lower())
+        stem = build_output_stem(sorted_sources, key)
+        legacy_stem = stem.rsplit("_PV", 1)[0]
+        # Do not rename existing products or create a second asset merely because
+        # a new app release makes processing ranges visible in new filenames.
+        if (f"{legacy_stem}.tif" in existing_names
+                or (config.output_folder / f"{legacy_stem}.tif").exists()):
+            stem = legacy_stem
         groups.append(
             MosaicGroup(
                 key=key,
                 sources=sorted_sources,
-                output_file=config.output_folder / f"{build_output_stem(sorted_sources, key)}.tif",
+                output_file=config.output_folder / f"{stem}.tif",
             )
         )
     return MosaicPlan(groups=groups, report_rows=report_rows)
@@ -509,11 +521,16 @@ def write_mosaic_manifest(config: MosaicConfig, rows: Iterable[Dict[str, str]]) 
         if not key:
             continue
         previous = existing.get(key, {column: "" for column in REPORT_COLUMNS})
-        previous_signature = previous.get("source_signature", "")
+        lineage_columns = ("source_signature", "input_files", "input_count", "original_input_count",
+                           "excluded_input_files", "excluded_reasons", "excluded_input_count",
+                           "range_beginning", "range_ending", "crid", "product_counter", "mixed_crid",
+                           "source_crids", "source_product_counters", "dominant_crid", "preferred_crid",
+                           "processing_min", "processing_max", "processing_levels")
+        saved_lineage = {column: previous.get(column, "") for column in lineage_columns}
         previous.update(row)
         if row.get("status") == "STALE_EXISTS":
             # A warning must never relabel unchanged old pixels as newly built.
-            previous["source_signature"] = previous_signature
+            previous.update(saved_lineage)
         previous["updated_at"] = timestamp_text()
         existing[key] = previous
     upsert_project_rows(
@@ -577,6 +594,7 @@ def build_output_stem(sources: Sequence[MosaicSource], key: MosaicGroupKey) -> s
     range_ending = max(field["range_ending"] for field in fields)
     crids = {field["crid"] for field in fields}
     crid = next(iter(crids)) if len(crids) == 1 else "MIXD"
+    versions = processing_version_summary(fields)
     return (
         "SWOT_L2_HR_Raster_"
         f"{key.descriptor}_"
@@ -587,6 +605,7 @@ def build_output_stem(sources: Sequence[MosaicSource], key: MosaicGroupKey) -> s
         f"{range_ending}_"
         f"{crid}_"
         "01"
+        f"_PV{versions['processing_min'].replace('_', '-')}_to_{versions['processing_max'].replace('_', '-')}"
     )
 
 
@@ -1423,7 +1442,7 @@ def report_row_for_group(
     """Build one report row for a grouped output."""
     fields = [source.metadata.fields for source in group.sources]
     diagnostics = crid_diagnostics(fields)
-    return report_row(
+    return {**report_row(
         status=status,
         message=message,
         input_files=[source.path for source in group.sources],
@@ -1447,7 +1466,7 @@ def report_row_for_group(
         source_product_counters=diagnostics["source_product_counters"],
         dominant_crid=diagnostics["dominant_crid"],
         preferred_crid=diagnostics["preferred_crid"],
-    )
+    ), **processing_version_summary(fields)}
 
 
 def crid_diagnostics(fields: Sequence[Dict[str, str]]) -> Dict[str, str]:

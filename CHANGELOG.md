@@ -1,5 +1,14 @@
 # Release history
 
+## 0.8.6 — 27 October 2026
+
+- Remove verified GeoTIFF companions during cleanup, including `.tif.aux.xml` and `.tif.aux`. Preserve sidecars of live/unproven rasters; recover identifiable orphaned companions using current downstream evidence. Retain all filename histories and manifests.
+- Resume ordinary and tile/year Automation from the saved NASA selection when current local extraction/mosaic proofs match source checksums and settings. Avoid downloading raw files again after successful raw cleanup. Missing/changed evidence falls back to ordinary verification.
+- Write all Automation JSON checkpoints atomically; use the latest stage result when deciding whether a stage completed.
+- Add lowest/highest contributing processing-version ranges, including product counters, to new mosaic filenames. Repeat homogeneous versions; retain existing output names to prevent upgrade-only duplicates. Add range/all-version fields to manifests and upload metadata without changing acquisition intervals or pixel selection.
+- Preserve yearly scheduling, NASA/download histories, Statistics, scientific algorithms, existing cloud assets and the stopped benchmark. Add maintained regression coverage and the resume/lineage guide.
+- Display v0.8.6 on Home and in the window title; use v0.8.6 in the GitHub release title and description.
+
 ## 0.8.5 — 26 October 2026
 
 - Fix EE Consolidation export rejection on noncommercial projects by omitting the custom task priority and using Earth Engine's default queue priority. Remove the obsolete priority from newly saved plan settings.

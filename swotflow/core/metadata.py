@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -76,6 +77,10 @@ def parse_swot_l2_hr_raster_metadata(
     values["granule_overlap"] = descriptor_parts[2] if len(descriptor_parts) > 2 else ""
     values["start_time"] = format_swot_timestamp(values["range_beginning"])
     values["end_time"] = format_swot_timestamp(values["range_ending"])
+    version_range = re.fullmatch(r"_PV([A-Za-z0-9]{4})-(\d+)_to_([A-Za-z0-9]{4})-(\d+)", values["filename_suffix"])
+    if values["scene_id"] == "MOSA" and version_range:
+        lo, lc, hi, hc = version_range.groups()
+        values.update(processing_min=f"{lo}_{lc}", processing_max=f"{hi}_{hc}")
 
     property_map = (
         DEFAULT_METADATA_EXTRA_PROPERTIES if extra_properties is None else extra_properties
@@ -85,6 +90,9 @@ def parse_swot_l2_hr_raster_metadata(
         for property_name, source_field in property_map.items()
         if values.get(source_field) not in (None, "")
     }
+    for key in ("processing_min", "processing_max"):
+        if key in values:
+            properties["swot_" + key] = values[key]
     return ParsedMetadata(
         start_time=values["start_time"],
         end_time=values["end_time"],
@@ -176,7 +184,20 @@ def product_identity_parts(file_name: str | Path) -> Optional[Tuple[str, ...]]:
     if metadata is None:
         return None
     fields = metadata.fields
-    return tuple(fields.get(key, "") for key in PRODUCT_IDENTITY_FIELDS)
+    return tuple("" if key == "filename_suffix" and fields.get("processing_min") else fields.get(key, "")
+                 for key in PRODUCT_IDENTITY_FIELDS)
+
+
+def processing_version_summary(fields: list[Dict[str, str]]) -> Dict[str, str]:
+    """Summarize actual input versions using the existing release/fidelity rank."""
+    versions = {(f.get("crid", ""), f.get("product_counter", "")) for f in fields}
+    versions.discard(("", ""))
+    if not versions:
+        return {}
+    ordered = sorted(versions, key=lambda v: (swot_product_rank(*v), v))
+    labels = [processing_level_label(*v) for v in ordered]
+    return {"processing_min": labels[0], "processing_max": labels[-1],
+            "processing_levels": json.dumps(labels)}
 
 
 def product_identity_key(file_name: str | Path) -> str:

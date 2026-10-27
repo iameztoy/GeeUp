@@ -231,7 +231,7 @@ class MosaicPlanningTests(unittest.TestCase):
             )
             plan = build_mosaic_plan(config)
 
-            self.assertIn("_MIXD_01.tif", plan.groups[0].output_file.name)
+            self.assertIn("_MIXD_01_PV", plan.groups[0].output_file.name)
             parsed = parse_swot_l2_hr_raster_metadata(plan.groups[0].output_file.name)
 
             self.assertIsNotNone(parsed)

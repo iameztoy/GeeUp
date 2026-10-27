@@ -1182,7 +1182,8 @@ def cleanup_stage(
     for candidate in plan_cleanup_candidates(config, include_partial_downloads=False):
         if candidate.stage != stage:
             continue
-        if not within_acquisition_window(candidate.path, window_start, window_end):
+        scope_path = Path((getattr(candidate, "verification_guard", None) or {}).get("sidecar_parent", candidate.path))
+        if not within_acquisition_window(scope_path, window_start, window_end):
             continue
         if config.get("automation", {}).get("yearly_batch", False):
             scoped_tiles = config.get("download", {}).get("utm_tiles", [])
@@ -1223,24 +1224,19 @@ def write_run_state(state: AutomationRunState) -> None:
         "unresolved_upload_tiles": state.unresolved_upload_tiles,
         "year_batches": state.year_batches,
     }
-    yearly = state.config.process_by_year or state.config.base_config.get("automation", {}).get("yearly_batch", False)
-    if yearly:
-        # A stopped process or full disk must not truncate the previous resume checkpoint.
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=state.run_dir,
-                                             prefix="automation_run_", suffix=".tmp", delete=False) as handle:
-                temporary = Path(handle.name)
-                json.dump(serializable, handle, indent=2, default=str)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, state.json_path)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-    else:
-        with state.json_path.open("w", encoding="utf-8") as handle:
+    # All scheduling modes need a durable checkpoint across power loss.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=state.run_dir,
+                                         prefix="automation_run_", suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
             json.dump(serializable, handle, indent=2, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, state.json_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     with state.csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=AUTOMATION_RUN_COLUMNS)
         writer.writeheader()
@@ -1386,7 +1382,7 @@ def completed_stage_keys(state: AutomationRunState) -> set[tuple[str, str]]:
     complete_statuses = {"success", "skipped"}
     return {
         (result.tile, result.stage)
-        for result in state.stage_results
+        for result in latest_stage_results_by_key(state).values()
         if result.status.lower() in complete_statuses
     }
 
@@ -1648,19 +1644,33 @@ def _run_automation_normalized(
             include_upload=normalized.include_upload,
         )
         tile_dir_path = tile_run_dir(state, tile)
-        tile_config_path = write_tile_config(tile_config, tile_dir_path / "automation_config.yaml")
+        tile_config_path = tile_dir_path / "automation_config.yaml"
+        verified_completed: set[str] = set()
+        if verified_mode and tile_config_path.is_file():
+            from swotflow.verification.resume import verified_resume_stages
+            try:
+                saved = yaml.safe_load(tile_config_path.read_text(encoding="utf-8")) or {}
+                verified_completed, scan_id = verified_resume_stages(
+                    tile_config, saved, {s for t, s in resume_completed if t == tile}, normalized.project_root)
+                if scan_id:
+                    tile_config.setdefault("mosaic", {})["selection_scan_id"] = scan_id
+            except (OSError, ValueError, sqlite3.Error, yaml.YAMLError) as exc:
+                if progress_callback is not None:
+                    progress_callback(tile, "resume", "warning", f"Revalidating upstream stages: {exc}")
+        write_tile_config(tile_config, tile_config_path)
         tile_failed = False
         for stage in stages_for_current_run():
             if stop_event is not None and stop_event.is_set():
                 state.stopped = True
                 break
-            if (tile, stage) in resume_completed and not verified_mode:
+            if ((tile, stage) in resume_completed and not verified_mode) or stage in verified_completed:
                 if progress_callback is not None:
                     progress_callback(
                         tile,
                         stage,
                         "skipped",
-                        "Stage already completed in this automation run; skipping during resume.",
+                        ("Resuming saved NASA selection: current local outputs and source checksums verified; no re-download."
+                         if verified_mode else "Stage already completed in this automation run; skipping during resume."),
                     )
                 continue
             if progress_callback is not None:

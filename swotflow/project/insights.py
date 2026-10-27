@@ -1677,12 +1677,8 @@ def cleanup_path_size(path: Path) -> int:
 
 def geotiff_sidecar_paths(path: Path) -> List[Path]:
     """Return expected GDAL sidecars for a GeoTIFF path."""
-    if path.suffix.lower() not in {".tif", ".tiff"}:
-        return []
-    return [
-        path.with_suffix(".tfw"),
-        path.with_suffix(f"{path.suffix}.aux.xml"),
-    ]
+    from swotflow.core.sidecars import geotiff_sidecars
+    return geotiff_sidecars(path)
 
 
 def orphan_temporary_mosaic_sidecars(mosaic_folder: Path) -> Iterable[Path]:
@@ -2425,9 +2421,11 @@ def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         cached_swot_filename_fields.cache_clear()
 
 
-def cleanup_order(candidate: CleanupCandidate) -> tuple[int, str]:
+def cleanup_order(candidate: CleanupCandidate) -> tuple[int, int, str]:
     """Keep downstream proof files until their upstream deletions have finished."""
-    return ({"raw": 0, "extracted": 1, "mosaic": 2}.get(candidate.stage, 3), str(candidate.path).lower())
+    return ({"raw": 0, "extracted": 1, "mosaic": 2}.get(candidate.stage, 3),
+            int(candidate.path.suffix.lower() not in {".nc", ".tif", ".tiff"}),
+            str(candidate.path).lower())
 
 
 def delete_cleanup_candidates(candidates: Iterable[CleanupCandidate]) -> tuple[int, int, List[str]]:

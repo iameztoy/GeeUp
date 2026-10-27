@@ -54,7 +54,7 @@ def product_name(value: str | Path) -> str:
 
 def auxiliary_hashes(path: Path) -> dict[str, str]:
     """Capture sidecars that can change masks/georeferencing without TIFF changes."""
-    candidates = [Path(str(path)+s) for s in (".aux.xml", ".msk")]
+    candidates = [Path(str(path)+s) for s in (".aux.xml", ".aux", ".msk")]
     candidates += [path.with_suffix(s) for s in (".tfw", ".tifw", ".wld")]
     return {str(p.resolve()): file_hash(p) for p in candidates if p.is_file()}
 
@@ -617,31 +617,45 @@ def cleanup_guards(config: dict, candidates: list[Any]) -> list[Any]:
         for path in proof["inputs"]:
             downstream[path].append(proof)
     active = active_proofs(store, config.get("destination_parent", ""))
+    from swotflow.core.sidecars import geotiff_sidecars
+    parents: dict[Path, set[Path]] = defaultdict(set)
+    for name in set(artifacts) | set(downstream):
+        parent = Path(name)
+        for sidecar in geotiff_sidecars(parent):
+            parents[sidecar].add(parent)
     approved = []
     for item in candidates:
         path = item.path.resolve()
-        # Sidecars are retained. They are small and cannot independently prove the
-        # identity of their parent raster once that raster has been removed.
-        if item.stage not in {"raw", "extracted", "mosaic"} or path.suffix.lower() not in {".nc", ".tif", ".tiff"}:
+        if item.stage not in {"raw", "extracted", "mosaic"}:
             continue
+        sidecar = path.suffix.lower() not in {".nc", ".tif", ".tiff"}
+        target = path
+        if sidecar:
+            # Ambiguous world files (same stem .tif/.tiff) are never guessed.
+            owners = parents.get(path, set())
+            if len(owners) != 1:
+                continue
+            path = next(iter(owners))
         if item.stage == "mosaic":
             own = artifacts.get(str(path))
-            good = own and artifact_current(own) and own["sources"] and all(active.get(n, {}).get("checksum") == h for n, h in own["sources"].items())
+            good = own and (artifact_current(own) if path.exists() else sidecar) and own["sources"] and all(active.get(n, {}).get("checksum") == h for n, h in own["sources"].items())
             proof = own if good else None
         else:
             stage = "extract" if item.stage == "raw" else "mosaic"
             proof = next((p for p in downstream.get(str(path), []) if p["stage"] == stage and artifact_current(p)), None)
-        if proof and path.is_file():
+        if proof and (path.is_file() or sidecar):
             if item.stage == "raw":
                 source = proof["sources"].get(product_name(path), {})
                 if not source or file_hash(path, source["algorithm"]) != source["hash"]:
                     continue
-            elif item.stage == "extracted" and (file_hash(path) != proof["inputs"].get(str(path))
+            elif path.is_file() and item.stage == "extracted" and (file_hash(path) != proof["inputs"].get(str(path))
                     or auxiliary_hashes(path) != proof.get("input_auxiliaries", {}).get(str(path), {})):
                 continue
             guard = {"logs": str(store.logs), "collection": config.get("destination_parent", ""),
-                     "target": str(path), "target_sha256": file_hash(path), "stage": item.stage,
-                     "downstream": proof, "target_auxiliary_hashes": auxiliary_hashes(path)}
+                     "target": str(target), "target_sha256": file_hash(target), "stage": item.stage,
+                     "downstream": proof, "target_auxiliary_hashes": auxiliary_hashes(target)}
+            if sidecar:
+                guard["sidecar_parent"] = str(path)
             approved.append(replace(item, verification_guard=guard, reason="Current downstream file/EE evidence; rechecked immediately before deletion."))
     return approved
 
@@ -649,8 +663,10 @@ def cleanup_guards(config: dict, candidates: list[Any]) -> list[Any]:
 def check_cleanup_guard(guard: dict) -> bool:
     """Fail closed when a preview's target or its downstream proof has changed."""
     target = Path(guard["target"])
+    if guard.get("sidecar_parent") and Path(guard["sidecar_parent"]).exists():
+        return False  # Delete only after the parent has safely gone; never alter a live TIFF.
     if (not target.is_file() or file_hash(target) != guard["target_sha256"]
-            or auxiliary_hashes(target) != guard.get("target_auxiliary_hashes", {})):
+            or (not guard.get("sidecar_parent") and auxiliary_hashes(target) != guard.get("target_auxiliary_hashes", {}))):
         return False
     if guard["stage"] == "mosaic":
         active = active_proofs(VerificationStore(Path(guard["logs"])), guard["collection"])
