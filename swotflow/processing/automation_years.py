@@ -143,6 +143,9 @@ def run_yearly_automation(
     # Preflight can allocate the run id even when the caller supplied neither id nor path.
     config.run_id, config.run_dir = state.run_id, state.run_dir
     state.started_at, state.finished_at, state.stopped = engine.now_text(), "", False
+    state.stop_reason = ""
+    if config.cleanup_enabled:
+        state.warnings = [w for w in state.warnings if "Cleanup is disabled: files will accumulate" not in w]
     state.errors = []
     periods = engine.automation_periods(config)
     old = {(b.get('tile'), b["start_date"], b["end_date"]): b for b in state.year_batches}
@@ -173,7 +176,18 @@ def run_yearly_automation(
                     b.base_config.get("destination_parent")) or settings_identity(a) != settings_identity(b):
                 raise ValueError("Saved annual scope differs from this request. Run a new preflight.")
         if batch["status"] == "complete" and child is not None and child_outcome(child) == "complete":
+            child.config = child_config
+            # Enabling cleanup later must revisit previously disabled cleanup,
+            # while a completed year retains its scientific/upload checkpoints.
+            continuing = engine.catch_up_completed_cleanup(
+                child, stop_event=stop_event,
+                progress_callback=(lambda t, s, status, message: progress_callback(
+                    t, f"{batch['year']}/{s}", status, message)) if progress_callback else None)
+            engine.write_run_state(child)
             merge_child_results(state, child)
+            if not continuing:
+                state.stopped = True
+                break
             if progress_callback:
                 for result in engine.latest_stage_results_by_key(child).values():
                     progress_callback(tile, f"{batch['year']}/{result.stage}", result.status,
@@ -222,21 +236,30 @@ def run_yearly_automation(
                 state.warnings.append(warning)
         if batch["status"] != "complete":
             state.stopped = child.stopped
-            message = (f"{tile} / {batch['year']} is {batch['status']}; this tile's later years remain pending. "
-                       "Resolve the recorded issue and resume this run.")
+            paused = (batch["status"] == "stopped" and not child.errors
+                      and not any(r.status == "failed" for r in engine.latest_stage_results_by_key(child).values()))
+            if paused:
+                message = (f"{tile} / {batch['year']} paused after its current step; remaining steps and later years "
+                           f"are pending. Use Resume Run. {child.stop_reason}")
+            else:
+                message = (f"{tile} / {batch['year']} is {batch['status']}; this tile's later years remain pending. "
+                           "Resolve the recorded issue and resume this run.")
             state.errors.extend([f"{batch['year']}: {error}" for error in child.errors])
-            if message not in state.errors:
+            if not paused and message not in state.errors:
                 state.errors.append(message)
             stamp = engine.now_text()
             engine.append_stage_result(state, engine.AutomationStageResult(
-                state.run_id, tile, "year_gate", "failed", stamp, stamp, return_code=2,
+                state.run_id, tile, "year_gate", "paused" if paused else "failed", stamp, stamp,
+                return_code=0 if paused else 2,
                 message=message, period_start=batch["start_date"], period_end=batch["end_date"]))
             if progress_callback:
-                progress_callback(tile, f"{batch['year']}/year_gate", "failed", message)
+                progress_callback(tile, f"{batch['year']}/year_gate", "paused" if paused else "failed", message)
             failed_tiles.add(tile)
             if child.stopped or not config.continue_on_tile_failure:
                 break
         engine.write_run_state(state)
+    if state.stopped:
+        state.stop_reason = getattr(stop_event, "stop_reason", "Run paused; resume continues saved pending steps.")
     state.finished_at = engine.now_text()
     engine.write_run_state(state)
     return state

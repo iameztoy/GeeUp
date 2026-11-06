@@ -1,5 +1,14 @@
 # Release history
 
+## 0.8.8 — 6 November 2026
+
+- Fix the yearly stop gate: Stop after current step is a resumable pause, not a failed processing year. Record future stop requests with their time and reason; preserve prior history while correcting the current display of legacy stop-only errors. Real stage failures remain failures.
+- Apply the Cleanup checkbox on the next Start/Resume, including when Resume first loads an older saved configuration. A currently running worker retains its original settings.
+- Revisit disabled cleanup in completed years before advancing, using the existing downstream verification guards. Reuse scientific and upload checkpoints. Interrupted cleanup resumes from its remaining stages; disabling cleanup prevents this catch-up.
+- Filter cleanup candidates by stage, tile and date before reading checksums, including exact GeoTIFF companions. Keep the full proof and immediate pre-deletion checks; preserve unverified mosaics and all source histories.
+- Validate disk counts after real fixture cleanup while retaining downloaded/extracted/mosaicked history and completion evidence. Preserve NASA selection, projections, pixel processing, EE upload naming and ingestion checks.
+- Display v0.8.8 on Home and in the window title.
+
 ## 0.8.7 — 6 November 2026
 
 - Fix the v0.8.6 processing-range suffix exceeding Earth Engine's 100-character asset-name component limit. For oversized recognized mosaics, omit that suffix only from the cloud name; keep the parseable SWOT stem, full local filename, processing endpoints and original-input history. Leave existing valid asset names unchanged.

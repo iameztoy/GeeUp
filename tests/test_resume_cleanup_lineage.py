@@ -126,6 +126,54 @@ class ResumeCleanupTests(TestCase):
         self.assertTrue(self.mosaic.exists())
         self.assertTrue(self.store.artifact(self.extract))
 
+    def test_real_cleanup_updates_disk_statistics_but_retains_history(self):
+        from swotflow.project.insights import collect_project_insights
+        from tests.test_project_insights import write_csv
+        config = self.config_and_selection()
+        config['download']['output_folder'] = str(self.root)
+        for path in geotiff_sidecars(self.extract):
+            path.write_text('sidecar', encoding='utf-8')
+        self.store.record_artifact('extract', self.extract, [self.raw], extract.parse_config(config, self.root), 'ex', {})
+        self.store.record_artifact('mosaic', self.mosaic, [self.extract], mosaic.parse_config(config, self.root), 'mo', {})
+        write_csv(Path(config['download']['manifest_csv']), [{'file_name': self.name,
+            'local_path': str(self.raw), 'downloaded': 'yes', 'raw_exists': 'yes',
+            'last_status': 'DOWNLOADED', 'utm_tile': 'UTM30R'}])
+        write_csv(Path(config['extract']['manifest_csv']), [{'input_nc': str(self.raw),
+            'output_tif': str(self.extract), 'status': 'written'}])
+        write_csv(Path(config['mosaic']['manifest_csv']), [{'output_file': str(self.mosaic),
+            'input_files': json.dumps([str(self.extract)]), 'status': 'MOSAIC_CREATED', 'input_count': '1'}])
+        before = collect_project_insights(config)
+        self.assertEqual(before.metrics['Downloaded raw files still present'], '1')
+        self.assertEqual(auto.cleanup_stage(config, 'UTM30R', 'raw')[0], 1)
+        self.assertEqual(auto.cleanup_stage(config, 'UTM30R', 'extracted')[0], 8)
+        after = collect_project_insights(config)
+        self.assertEqual(after.metrics['Downloaded raw files still present'], '0')
+        self.assertEqual(after.metrics['Downloaded raw files no longer present'], '1')
+        self.assertEqual(after.metrics['Downloaded granules recorded'], '1')
+        self.assertEqual(after.metrics['Extraction manifest rows'], '1')
+        self.assertEqual(after.metrics['Completed mosaics recorded'], '1')
+        self.assertEqual(after.metrics['Extracted GeoTIFFs on disk'], '0')
+        self.assertEqual(auto.cleanup_stage(config, 'UTM30R', 'mosaic')[0], 0)
+        self.assertTrue(self.mosaic.exists())  # No full EE pixel proof: retained.
+        self.assertTrue(self.store.artifact(self.extract)['sources'][self.name])
+        self.assertEqual(proof.pending_local_inputs(self.store, self.snapshot), [])
+
+    def test_cleanup_scopes_before_downstream_hashes_and_keeps_sidecars(self):
+        from tests.test_project_insights import write_csv
+        config = self.config_and_selection()
+        for path in geotiff_sidecars(self.extract):
+            path.write_text('sidecar', encoding='utf-8')
+        other = self.extract.with_name(self.extract.name.replace('202601', '202501'))
+        other.write_bytes(b'other year')
+        write_csv(Path(config['mosaic']['manifest_csv']), [{'output_file': str(self.mosaic),
+            'input_files': json.dumps([str(self.extract), str(other)]), 'status': 'MOSAIC_CREATED'}])
+        config['download'].update(acquisition_start_date='2026-01-01', acquisition_end_date='2026-12-31', utm_tiles=['UTM30R'])
+        config['automation'] = {'yearly_batch': True}
+        with mock.patch.object(proof, 'cleanup_guards', return_value=[]) as guards:
+            auto.cleanup_stage(config, 'UTM30R', 'extracted')
+        candidates = guards.call_args.args[1]
+        self.assertEqual({c.path for c in candidates}, {self.extract, *geotiff_sidecars(self.extract)})
+
     def test_orphan_companions_with_known_downstream_are_cleaned(self):
         config, candidates = self.candidates_with_sidecars()
         self.extract.unlink()

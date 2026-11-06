@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
 
 from swotflow.processing.partial_cleanup import PartialDownloadProof, delete_partial_downloads, plan_partial_downloads
 from swotflow.project.database import (
@@ -1786,6 +1786,7 @@ def raw_path_for_extracted_source(source: Path, raw_folder: Path) -> Path:
 
 def plan_cleanup_candidates(
     config: Mapping[str, Any], *, include_partial_downloads: bool = True,
+    candidate_filter: Callable[[CleanupCandidate], bool] | None = None,
 ) -> List[CleanupCandidate]:
     """Return local intermediate files that downstream manifests prove safe to remove."""
     extract_manifest = config_path(config, "extract", "manifest_csv")
@@ -1890,6 +1891,8 @@ def plan_cleanup_candidates(
         )
 
     result = sorted(candidates.values(), key=cleanup_order)
+    if candidate_filter is not None:
+        result = [candidate for candidate in result if candidate_filter(candidate)]
     if config.get("download", {}).get("verified_downloads", False):
         from swotflow.verification.pipeline import cleanup_guards
         result = cleanup_guards(dict(config), result)

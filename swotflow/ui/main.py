@@ -1048,6 +1048,7 @@ class LauncherApp:
             settings,
             text="Cleanup after verified stages",
             variable=self.automation_cleanup_enabled_var,
+            command=self.automation_cleanup_changed,
         ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Checkbutton(
             settings,
@@ -5495,10 +5496,18 @@ class LauncherApp:
         if self.automation_running or self.automation_preflight_running:
             messagebox.showwarning("Automation running", "Automation is already running.")
             return
+        cleanup_enabled = self.automation_cleanup_enabled_var.get()
         if self.automation_preflight_state is None:
             if not self.load_latest_automation_run_for_project(notify=True):
                 return
+        self.automation_cleanup_enabled_var.set(cleanup_enabled)
         self.start_automation()
+
+    def automation_cleanup_changed(self) -> None:
+        """Explain when a scheduling preference becomes effective."""
+        self.automation_status_var.set(
+            "Cleanup preference applies on the next Start/Resume, including eligible files from completed years. "
+            "A running step keeps its current settings. Verification and filename histories are retained.")
 
     def start_automation(self) -> None:
         """Start or resume the preflighted automation run."""
@@ -5722,6 +5731,7 @@ class LauncherApp:
         if self.automation_stop_event is None:
             self.automation_status_var.set("No active automation run to stop.")
             return
+        self.automation_stop_event.stop_reason = "Stop requested from the Automation tab at " + datetime.now().isoformat(timespec="seconds")
         self.automation_stop_event.set()
         self.automation_status_var.set("Stop requested. Automation will stop after the current stage finishes.")
         self.set_automation_progress_text("stop requested")
@@ -5785,9 +5795,12 @@ class LauncherApp:
         )
         self.refresh_project_statistics_if_active("automation")
         messagebox.showinfo(
-            "Automation finished",
+            "Automation paused" if state.stopped else "Automation finished",
             (
                 f"Stopped: {'yes' if state.stopped else 'no'}\n"
+                + (f"Reason: {state.stop_reason or 'Saved stop flag; initiating action was not recorded.'}\n"
+                   "Pending stages will continue with Resume Run.\n" if state.stopped else "")
+                +
                 f"Failed stages: {failed}\n"
                 f"Warning stages: {warnings}\n"
                 + (f"Yearly-run errors: {len(run_errors)}\n" if state.config.process_by_year else "")

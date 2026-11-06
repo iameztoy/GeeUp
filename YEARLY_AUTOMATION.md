@@ -111,6 +111,21 @@ inputs. Use the recorded errors to resolve a blocked batch before resuming.
 
 ## Progress and Statistics
 
+**Stop after current step** means finish the current stage, then pause before
+starting the next one. From v0.8.8, this is reported as **Automation paused**;
+it does not create a failed year or discard outputs. The stop reason is retained
+in the run checkpoint. A genuine failed stage or low-disk-space gate remains a
+separate error requiring review. **Resume Run** continues pending stages.
+
+If cleanup was initially disabled, enable **Cleanup after verified stages**
+before Resume. Completed years are revisited for their skipped cleanup only,
+without downloading, mosaicking or uploading those years again. Remaining years
+use the new setting. Changing it during execution takes effect on the next
+Start/Resume, not in a running worker. Current verification guards still decide
+which files are eligible; final mosaics require full EE pixel evidence. Logs,
+filename/version histories and source memberships remain, and Statistics updates
+on-disk counts after cleanup without subtracting historical processing totals.
+
 Automation stage rows and live activity include the year. The progress bar
 counts stage execution across all selected tiles and years. **Tiles through all
 years** counts a tile only after its stage work across the full requested range

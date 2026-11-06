@@ -1,4 +1,4 @@
-# Resume, cleanup and processing versions — v0.8.6
+# Resume, cleanup and processing versions — v0.8.8
 
 ## Resume after a shutdown
 
@@ -9,6 +9,22 @@ The unfinished mosaic stage runs again; its existing temporary-output handling r
 Resume finishes the saved selection. Start a new preflight/update to discover newly published NASA versions. Missing files, altered bytes, changed settings or missing evidence trigger normal verification; a download-stage message can indicate catalogue/local-file checking rather than a new transfer. Existing raw files still pass provider checksum checks before being skipped. Historical manifest flags alone cannot establish successful present-day file reuse. Keep the project logs/databases with the project when moving computers.
 
 ## GeoTIFF sidecars
+
+From v0.8.8, enable **Cleanup after verified stages** before **Resume Run** to
+apply cleanup to the continuing run and eligible files in completed years whose
+cleanup was previously disabled. Changing the checkbox while a worker runs only
+affects the next Start/Resume. Scientific and upload checkpoints are retained.
+Installing the release or selecting the checkbox alone deletes nothing.
+
+Raw files require current extracted-file proof; extracted TIFFs and their
+companions require current mosaic proof. Final mosaics remain local until the
+existing full EE pixel-verification requirement is satisfied. An asset listed in
+EE or a completed ingestion task is not sufficient for that last deletion.
+
+Cleanup changes files present and disk-space Statistics. Downloaded-file counts,
+all original filenames, version histories, mosaic membership and completion
+receipts remain recorded. Use **Cleanup → Sync EE Assets + Preview Cleanup** for
+a manual review while Automation is stopped.
 
 Verified Cleanup and Automation can remove `.tif.aux.xml`, `.tif.aux`, masks, overviews and supported world files belonging to a safely removed TIFF. The parent is checked and removed first; sidecars are checked immediately before deletion. A failed parent deletion leaves its sidecars intact. Already orphaned companions can be removed only when the recorded parent and current downstream evidence identify them unambiguously. Unknown/unproven files remain for review; there is no wildcard purge.
 

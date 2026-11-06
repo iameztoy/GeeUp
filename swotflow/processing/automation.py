@@ -54,6 +54,7 @@ from swotflow.processing.download import (
     run_download,
 )
 from swotflow.core.metadata import parse_swot_l2_hr_raster_metadata
+from swotflow.core.sidecars import geotiff_scope_path
 
 
 PROJECT_ROOT = APP_ROOT
@@ -199,6 +200,7 @@ class AutomationRunState:
     unresolved_upload_count: int = 0
     unresolved_upload_tiles: list[str] = field(default_factory=list)
     year_batches: list[dict[str, Any]] = field(default_factory=list)
+    stop_reason: str = ""
 
     @property
     def csv_path(self) -> Path:
@@ -1176,22 +1178,26 @@ def cleanup_stage(
     cleanup stage has passed, so each upload-enabled cleanup sweep removes all
     currently verified mosaics.
     """
-    candidates = []
     from swotflow.core.temporal import acquisition_window, within_acquisition_window
     window_start, window_end = acquisition_window(config)
-    for candidate in plan_cleanup_candidates(config, include_partial_downloads=False):
+    def in_scope(candidate: CleanupCandidate) -> bool:
         if candidate.stage != stage:
-            continue
+            return False
         scope_path = Path((getattr(candidate, "verification_guard", None) or {}).get("sidecar_parent", candidate.path))
+        scope_path = geotiff_scope_path(scope_path)
         if not within_acquisition_window(scope_path, window_start, window_end):
-            continue
+            return False
         if config.get("automation", {}).get("yearly_batch", False):
             scoped_tiles = config.get("download", {}).get("utm_tiles", [])
             if scoped_tiles and not any(path_mentions_tile(candidate.path, scoped_tile) for scoped_tile in scoped_tiles):
-                continue
+                return False
         if stage != "mosaic" and not path_mentions_tile(candidate.path, tile):
-            continue
-        candidates.append(candidate)
+            return False
+        return True
+    # Scope before checksum reads; unrelated years/stages must not be rehashed.
+    candidates = [c for c in plan_cleanup_candidates(
+        config, include_partial_downloads=False, candidate_filter=in_scope,
+    ) if in_scope(c)]
     return delete_cleanup_candidates(candidates)
 
 
@@ -1223,6 +1229,7 @@ def write_run_state(state: AutomationRunState) -> None:
         "unresolved_upload_count": state.unresolved_upload_count,
         "unresolved_upload_tiles": state.unresolved_upload_tiles,
         "year_batches": state.year_batches,
+        "stop_reason": state.stop_reason,
     }
     # All scheduling modes need a durable checkpoint across power loss.
     temporary = None
@@ -1350,7 +1357,20 @@ def load_automation_run_state(path: str | Path) -> AutomationRunState:
             str(value) for value in data.get("unresolved_upload_tiles", []) or []
         ],
         year_batches=[dict(row) for row in data.get("year_batches", []) or []],
+        stop_reason=str(data.get("stop_reason", "") or ""),
     )
+    # v0.8.7 reported an ordinary stop as a failed year gate. Retain its
+    # original row and append a display/current-state correction, once.
+    if state.stopped:
+        latest_gates = {(r.tile, r.period_start, r.period_end): r for r in state.stage_results
+                        if r.stage == "year_gate"}
+        for result in latest_gates.values():
+            if result.status == "failed" and " is stopped; this tile's later years remain pending." in result.message:
+                state.stage_results.append(AutomationStageResult(
+                    **{**asdict(result), "status": "paused", "return_code": 0,
+                       "message": "Saved run paused after its current step. Resume to continue the pending stages. "
+                                  "The older version did not record the initiating action."}))
+                state.errors = [error for error in state.errors if error != result.message]
     return state
 
 
@@ -1383,8 +1403,44 @@ def completed_stage_keys(state: AutomationRunState) -> set[tuple[str, str]]:
     return {
         (result.tile, result.stage)
         for result in latest_stage_results_by_key(state).values()
-        if result.status.lower() in complete_statuses
+        if result.status.lower() in complete_statuses and not cleanup_due_on_resume(state, result)
     }
+
+
+def cleanup_due_on_resume(state: AutomationRunState, result: AutomationStageResult) -> bool:
+    """Retry disabled or interrupted cleanup only when the user now enables it."""
+    return (state.config.cleanup_enabled and result.stage.endswith("_cleanup")
+            and (result.status in {"warning", "failed"}
+                 or (result.status == "skipped" and "Cleanup disabled" in result.message)))
+
+
+def catch_up_completed_cleanup(
+    state: AutomationRunState, *, progress_callback: ProgressCallback | None = None,
+    stop_event: Any = None, tiles: Sequence[str] | None = None,
+) -> bool:
+    """Clean completed windows without rerunning download, science or upload.
+
+    Every deletion still uses current downstream checks. Return False on a stop
+    request; untouched disabled-stage receipts remain eligible on the next resume.
+    """
+    latest = latest_stage_results_by_key(state)
+    for tile in tiles if tiles is not None else state.config.utm_tiles:
+        config = build_tile_config_dict(state.config.base_config, tile, state.run_dir,
+                                       start_date=state.config.start_date, end_date=state.config.end_date,
+                                       include_upload=state.config.include_upload)
+        for stage in ("raw_cleanup", "extracted_cleanup", "mosaic_cleanup"):
+            result = latest.get((tile, stage))
+            if result is None or not cleanup_due_on_resume(state, result):
+                continue
+            if stop_event is not None and stop_event.is_set():
+                return False
+            if progress_callback:
+                progress_callback(tile, stage, "running", "Checking eligible files from this completed window.")
+            result = execute_cleanup_result(state, config, tile, stage)
+            append_stage_result(state, result)
+            if progress_callback:
+                progress_callback(tile, stage, result.status, result.message)
+    return True
 
 
 def latest_stage_results_by_key(state: AutomationRunState) -> dict[tuple[str, str], AutomationStageResult]:
@@ -1619,6 +1675,9 @@ def _run_automation_normalized(
     state.started_at = now_text()
     state.finished_at = ""
     state.stopped = False
+    state.stop_reason = ""
+    if normalized.cleanup_enabled:
+        state.warnings = [w for w in state.warnings if "Cleanup is disabled: files will accumulate" not in w]
     write_run_state(state)
 
     gdal_python = Path(str(normalized.base_config.get("gdal", {}).get("python", "")))
@@ -1731,6 +1790,10 @@ def _run_automation_normalized(
             state.stopped = True
             break
         if not verified_mode and plan is not None and plan.classification == "already complete" and plan.pending_downloads == 0:
+            if not catch_up_completed_cleanup(state, progress_callback=progress_callback, stop_event=stop_event, tiles=[tile]):
+                state.stopped = True
+                break
+            resume_completed = completed_stage_keys(state)
             for stage in stages_for_current_run():
                 if stage in {"upload", "ee_sync", "mosaic_cleanup"} and not normalized.include_upload:
                     continue
@@ -1848,6 +1911,8 @@ def _run_automation_normalized(
 
     if verified_mode and not state.stopped:
         reconcile_verified_run(state)
+    if state.stopped and stop_event is not None and stop_event.is_set():
+        state.stop_reason = getattr(stop_event, "stop_reason", "Stop signal received; initiating action was not recorded.")
     state.finished_at = now_text()
     write_run_state(state)
     return state

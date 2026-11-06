@@ -684,6 +684,45 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_resume_keeps_new_cleanup_selection_when_loading_old_run(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            app.automation_cleanup_enabled_var.set(True)
+            app.automation_preflight_state = None
+            def load(**kwargs):
+                app.automation_cleanup_enabled_var.set(False)
+                return True
+            with mock.patch.object(app, 'load_latest_automation_run_for_project', side_effect=load), \
+                 mock.patch.object(app, 'start_automation') as start:
+                app.resume_automation_run()
+            self.assertTrue(app.automation_cleanup_enabled_var.get())
+            start.assert_called_once()
+        finally:
+            root.destroy()
+
+    def test_yearly_pause_dialog_has_no_invented_failure(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = AutomationConfig(Path('.'), {}, ['UTM34M'], '2023-01-01', '2024-12-31', process_by_year=True)
+            state = AutomationRunState('run', Path('run'), config, stopped=True,
+                stop_reason='Stop requested from the Automation tab', stage_results=[
+                    AutomationStageResult('run', 'UTM34M', 'year_gate', 'paused')])
+            app.apply_automation_run_state(state)
+            with mock.patch('swotflow.ui.main.messagebox.showinfo') as popup, \
+                 mock.patch.object(app, 'refresh_project_statistics_if_active'):
+                app.finish_automation(state)
+            title, message = popup.call_args.args
+            self.assertEqual(title, 'Automation paused')
+            self.assertIn('Failed stages: 0', message)
+            self.assertIn('Yearly-run errors: 0', message)
+            self.assertIn(state.stop_reason, message)
+        finally:
+            root.destroy()
+
     def test_automation_map_uses_cached_statistics_overlay(self) -> None:
         root = tk.Tk()
         root.withdraw()
