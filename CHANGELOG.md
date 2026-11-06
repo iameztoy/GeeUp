@@ -1,5 +1,14 @@
 # Release history
 
+## 0.8.9 — 6 November 2026
+
+- Correct Statistics so empty JSON lists do not become phantom excluded source files or lineage rows.
+- Preserve upload submission time and operation ID when an EE inventory refresh confirms an asset. Recover previously blank verified rows from retained events, once per history read; never infer submission from asset presence or attach an old task to a new attempt.
+- Count each mosaic/asset once per contributing source processing version, using retained input filenames. Avoid double-counting the same version across source tiles and stop using a synthetic mosaic filename version when source lineage exists.
+- Clarify Statistics units: source records versus output mosaics/assets, overlapping mixed-version totals, and pending uploads versus missing NASA acquisitions. Include count definitions in JSON snapshots.
+- Check current local presence before showing an output as upload-ready; preserve completed processing/upload history after cleanup.
+- Retain NASA selection, pixel processing, verification/deletion safeguards, yearly Automation and pause/resume behavior. Show v0.8.9 on Home and in the window title.
+
 ## 0.8.8 — 6 November 2026
 
 - Fix the yearly stop gate: Stop after current step is a resumable pause, not a failed processing year. Record future stop requests with their time and reason; preserve prior history while correcting the current display of legacy stop-only errors. Real stage failures remain failures.

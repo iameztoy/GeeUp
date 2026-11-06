@@ -2295,7 +2295,7 @@ class LauncherApp:
         tiles.columnconfigure(0, weight=1)
         tiles.columnconfigure(1, weight=1)
         tiles.rowconfigure(0, weight=1)
-        tile_frame = ttk.LabelFrame(tiles, text="Files By UTM Tile", padding=8)
+        tile_frame = ttk.LabelFrame(tiles, text="Download/Extraction Records By UTM Tile", padding=8)
         tile_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         tile_frame.columnconfigure(0, weight=1)
         tile_frame.rowconfigure(0, weight=1)
@@ -2306,12 +2306,12 @@ class LauncherApp:
             height=16,
         )
         self.stats_tile_tree.heading("tile", text="Tile")
-        self.stats_tile_tree.heading("count", text="Count")
+        self.stats_tile_tree.heading("count", text="Stage records")
         self.stats_tile_tree.column("tile", width=120, anchor="w")
         self.stats_tile_tree.column("count", width=80, anchor="e")
         self.stats_tile_tree.grid(row=0, column=0, sticky="nsew")
 
-        date_frame = ttk.LabelFrame(tiles, text="Files By Date", padding=8)
+        date_frame = ttk.LabelFrame(tiles, text="Download/Extraction/Mosaic Records By Date", padding=8)
         date_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
         date_frame.columnconfigure(0, weight=1)
         date_frame.rowconfigure(0, weight=1)
@@ -2322,7 +2322,7 @@ class LauncherApp:
             height=16,
         )
         self.stats_date_tree.heading("date", text="Date")
-        self.stats_date_tree.heading("count", text="Count")
+        self.stats_date_tree.heading("count", text="Stage records")
         self.stats_date_tree.column("date", width=130, anchor="w")
         self.stats_date_tree.column("count", width=80, anchor="e")
         self.stats_date_tree.grid(row=0, column=0, sticky="nsew")
@@ -2333,7 +2333,7 @@ class LauncherApp:
         levels.rowconfigure(1, weight=1)
         level_summary_frame = ttk.LabelFrame(
             levels,
-            text="Processing Levels Across Stages",
+            text="Source Versions Across Stages (mixed mosaics appear in each version)",
             padding=8,
         )
         level_summary_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
@@ -2359,8 +2359,8 @@ class LauncherApp:
             "selected": "Selected",
             "downloaded": "Downloaded",
             "extracted": "Extracted",
-            "mosaic_sources": "Mosaic src",
-            "uploaded": "Uploaded/verified",
+            "mosaic_sources": "Mosaics",
+            "uploaded": "EE assets",
         }
         for column, heading in level_headings.items():
             self.stats_processing_level_tree.heading(column, text=heading)
@@ -2389,7 +2389,7 @@ class LauncherApp:
             "remote": "Remote",
             "downloaded": "Downloaded",
             "extracted": "Extracted",
-            "mosaic_sources": "Mosaic src",
+            "mosaic_sources": "Mosaics",
         }
         for column, heading in tile_level_headings.items():
             self.stats_processing_level_tile_tree.heading(column, text=heading)
@@ -2623,7 +2623,7 @@ class LauncherApp:
         self.stats_uploaded_date_tree.column("count", width=80, anchor="e")
         self.stats_uploaded_date_tree.grid(row=0, column=0, sticky="nsew")
 
-        uploaded_level_frame = ttk.LabelFrame(uploaded_summary, text="Uploaded/Verified By Processing Level", padding=8)
+        uploaded_level_frame = ttk.LabelFrame(uploaded_summary, text="EE Assets Containing Each Source Version (may overlap)", padding=8)
         uploaded_level_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 0), pady=(5, 0))
         uploaded_level_frame.columnconfigure(0, weight=1)
         uploaded_level_frame.rowconfigure(0, weight=1)
@@ -2634,7 +2634,7 @@ class LauncherApp:
             height=8,
         )
         self.stats_uploaded_level_tree.heading("level", text="Level")
-        self.stats_uploaded_level_tree.heading("count", text="Count")
+        self.stats_uploaded_level_tree.heading("count", text="Assets")
         self.stats_uploaded_level_tree.column("level", width=130, anchor="w")
         self.stats_uploaded_level_tree.column("count", width=80, anchor="e")
         self.stats_uploaded_level_tree.grid(row=0, column=0, sticky="nsew")
@@ -2664,12 +2664,12 @@ class LauncherApp:
         )
         qa_headings = {
             "tile": "Tile",
-            "downloaded": "Downloaded",
-            "extracted": "Extracted",
-            "mosaic_sources": "Mosaic src",
+            "downloaded": "Inputs downloaded",
+            "extracted": "Inputs extracted",
+            "mosaic_sources": "Mosaics",
             "submitted": "Sent to upload",
             "uploaded": "Uploaded/verified",
-            "missing_upload": "Missing upload",
+            "missing_upload": "Pending mosaics",
         }
         for column, heading in qa_headings.items():
             self.stats_upload_qa_tile_tree.heading(column, text=heading)

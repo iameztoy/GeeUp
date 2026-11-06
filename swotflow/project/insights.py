@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
 
 from swotflow.processing.partial_cleanup import PartialDownloadProof, delete_partial_downloads, plan_partial_downloads
+from swotflow.earthengine.upload_history import restore_verified_submissions
 from swotflow.project.database import (
     ProjectDatabase,
     database_path_from_config,
@@ -380,12 +381,12 @@ def parse_json_list(value: str) -> List[str]:
 
 def parse_path_list(value: str) -> List[str]:
     """Parse a JSON list or conservative delimited path list from a CSV cell."""
-    parsed = parse_json_list(value)
-    if parsed:
-        return parsed
     text = str(value or "").strip()
     if not text:
         return []
+    if text.startswith("["):
+        # An empty JSON list is not a filename; malformed JSON is not a path.
+        return parse_json_list(text)
     return [part.strip() for part in re.split(r"[;|]", text) if part.strip()]
 
 
@@ -854,10 +855,11 @@ def upload_row_was_sent(row: Mapping[str, str]) -> bool:
 
 
 def output_exists_for_upload(row: Mapping[str, str]) -> bool:
-    """Return True when a mosaic row appears to represent a local upload-ready file."""
-    output = Path(row.get("output_file", ""))
-    if str(row.get("output_exists", "")).lower() == "yes":
-        return True
+    """Check current disk presence, not a pre-cleanup manifest flag."""
+    path_text = str(row.get("output_file", "") or "").strip()
+    if not path_text:
+        return False
+    output = Path(path_text)
     try:
         return output.exists() and output.is_file()
     except OSError:
@@ -1926,6 +1928,13 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     )
     ee_inventory_images = ee_inventory_image_rows(ee_inventory_rows)
     upload_rows = merge_upload_rows_with_ee_inventory(upload_report_rows, ee_inventory_rows)
+    upload_events_path = (
+        Path(str(artifacts.get("report_csv") or logs_folder / "upload_report.csv")).with_name("upload_events.csv")
+        if isinstance(artifacts, Mapping) else logs_folder / "upload_events.csv"
+    )
+    upload_rows = restore_verified_submissions(
+        upload_rows, read_csv_rows(upload_events_path),
+    )
     project_database = ProjectDatabase(database_path_from_config(config))
     workflow_row_count = project_database.dataset_count("workflow_manifest")
 
@@ -2044,6 +2053,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     upload_success_path_keys: set[str] = set()
 
     mosaic_tiles_by_output = mosaic_source_tile_lookup(complete_mosaic_rows)
+    mosaic_levels_by_output = mosaic_level_lookup(complete_mosaic_rows)
     for row in upload_rows:
         if upload_row_was_sent(row):
             sent_tiles = upload_row_source_tiles(row, mosaic_tiles_by_output)
@@ -2081,8 +2091,12 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         date_text = date_from_text(row.get("metadata_start_time", "") or local_file)
         if date_text:
             uploaded_date_counter[date_text] += 1
-        level = row_processing_level(row, file_keys=("local_file",))
-        uploaded_level_counter[level] += 1
+        source_pairs = lookup_path_value(mosaic_levels_by_output, local_file)
+        levels = {level for _tile, level in source_pairs}
+        if not levels:
+            levels = {row_processing_level(row, file_keys=("local_file",))}
+        for level in levels:
+            uploaded_level_counter[level] += 1
         grid = str(row.get("output_grid", "") or "").strip().upper()
         if not grid:
             fields = cached_swot_filename_fields(str(local_file))
@@ -2127,7 +2141,6 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         add_tile_level_count(tile, level, "extracted")
         extracted_tile_stage_counter[normalize_utm_tile_token(tile) or "UNKNOWN"] += 1
 
-    mosaic_levels_by_output = mosaic_level_lookup(complete_mosaic_rows)
     for row in complete_mosaic_rows:
         source_pairs = mosaic_source_tile_levels(row)
         if not source_pairs:
@@ -2137,15 +2150,12 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
             fallback_level = row_processing_level(row, file_keys=("output_file",))
             source_pairs = [(fallback_tile or "UNKNOWN", fallback_level)]
         for tile, level in source_pairs:
-            add_level_count(level, "mosaic_sources")
             add_tile_level_count(tile, level, "mosaic_sources")
+        for level in {level for _tile, level in source_pairs}:
+            add_level_count(level, "mosaic_sources")
 
-    for row in uploaded_rows:
-        upload_pairs = lookup_path_value(mosaic_levels_by_output, row.get("local_file", ""))
-        if not upload_pairs:
-            upload_pairs = [(file_utm_tile(row.get("local_file", "")) or "UNKNOWN", parsed_processing_level(row.get("local_file", "")) or "UNKNOWN")]
-        for _tile, level in upload_pairs:
-            add_level_count(level, "uploaded")
+    for level, count in uploaded_level_counter.items():
+        add_level_count(level, "uploaded", count)
 
     mosaic_output_grid_counter: Counter[str] = Counter()
     mosaic_source_tile_counter: Counter[str] = Counter()
@@ -2498,6 +2508,13 @@ def project_insights_snapshot(insights: ProjectInsights) -> Dict[str, Any]:
     generated_at = datetime.now().replace(microsecond=0).isoformat()
     return {
         "generated_at": generated_at,
+        "count_definitions": {
+            "tile_counts": "Download and extraction stage records; not distinct acquisitions.",
+            "date_counts": "Download, extraction and mosaic stage records; not distinct acquisitions.",
+            "processing_level_counts": "Remote/selected/downloaded/extracted count input records. Mosaic sources and uploaded count outputs containing each source version; mixed-version outputs count in each contributing version, once per output.",
+            "uploaded_processing_level_counts": "Assets containing each contributing source version, from retained mosaic inputs when available; filename fallback for legacy records without lineage.",
+            "upload_qa_tile_rows": "Downloaded/extracted count inputs. Mosaic sources/sent/uploaded/missing upload count outputs. Missing upload is pending output work, not proof of a missing NASA acquisition.",
+        },
         "metrics": [
             {"metric": metric, "value": value}
             for metric, value in insights.metrics.items()

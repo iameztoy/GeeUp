@@ -92,6 +92,7 @@ from selenium.webdriver.support.select import Select
 from selenium.webdriver.support.ui import WebDriverWait
 
 import swotflow.earthengine.selectors as ee_selectors
+from swotflow.earthengine.upload_history import preserve_verified_submission, restore_verified_submissions
 from swotflow.core.metadata import (
     DEFAULT_METADATA_EXTRA_PROPERTIES,
     ParsedMetadata,
@@ -638,7 +639,10 @@ class ReportManager:
 
     def load(self) -> None:
         """Load an existing CSV report if one exists."""
-        for row in read_project_rows(self.report_path, "upload_report"):
+        for row in restore_verified_submissions(
+            read_project_rows(self.report_path, "upload_report"),
+            read_project_rows(self.events_path, "upload_events"),
+        ):
             asset_id = row.get("asset_id", "").strip()
             if not asset_id:
                 continue
@@ -744,6 +748,7 @@ class ReportManager:
 
     def upsert(self, row: Dict[str, str]) -> None:
         """Insert or replace a report row."""
+        row = preserve_verified_submission(row, self.rows.get(row.get("asset_id", ""), {}))
         events = self.transition_events([row])
         existing = self.merge_row(row)
         upsert_project_rows(
@@ -756,7 +761,10 @@ class ReportManager:
 
     def upsert_many(self, rows: Iterable[Dict[str, str]]) -> None:
         """Insert or replace multiple rows, then write reports once."""
-        incoming_rows = list(rows)
+        incoming_rows = [
+            preserve_verified_submission(row, self.rows.get(row.get("asset_id", ""), {}))
+            for row in rows
+        ]
         events = self.transition_events(incoming_rows)
         existing_rows = [self.merge_row(row) for row in incoming_rows]
         if not existing_rows:
