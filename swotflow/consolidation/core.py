@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
-from swotflow.core.metadata import parse_swot_l2_hr_raster_metadata
+from swotflow.core.metadata import parse_swot_l2_hr_raster_metadata, index_mosaic_lineage
 
 ALGORITHM = "swot-ee-consolidation-v2"
 MAX_BATCH = 10
@@ -112,13 +112,13 @@ def read_lineage(path: Path | None) -> dict[str, dict]:
     if path.suffix.lower() == ".json":
         data = json.loads(path.read_text(encoding="utf-8"))
         return {g["asset_id"].rsplit("/", 1)[-1]: g.get("manifest", {}) for g in data["groups"]}
-    rows: dict[str, dict] = {}
+    rows: list[dict] = []
     with path.open(encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             name = PureWindowsPath(row.get("output_file", "")).stem
             if name:
-                rows[name] = row
-    return rows
+                rows.append(row)
+    return index_mosaic_lineage(rows)
 
 
 def source_record(asset: dict, lineage: dict[str, dict]) -> dict:

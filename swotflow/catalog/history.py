@@ -393,7 +393,8 @@ def represented_inputs(inventory: dict, mosaic_rows: list[dict]) -> tuple[list[d
     collection = c.collection_id(inventory["collection"])
     if inventory.get("partial") or inventory.get("nextPageToken") or not isinstance(inventory.get("assets"), list):
         raise ValueError("Supply a complete EE collection inventory")
-    lineage = {PureWindowsPath(row.get("output_file", "")).stem: row for row in mosaic_rows}
+    from swotflow.core.metadata import index_mosaic_lineage
+    lineage = index_mosaic_lineage(mosaic_rows)
     represented, unresolved, seen = [], [], set()
     for asset in inventory["assets"]:
         aid = asset["id"]

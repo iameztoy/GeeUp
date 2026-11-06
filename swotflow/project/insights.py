@@ -1260,6 +1260,7 @@ def merge_upload_rows_with_ee_inventory(
     inventory_rows: Iterable[Mapping[str, str]],
 ) -> List[Dict[str, str]]:
     """Return upload rows adjusted with EE inventory truth."""
+    from swotflow.core.metadata import REPLACED_INVALID_ASSET_ID_STATUS
     inventory_by_asset = {
         str(row.get("asset_id", "") or "").strip(): row
         for row in ee_inventory_image_rows(inventory_rows)
@@ -1267,6 +1268,8 @@ def merge_upload_rows_with_ee_inventory(
     merged: List[Dict[str, str]] = []
     seen: set[str] = set()
     for raw_row in upload_rows:
+        if raw_row.get("final_status") == REPLACED_INVALID_ASSET_ID_STATUS:
+            continue
         row = dict(raw_row)
         asset_id = str(row.get("asset_id", "") or "").strip()
         if asset_id:
@@ -2055,6 +2058,8 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         if status not in UPLOAD_CLEANUP_STATUSES and status not in {
             "FILTERED_UTM_TILE",
             FILTERED_LOCAL_PRODUCT_VERSION_SUPERSEDED_STATUS,
+            "PLANNED_UPLOAD", "PLANNED_DRY_RUN", "DRY_RUN",
+            "SUBMITTED", "SUBMITTED_PENDING_VERIFICATION", "READY", "RUNNING",
         }:
             error_text = str(row.get("error_message", "") or "").strip()
             if not error_text:
@@ -2247,6 +2252,9 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Lineage excluded from partial mosaic"] = str(lineage_status_counter.get("excluded_from_partial_mosaic", 0))
     metrics["Lineage downloaded not extracted"] = str(lineage_status_counter.get("downloaded_not_extracted", 0))
     metrics["Upload report rows"] = str(len(upload_report_rows))
+    metrics["Rejected asset names retained as history"] = str(sum(
+        row.get("final_status") == "REPLACED_INVALID_ASSET_ID" for row in upload_report_rows
+    ))
     metrics["EE inventory image assets"] = str(len(ee_inventory_images))
     metrics["Effective upload rows after EE inventory merge"] = str(len(upload_rows))
     metrics["Uploaded/already-existing assets recorded"] = str(len(uploaded_rows))

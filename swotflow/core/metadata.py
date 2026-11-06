@@ -47,6 +47,55 @@ PRODUCT_IDENTITY_FIELDS = (
     "range_beginning", "range_ending", "filename_suffix",
 )
 
+EE_ASSET_COMPONENT_LIMIT = 100
+REPLACED_INVALID_ASSET_ID_STATUS = "REPLACED_INVALID_ASSET_ID"
+
+
+def compact_mosaic_asset_stem(stem: str) -> str:
+    """Omit only the optional version-range suffix when an EE name is too long.
+
+    The complete filename and version range remain in the local manifest and
+    upload properties. Short names and the legacy, parseable SWOT stem stay intact.
+    """
+    if len(stem) <= EE_ASSET_COMPONENT_LIMIT:
+        return stem
+    parsed = parse_swot_l2_hr_raster_metadata(stem + ".tif")
+    if parsed and parsed.fields.get("processing_min"):
+        return stem[:-len(parsed.fields["filename_suffix"])]
+    return stem
+
+
+def validate_ee_asset_path(value: str) -> None:
+    """Reject empty, oversized or invalid EE path components before browser work."""
+    for component in value.split("/"):
+        if not 1 <= len(component) <= EE_ASSET_COMPONENT_LIMIT:
+            raise ValueError(
+                "Earth Engine asset ID components must contain 1–100 characters; "
+                f"found {len(component)} in {component!r}. Shorten the destination or naming prefix/suffix."
+            )
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", component):
+            raise ValueError(f"Invalid Earth Engine asset ID component: {component!r}")
+
+
+def index_mosaic_lineage(rows: list[dict]) -> dict[str, dict]:
+    """Index full local stems and shortened cloud stems without guessing collisions."""
+    from pathlib import PureWindowsPath
+    indexed: dict[str, dict] = {}
+    ambiguous: set[str] = set()
+    for row in rows:
+        stem = PureWindowsPath(row.get("output_file", "")).stem
+        if not stem:
+            continue
+        for key in {stem, compact_mosaic_asset_stem(stem)}:
+            if key in ambiguous:
+                continue
+            if key in indexed and indexed[key] != row:
+                indexed.pop(key)
+                ambiguous.add(key)
+            else:
+                indexed[key] = row
+    return indexed
+
 
 @dataclass
 class ParsedMetadata:

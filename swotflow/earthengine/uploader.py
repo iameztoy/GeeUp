@@ -99,6 +99,9 @@ from swotflow.core.metadata import (
     processing_level_from_filename,
     processing_level_rank,
     product_identity_key,
+    compact_mosaic_asset_stem,
+    validate_ee_asset_path,
+    REPLACED_INVALID_ASSET_ID_STATUS,
 )
 from swotflow.project.database import (
     ProjectDatabase,
@@ -597,6 +600,33 @@ class SubmissionOutcome:
     task_name: str = ""
 
 
+def compact_upload_properties(metadata: ParsedMetadata) -> Dict[str, str]:
+    """Remove redundant mosaic dialog rows; retain full metadata in local reports.
+
+    Revision/checksum properties are added separately after this presentation step.
+    Custom properties and properties whose values differ from the parsed filename
+    are preserved. Processing endpoints retain the actual source counters.
+    """
+    properties = dict(metadata.properties)
+    if metadata.fields.get("scene_id") != "MOSA":
+        return properties
+    for property_name, field_name in (
+        ("swot_descriptor", "descriptor"),
+        ("swot_granule_overlap", "granule_overlap"),
+        ("swot_scene_id", "scene_id"),
+    ):
+        if properties.get(property_name) == metadata.fields.get(field_name):
+            properties.pop(property_name, None)
+    if properties.get("swot_processing_min") and properties.get("swot_processing_max"):
+        for property_name, field_name in (("swot_crid", "crid"), ("swot_product_counter", "product_counter")):
+            if properties.get(property_name) == metadata.fields.get(field_name):
+                properties.pop(property_name, None)
+        # All contributing versions and filenames remain in the mosaic/upload
+        # manifests; endpoints are the compact cloud summary, not a full list.
+        properties.pop("swot_processing_levels", None)
+    return properties
+
+
 class ReportManager:
     """Read and update the SQLite upload report with optional CSV exports."""
 
@@ -1048,6 +1078,7 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError(f"Input folder is not a directory: {config.input_folder}")
     if not config.destination_parent:
         raise ValueError("destination_parent is required.")
+    validate_ee_asset_path(config.destination_parent)
     if config.upload.batch_size < 1:
         raise ValueError("batch_size must be 1 or greater.")
     if config.upload.max_active_ingestions < 0:
@@ -1422,6 +1453,17 @@ class EarthEngineUIUploader:
             self.apply_upload_filter_metadata(item, source_tile_lookup)
             self.attach_product_identity_metadata(item)
             items.append(item)
+
+        selected_names: Dict[str, Path] = {}
+        for item in items:
+            if not item.upload_selected:
+                continue
+            previous = selected_names.get(item.asset_id)
+            if previous is not None and previous != item.local_file:
+                raise ValueError(f"Two local mosaics resolve to the same Earth Engine asset ID: {item.asset_id}. "
+                                 f"Review {previous.name} and {item.local_file.name} before uploading.")
+            selected_names[item.asset_id] = item.local_file
+        self.archive_invalid_name_attempts(items)
 
         best_local_by_identity = self.best_local_product_candidates(items)
         existing_identity_index = self.existing_product_identity_index()
@@ -2119,7 +2161,7 @@ class EarthEngineUIUploader:
 
     def build_asset_name(self, stem: str) -> str:
         """Create an Earth Engine asset name from a file stem."""
-        name = stem
+        name = compact_mosaic_asset_stem(stem)
         for old, new in self.config.upload.replacement_rules.items():
             name = name.replace(old, new)
         name = re.sub(
@@ -2134,7 +2176,35 @@ class EarthEngineUIUploader:
             name,
         )
         name = re.sub(r"_+", "_", name).strip("._-")
-        return name or "asset"
+        name = name or "asset"
+        validate_ee_asset_path(name)
+        if "/" in name:
+            raise ValueError("An asset name must be a single path component.")
+        return name
+
+    def archive_invalid_name_attempts(self, items: Sequence[UploadItem]) -> None:
+        """Retain rejected names as history, excluding them from current upload totals."""
+        if self.config.execution.dry_run or not self.ee_inventory_synced:
+            return
+        replacements = {str(item.local_file): item.asset_id for item in items if item.upload_selected}
+        archived = []
+        for old_id, row in self.report.rows.items():
+            new_id = replacements.get(row.get("local_file", ""))
+            if not new_id or new_id == old_id or row.get("final_status") == REPLACED_INVALID_ASSET_ID_STATUS:
+                continue
+            if not any(len(part) > 100 for part in old_id.split("/")):
+                continue
+            if (old_id in self.ee_existing_asset_ids or old_id in self.ee_operations_by_asset
+                    or row.get("detected_task_name") or row.get("ee_asset_exists", "").lower() == "yes"):
+                raise ValueError("Invalid old asset name has contradictory task/asset evidence; review before retry: " + old_id)
+            if row.get("final_status") not in {"PLANNED_UPLOAD", "ERROR", "FAILED", "DRY_RUN"}:
+                raise ValueError("Invalid old asset name has an unresolved submission status: " + old_id)
+            archived.append({**row, "final_status": REPLACED_INVALID_ASSET_ID_STATUS,
+                             "error_message": f"Rejected name retained as history; retry uses {new_id}. "
+                                              f"Previous result: {row.get('error_message', '')}"})
+        if archived:
+            self.report.upsert_many(archived)
+            self.logger.info("Archived %s rejected overlength names; original attempt history retained.", len(archived))
 
     def run_dry_run(self, planned_items: Sequence[UploadItem]) -> None:
         """Record and print planned uploads without touching the UI."""
@@ -3310,6 +3380,7 @@ class EarthEngineUIUploader:
     def apply_metadata_properties(self, item: UploadItem) -> None:
         """Apply configured asset metadata in the Earth Engine upload dialog."""
         parsed = self.parse_metadata_for_item(item, required=True)
+        parsed.properties = compact_upload_properties(parsed)
         if self.config.verified_workflow:
             from swotflow.verification.pipeline import ingestion_properties
             if parsed.status != "METADATA_PARSED" or not getattr(item, "ingestion_revision", None):

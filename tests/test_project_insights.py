@@ -73,6 +73,24 @@ class ProjectInsightsTests(unittest.TestCase):
             },
         }
 
+    def test_pending_uploads_are_not_reported_as_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = self.sample_project(root)
+            pending = ["PLANNED_UPLOAD", "PLANNED_DRY_RUN", "DRY_RUN", "SUBMITTED",
+                       "SUBMITTED_PENDING_VERIFICATION", "READY", "RUNNING"]
+            states = pending + ["ERROR", "FAILED", "REPLACED_INVALID_ASSET_ID"]
+            write_csv(root / "00_logs" / "upload_report.csv", [
+                {"asset_id": f"projects/example/assets/{index}", "final_status": status,
+                 "local_file": str(root / f"{index}.tif")} for index, status in enumerate(states)
+            ])
+            insights = collect_project_insights(config)
+            self.assertEqual(insights.metrics["Upload failures/errors recorded"], "2")
+            self.assertEqual(insights.metrics["Rejected asset names retained as history"], "1")
+            self.assertEqual(insights.metrics["Effective upload rows after EE inventory merge"], "9")
+            self.assertEqual({row[0] for row in insights.upload_error_counts}, {"ERROR", "FAILED"})
+            self.assertEqual(insights.metrics["Uploaded/already-existing assets recorded"], "0")
+
     def test_collect_project_insights_counts_files_tiles_dates_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

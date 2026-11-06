@@ -1,5 +1,15 @@
 # Release history
 
+## 0.8.7 — 6 November 2026
+
+- Fix the v0.8.6 processing-range suffix exceeding Earth Engine's 100-character asset-name component limit. For oversized recognized mosaics, omit that suffix only from the cloud name; keep the parseable SWOT stem, full local filename, processing endpoints and original-input history. Leave existing valid asset names unchanged.
+- Validate destination components and generated names before opening upload dialogs. Reject unresolved length errors and cloud-name collisions with an actionable message.
+- Reduce redundant mosaic dialog properties while preserving complete metadata in local upload/mosaic manifests. Keep acquisition times, grid, cycle/pass, minimum/maximum source versions and all three revision/checksum binding properties in verified uploads.
+- Resolve shortened cloud names in NASA input reconciliation and EE Consolidation lineage. Ambiguous lineage remains unresolved rather than choosing one of several revisions.
+- Preserve invalid-name attempts and status events as history after a fresh EE inventory confirms no corresponding asset/task. Exclude replaced invalid names from current Statistics totals and expose their separate historical count; never count them as uploaded.
+- Correct Statistics so planned, dry-run and active uploads are not counted as failures. Failed and unresolved uploads remain visible.
+- Retain scientific algorithms, raw/source filenames, existing mosaic bytes, verification guards, yearly scheduling and resume checkpoints. Show v0.8.7 on Home and in the window title.
+
 ## 0.8.6 — 27 October 2026
 
 - Remove verified GeoTIFF companions during cleanup, including `.tif.aux.xml` and `.tif.aux`. Preserve sidecars of live/unproven rasters; recover identifiable orphaned companions using current downstream evidence. Retain all filename histories and manifests.
