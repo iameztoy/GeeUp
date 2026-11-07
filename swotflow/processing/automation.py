@@ -1948,12 +1948,21 @@ def reconcile_verified_run(state: AutomationRunState) -> None:
             else:
                 if not inventory:
                     raise ValueError("No complete current EE metadata snapshot; sync before reconciliation")
-                report = project_report(Path(state.config.project_root), store, scans[0]["id"], inventory)
+                from swotflow.processing.reconciliation_catalogue import refresh_stale_catalogue
+                scan, refreshed = refresh_stale_catalogue(
+                    config, Path(state.config.project_root), tile,
+                    state.config.start_date, state.config.end_date, scans[0], ledger)
+                report = project_report(Path(state.config.project_root), store, scan["id"], inventory)
+                report["catalogue_refresh"] = {
+                    "performed": refreshed, "mode": "metadata_only",
+                    "previous_scan_id": scans[0]["id"], "scan_id": scan["id"],
+                }
                 path = save_report(store, report)
                 if not report["input_accounting_complete"]:
                     raise ValueError(f"Exact-input accounting is incomplete; inspect {path}")
                 status = "success" if report["pixel_verification_complete"] else "warning"
-                message = f"Recorded input accounting complete. Full pixel checks {'passed' if status == 'success' else 'remain pending'}. {path}"
+                message = (("NASA catalogue metadata automatically refreshed. " if refreshed else "")
+                           + f"Recorded input accounting complete. Full pixel checks {'passed' if status == 'success' else 'remain pending'}. {path}")
             if status == "warning":
                 state.warnings.append(f"{tile}: {message}")
             result = AutomationStageResult(state.run_id, tile, "reconciliation", status, started, now_text(), message=message)

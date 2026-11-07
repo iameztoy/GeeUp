@@ -143,3 +143,11 @@ remain separate checks and should be reviewed alongside execution progress.
 This option reduces the amount of time-range data awaiting downstream processing.
 It does not itself establish that historical gaps or shifts are repaired, or
 replace a representative end-to-end acceptance pilot before a large rebuild.
+
+## Upload concurrency on resume
+
+In **Upload → Max pending browser uploads**, choose the number of simultaneous local browser transfers (for example 1 or 2). This is separate from batch size and the limit on Earth Engine ingestion tasks. Start/Resume reads the current setting, including when it loads a saved run. Changing this throughput setting alone does not invalidate completed scientific checkpoints. Already-verified uploads are reconciled and skipped.
+
+A running uploader retains the configuration it started with. For a future change, let it reach a normal pause/completion boundary, set the new value before **Resume Run**, and continue. Editing the field does not retune a running worker; closing the app during active transfers can leave their outcome uncertain until reconciliation. Fewer transfers can shorten each individual transfer without necessarily improving total throughput.
+
+Verified upload reconciliation automatically renews aged catalogue metadata in v0.8.11. See [the freshness and history rules](WORKFLOW_VERIFICATION.md#long-runs-and-catalogue-freshness--v0811).

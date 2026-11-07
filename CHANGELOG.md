@@ -1,5 +1,13 @@
 # Release history
 
+## 0.8.11 — 7 November 2026
+
+- Refresh an aged NASA catalogue observation automatically at verified Automation's final upload reconciliation, once per exact tile/date scope. Reuse recent observations without another search. The 24-hour threshold is an application freshness rule, not expiration of files or history.
+- Use the existing verified dual-catalogue search, processing-version priority, complete-page accounting and provider-checksum validation. Append a new observation and retain all earlier filenames, selections and transfer history.
+- Reconcile current preferred inputs against existing mosaic and EE revision evidence. Added acquisitions, newer processing versions, changed checksums, partial searches and failed refreshes still block the affected year; never download, reprocess, replace or delete imagery from this metadata check.
+- Record refresh provenance and current observation dates in the reconciliation report used by Statistics. Preserve historical processing totals, upload recovery, pause/resume, cleanup safeguards and scientific settings.
+- Document upload-concurrency changes on Start/Resume. Add regression coverage for unchanged inputs, new/changed/disappeared inputs, incomplete metadata, history retention and year-gate behavior. Show v0.8.11 on Home and in the window title at the next launch.
+
 ## 0.8.10 — 7 November 2026
 
 - Detect failed local browser transfers in the Earth Engine task pane, including HTTP 400 failures that never produce an ingestion operation. Open only failed cards' details when needed to identify the exact destination.

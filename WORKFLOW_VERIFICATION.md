@@ -1,4 +1,4 @@
-# Workflow verification — v0.8.0
+# Workflow verification — v0.8.11
 
 Verified mode connects exact preferred NASA filenames and checksums to local outputs and current Earth Engine assets. It applies to initial runs and updates in the same project. Preserve the project logs and databases when cleaning rasters; independent projects do not automatically share history.
 
@@ -11,6 +11,16 @@ Verified mode connects exact preferred NASA filenames and checksums to local out
 - Verified Automation ends with exact preferred-input accounting. Missing or ambiguous inputs fail reconciliation; complete recorded membership with untested pixels is a warning, not a scientific pixel certificate.
 
 Full source replays and full EE reads are **optional maintenance operations**, not automatically repeated for every processed file. Checksums do add local disk reads. Catalogue searches, environment capture and EE inventory refreshes operate at run/batch level.
+
+## Long runs and catalogue freshness — v0.8.11
+
+The 24-hour metadata window is a SWOTFlow freshness requirement. NASA files, downloaded-file records, processing history, Statistics totals and uploaded assets do not expire or disappear after 24 hours. The app never edits NASA's repository.
+
+At final reconciliation of a verified upload run, Automation reuses a recent complete search for the exact tile/date scope. If that observation has aged, it performs one metadata-only search through the normal verified dual-catalogue path and appends a new immutable observation. It does not repeat downloads, extraction or mosaicking. Completed checkpoints and prior observations remain available. This adds a bounded catalogue check at the run/year boundary, not work per image.
+
+The new selection and provider checksums must still reconcile with retained sources and current EE revisions. New acquisitions, newer preferred processing versions, changed bytes or disappeared entries remain visible and require review; the app does not mark an older dataset current merely because its original queue finished. A failed or partial metadata search leaves completion pending with an actionable stage message. Resolve the catalogue/coverage issue and Resume; successful work and histories are retained. Local-only runs continue to report local evidence without certifying cloud completeness.
+
+Reconciliation reports retain the previous/new scan IDs, refresh mode and observation dates. Statistics uses that evidence without resetting historical counts or equating a freshness warning with missing downloaded files. The 24-hour rule remains in manual historical reconciliation; automatic metadata refresh does not replace scientific pixel verification or a broader periodic update search.
 
 ## Statistics → NASA History
 
@@ -77,4 +87,4 @@ Approved consolidation evidence is reused only when it can be connected to check
 
 Back up `00_logs/nasa_catalog_history.sqlite3`, `download_verification.sqlite3`, `workflow_verification.sqlite3`, project manifests/database and consolidation plans/register. Dated stage reports are in `verification_reports/`; original-source results in `source_pixel_checks/`. Credentials are excluded from receipts.
 
-Historical refresh and integrity checks are manually launched. Scheduling, automatic repair execution, a stratified collection-wide audit queue, automatic cloud retirement and a spatial gap atlas remain future work. A limited successful pilot supports those tested native cases; it does not certify every grid, date, processing version or optional projection. Investigation reports/data stay outside the application repository. Use **v0.8.0** in any GitHub release title and description. The historical spatial-shift mechanism remains unresolved; these safeguards and independent checks do not establish that cause.
+Broader historical refresh and integrity checks are manually launched; verified Automation now renews aged metadata for its current scope at reconciliation. Scheduling, automatic repair execution, a stratified collection-wide audit queue, automatic cloud retirement and a spatial gap atlas remain future work. A limited successful pilot supports those tested native cases; it does not certify every grid, date, processing version or optional projection. Investigation reports/data stay outside the application repository. Use the current application version in every GitHub release title and description. The historical spatial-shift mechanism remains unresolved; these safeguards and independent checks do not establish that cause.
