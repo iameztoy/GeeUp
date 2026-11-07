@@ -356,7 +356,7 @@ def active_upload_dialog_helper_js() -> str:
 
 
 DIALOG_ERROR_KEYWORD_RE = re.compile(
-    r"(already exists|does not exist|not found|invalid|error|failed|required)",
+    r"(already exists|does not exist|not found|invalid|error|failed|required|asset id.*must contain)",
     re.IGNORECASE,
 )
 
@@ -365,12 +365,10 @@ def normalize_dialog_error_messages(messages: Iterable[str]) -> str:
     """Normalize explicit upload-dialog validation messages."""
     normalized_messages: List[str] = []
     for message in messages:
-        for line in str(message or "").splitlines():
-            normalized = line.strip()
-            if not normalized:
-                continue
-            if DIALOG_ERROR_KEYWORD_RE.search(normalized):
-                normalized_messages.append(normalized)
+        # Validation copy can wrap between "must contain" and its limits.
+        normalized = " ".join(str(message or "").split())
+        if normalized and DIALOG_ERROR_KEYWORD_RE.search(normalized):
+            normalized_messages.append(normalized)
     return " | ".join(dict.fromkeys(normalized_messages))
 
 
@@ -3266,7 +3264,10 @@ class EarthEngineUIUploader:
                 timeout=8,
                 description="Earth Engine Asset Name input",
             )
-            self.clear_and_type(input_element, asset_trailer)
+            # Ctrl+A can select the page instead of the nested shadow input.
+            # Clear the element directly so keyboard recovery cannot append a path.
+            input_element.clear()
+            input_element.send_keys(asset_trailer)
             input_element.send_keys(Keys.TAB)
             time.sleep(0.2)
             value = self.execute_script(
@@ -3325,11 +3326,13 @@ class EarthEngineUIUploader:
             error_message = self.read_dialog_error_message()
             if self._current_dialog_asset_trailer and "asset id" in error_message.lower():
                 self.logger.warning(
-                    "Earth Engine says the asset ID is missing; retrying the Asset Name field with keyboard input."
+                    "Earth Engine reports an asset-ID validation error; retrying the planned Asset Name with keyboard input."
                 )
                 self.set_current_ui_asset_name(self._current_dialog_asset_trailer, force_keyboard=True)
                 time.sleep(0.5)
                 status = self.current_ui_upload_button_status()
+                if not status.get("found"):
+                    raise RetryableUIError("Upload button disappeared during Asset Name validation; no upload was clicked.")
                 if status.get("disabled"):
                     error_message = self.read_dialog_error_message()
             if status.get("disabled"):

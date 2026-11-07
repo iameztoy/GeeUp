@@ -1,5 +1,7 @@
 # SWOTFlow
 
+New in v0.8.12: recognize Earth Engine's asset-ID length validation and recover the planned name once before clicking Upload. Replace the nested field reliably and stop if validation remains; never bypass a disabled button. See [upload recovery](UPLOAD_RECOVERY.md).
+
 New in v0.8.11: verified Automation automatically refreshes aged NASA catalogue metadata before final input reconciliation. Long uploads retain their completed work and filename/checksum history; new acquisitions, processing versions or changed source bytes still require review before advancing. No image downloads or replacements occur during this metadata check. See [workflow verification](WORKFLOW_VERIFICATION.md).
 
 New in v0.8.10: detect confirmed browser file-transfer failures before they become Earth Engine ingestion tasks. Continue other uploads when **Fail fast on first error** is off; retain the failed mosaic for the existing deferred repair step. Ignore old failure cards during retries and preserve duplicate-submission guards. See [upload recovery](UPLOAD_RECOVERY.md).
@@ -10,7 +12,7 @@ New in v0.8.8: report **Stop after current step** as a resumable pause, with a r
 
 New in v0.8.7: fix Earth Engine uploads rejected by the 100-character asset-name limit. Oversized mosaic names omit the optional processing-range suffix in the cloud only; local filenames and full lineage remain intact. Reject invalid names before browser work, reduce redundant mosaic metadata rows, retain revision/checksum guards, and keep rejected naming attempts separate from current Statistics totals. See [upload naming and recovery](UPLOAD_RECOVERY.md).
 
-Current application version: **v0.8.11** (7 November 2026). The Home page and application window title display this version on the next normal launch.
+Current application version: **v0.8.12** (7 November 2026). The Home page and application window title display this version on the next normal launch.
 
 Fixed in v0.8.6: verified cleanup removes recorded raster sidecars; Automation Resume reuses checksum-verified intermediate files after raw cleanup; new mosaic names and upload metadata show the contributing processing-version range. Existing mosaic names remain usable. See [resume, cleanup and version ranges](RESUME_AND_LINEAGE.md). The existing EE Consolidation priority fix, yearly scheduling, NASA histories and Statistics remain in place.
 

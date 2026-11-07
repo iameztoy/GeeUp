@@ -1,5 +1,12 @@
 # Release history
 
+## 0.8.12 — 7 November 2026
+
+- Preserve Earth Engine's asset-ID length validation message, including wrapped text. Previously it was discarded because it did not contain generic words such as "error" or "invalid", preventing the existing pre-click recovery from running.
+- Retry the planned Asset Name once through keyboard input for that validation. Clear the nested input directly rather than relying on Ctrl+A; never append a second destination path. Stop safely if validation persists or the Upload button disappears. Do not force-enable a disabled button or resubmit an already clicked upload.
+- Add unit and isolated Chrome shadow-DOM regression tests for the observed message, exact input replacement, unrelated validation and no-click failure cases. Healthy uploads, scientific settings, metadata/Statistics accounting and duplicate guards remain unchanged.
+- Retain the v0.8.11 NASA metadata freshness renewal. Display v0.8.12 on Home and in the window title at the next launch.
+
 ## 0.8.11 — 7 November 2026
 
 - Refresh an aged NASA catalogue observation automatically at verified Automation's final upload reconciliation, once per exact tile/date scope. Reuse recent observations without another search. The 24-hour threshold is an application freshness rule, not expiration of files or history.
