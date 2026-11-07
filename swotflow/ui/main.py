@@ -5804,6 +5804,8 @@ class LauncherApp:
                 f"Failed stages: {failed}\n"
                 f"Warning stages: {warnings}\n"
                 + (f"Yearly-run errors: {len(run_errors)}\n" if state.config.process_by_year else "")
+                + (f"Retained upload exceptions: {len(state.deferred_uploads)} (Resume retries these; later years may proceed).\n"
+                   if state.deferred_uploads else "")
                 +
                 f"Unverified retryable mosaics: {state.unresolved_upload_count}\n"
                 f"Affected tiles: {self.compact_tile_list(state.unresolved_upload_tiles)}\n"

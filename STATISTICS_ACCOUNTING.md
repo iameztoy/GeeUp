@@ -21,3 +21,14 @@ Inventory refreshes retain submission timestamps and task names. Older verified 
 Snapshots retain compatible existing fields and add `count_definitions` to their JSON export. All source filenames and processing history remain available after verified cleanup. Statistics does not download, upload, replace or delete imagery; explicit Cleanup retains its existing current-proof checks.
 
 Input accounting establishes which recorded sources reached outputs. It does not prove that all observations currently available from NASA have been selected: run catalogue reconciliation for the intended full tile/date scope. Pixel shifts, spatial no-data holes and pixel agreement require their separate verification tools.
+
+## Upload exceptions — v0.8.14
+
+Annual `upload_pending` batches have complete local source accounting but missing
+EE uploads. They may allow later work; they do not count as completed batches,
+years or tiles. Statistics shows their count separately and exports the pending
+file paths, asset IDs, last errors and dates in
+`project_statistics_deferred_uploads.csv`. Source checksums and filenames remain
+in the run JSON and verification reports. These are upload exceptions, not missing
+NASA acquisitions or proof of file corruption. Resume/reconciliation refreshes
+the current list after recovery; historical failed attempts remain in upload events.

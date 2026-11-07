@@ -138,8 +138,9 @@ def verify_window_inputs(state: Any) -> None:
                 if (receipt is None or receipt.status not in {"success", "warning"} or receipt.return_code
                         or (receipt.period_start, receipt.period_end) != (start, end)):
                     raise ValueError("No successful verified reconciliation for this exact tile/date window.")
-                # The verified engine already checked immutable NASA selections,
-                # local receipts and, when enabled, bound current EE assets.
+                # The engine checks exact source membership. Explicit deferred
+                # uploads are locally intact, but are NOT EE completeness.
+                # child_outcome keeps that distinction as upload_pending.
                 continue
             config = deepcopy(state.config.base_config)
             config.setdefault("download", {}).update(start_date=start, end_date=end, utm_tiles=[tile])

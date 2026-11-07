@@ -75,6 +75,22 @@ class ResumeCleanupTests(TestCase):
         with mock.patch.object(proof, "catalogue_selection", return_value=("new", {self.name: {"hash": "changed"}})):
             self.assertEqual(verified_resume_stages(config, config, completed, self.root)[0], set())
 
+    def test_resume_after_verified_mosaic_cleanup_requires_current_full_source_proof(self):
+        config = self.config_and_selection()
+        self.raw.unlink()
+        self.extract.unlink()
+        self.mosaic.unlink()
+        completed = {"download", "duplicates", "extract", "raw_cleanup", "mosaic", "extracted_cleanup"}
+        active = {name: {"checksum": checksum, "asset_id": self.asset['id']}
+                  for name, checksum in self.mosaic_proof['sources'].items()}
+        with mock.patch.object(proof, 'active_proofs', return_value=active):
+            self.assertEqual(verified_resume_stages(config, config, completed, self.root)[0], completed)
+            self.mosaic.write_bytes(b'changed local mosaic')
+            self.assertEqual(verified_resume_stages(config, config, completed, self.root)[0], set())
+        self.mosaic.unlink()
+        with mock.patch.object(proof, 'active_proofs', return_value={}):
+            self.assertEqual(verified_resume_stages(config, config, completed, self.root)[0], set())
+
     def test_automation_resume_runs_mosaic_without_downloading_again_in_both_modes(self):
         base = self.config_and_selection()
         for annual_child in (False, True):

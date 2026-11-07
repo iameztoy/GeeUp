@@ -87,19 +87,23 @@ def merge_child_results(parent: engine.AutomationRunState, child: engine.Automat
 
 
 def child_outcome(child: engine.AutomationRunState) -> str:
-    """Never advance beyond unresolved failures, uploads or interrupted stages."""
+    """Distinguish recoverable upload exceptions from incomplete processing."""
     latest = engine.latest_stage_results_by_key(child)
     if any(r.return_code == 75 for r in latest.values()):
         return "low_space"
     if child.stopped:
         return "stopped"
-    if (not child.preflight_ok or child.errors or child.unresolved_upload_count
+    if (not child.preflight_ok or child.errors
             or any(r.status == "failed" for r in latest.values())):
         return "incomplete"
     required = {"download", "duplicates", "extract", "raw_cleanup", "mosaic", "extracted_cleanup"}
     if child.config.include_upload:
         required.update({"upload", "ee_sync", "mosaic_cleanup"})
     if any((tile, stage) not in latest for tile in child.config.utm_tiles for stage in required):
+        return "incomplete"
+    if child.deferred_uploads:
+        return "upload_pending"
+    if child.unresolved_upload_count:
         return "incomplete"
     return "complete"
 
@@ -155,9 +159,16 @@ def run_yearly_automation(
                           for tile in config.utm_tiles for start, end in periods]
     engine.write_run_state(state)
     failed_tiles: set[str] = set()
-    unresolved_tiles: set[str] = set()
     state.unresolved_upload_count = 0
     state.unresolved_upload_tiles = []
+    # Keep unvisited windows visible if Resume is interrupted before reaching them.
+    deferred_by_window = {(b['tile'], b['start_date'], b['end_date']): b.get('deferred_uploads', [])
+                          for b in state.year_batches}
+    state.deferred_uploads = [row for rows in deferred_by_window.values() for row in rows]
+    pending_counts = {(b['tile'], b['start_date'], b['end_date']): b.get('unresolved_upload_count', len(b.get('deferred_uploads', [])))
+                      for b in state.year_batches}
+    state.unresolved_upload_count = sum(pending_counts.values())
+    state.unresolved_upload_tiles = sorted({key[0] for key, count in pending_counts.items() if count})
     for batch in state.year_batches:
         tile = batch['tile']
         if tile in failed_tiles:
@@ -227,14 +238,28 @@ def run_yearly_automation(
         merge_child_results(state, child)
         batch["status"] = child_outcome(child)
         batch["finished_at"] = child.finished_at
-        state.unresolved_upload_count += child.unresolved_upload_count
-        unresolved_tiles.update(child.unresolved_upload_tiles)
-        state.unresolved_upload_tiles = sorted(unresolved_tiles)
+        batch["deferred_uploads"] = child.deferred_uploads
+        deferred_by_window[(tile, batch['start_date'], batch['end_date'])] = child.deferred_uploads
+        state.deferred_uploads = [row for rows in deferred_by_window.values() for row in rows]
+        batch['unresolved_upload_count'] = max(child.unresolved_upload_count, len(child.deferred_uploads))
+        pending_counts[(tile, batch['start_date'], batch['end_date'])] = batch['unresolved_upload_count']
+        state.unresolved_upload_count = sum(pending_counts.values())
+        state.unresolved_upload_tiles = sorted({key[0] for key, count in pending_counts.items() if count})
         for warning in child.warnings:
             warning = f"{batch['year']}: {warning}"
             if warning not in state.warnings:
                 state.warnings.append(warning)
-        if batch["status"] != "complete":
+        if batch["status"] == "upload_pending":
+            message = (f"{tile} / {batch['year']}: {len(child.deferred_uploads)} retained upload exception(s). "
+                       "Continuing to later years; this year remains incomplete in EE. "
+                       "Resume Run will retry these files; cleanup cannot remove unverified mosaics.")
+            stamp = engine.now_text()
+            engine.append_stage_result(state, engine.AutomationStageResult(
+                state.run_id, tile, "year_gate", "warning", stamp, stamp, message=message,
+                period_start=batch['start_date'], period_end=batch['end_date']))
+            if progress_callback:
+                progress_callback(tile, f"{batch['year']}/year_gate", "warning", message)
+        elif batch["status"] != "complete":
             state.stopped = child.stopped
             paused = (batch["status"] == "stopped" and not child.errors
                       and not any(r.status == "failed" for r in engine.latest_stage_results_by_key(child).values()))

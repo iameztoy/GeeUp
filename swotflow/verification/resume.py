@@ -51,6 +51,7 @@ def verified_resume_stages(config: dict[str, Any], saved: dict[str, Any],
     if "mosaic" not in completed:
         return set(), ""
     covered: set[str] = set()
+    active = None
     for proof in artifacts.values():
         if (proof["stage"] != "mosaic" or Path(proof["path"]).parent != mo.output_folder.resolve()
                 or proof["settings"] != settings_key("mosaic", mo)
@@ -63,6 +64,15 @@ def verified_resume_stages(config: dict[str, Any], saved: dict[str, Any],
             continue
         if artifact_current(proof):
             covered.update(proof["sources"])
+        elif not Path(proof["path"]).exists() and config.get("destination_parent"):
+            # Cleanup can remove a fully verified mosaic while another upload
+            # in this year remains pending. Reuse the same exact-source/full-
+            # pixel evidence required for that cleanup, never asset presence.
+            if active is None:
+                from swotflow.verification.pipeline import active_proofs
+                active = active_proofs(store, config["destination_parent"])
+            if all(active.get(n, {}).get("checksum") == checksum for n, checksum in proof["sources"].items()):
+                covered.update(proof["sources"])
     if covered == set(expected):
         return required | ({"raw_cleanup", "mosaic", "extracted_cleanup"} & completed), scan_id
     return set(), ""

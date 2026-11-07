@@ -73,12 +73,17 @@ Consolidation remains available for combining the uploaded outputs separately.
 
 When uploading in this mode, Automation waits for Earth Engine confirmation
 (`wait_for_ee`) before advancing. This override applies to the annual run and
-does not change the saved manual upload setting. Unresolved uploads, failed
-stages or a failed batch-boundary check prevent later years of the affected tile
-from starting. With **Continue on tile failure** enabled, Automation may proceed
-to the next tile while the affected tile's later years remain pending; otherwise
-the run stops. Low storage and a user stop request always stop further batches
-for all tiles.
+does not change the saved manual upload setting. From v0.8.14, two automatic
+recovery rounds follow the initial upload stage. After those rounds, an exact-input
+check can classify a year as **upload pending** if every missing upload has an
+unchanged local mosaic and all remaining inputs are accounted for in EE. That
+explicit exception allows later years to run, even with Continue on tile failure
+off, while keeping the earlier year incomplete and retryable on Resume.
+
+Missing inputs, failed processing, changed local bytes, uncertain source lineage
+or a failed batch-boundary check still prevent later years of the affected tile
+from starting. Continue on tile failure can then allow other tiles to proceed.
+Low storage and user stop requests always stop further batches for all tiles.
 
 Cleanup remains optional and uses the existing verification requirements. Raw
 and extracted files are removed only when their downstream evidence permits it.
@@ -151,3 +156,12 @@ In **Upload → Max pending browser uploads**, choose the number of simultaneous
 A running uploader retains the configuration it started with. For a future change, let it reach a normal pause/completion boundary, set the new value before **Resume Run**, and continue. Editing the field does not retune a running worker; closing the app during active transfers can leave their outcome uncertain until reconciliation. Fewer transfers can shorten each individual transfer without necessarily improving total throughput.
 
 Verified upload reconciliation automatically renews aged catalogue metadata in v0.8.11. See [the freshness and history rules](WORKFLOW_VERIFICATION.md#long-runs-and-catalogue-freshness--v0811).
+
+## Deferred upload records
+
+`upload_pending` is distinct from `complete`, `incomplete`, and a user pause.
+The parent and child checkpoints retain the pending files, asset IDs, exact source
+checksums and last upload errors. Statistics exposes deferred batch/file counts
+and a pending-upload CSV. Completed years stay reusable on Resume; deferred years
+are revisited without calling them complete. Recovery rounds have separate logs
+and checkpoint every stage so interruption preserves earlier attempts.

@@ -18,6 +18,9 @@ return Array.from(pane.shadowRoot.querySelectorAll('.upload-task-list .task.type
   asset_name: ((row.querySelector('.content.info-toggle')?.textContent || '').trim().match(/^(?:\([\d.]+%\)\s*)?(.*?)\s+upload\s*$/s) || [,''])[1].trim(),
   asset_id: (row.querySelector('.assetId b')?.textContent || '').trim(),
   failed: row.classList.contains('failed'),
+  settled: /^(completed|succeeded|cancelled|canceled)$/i.test((row.querySelector('.phase b')?.textContent ||
+    (row.querySelector('.phase')?.textContent || '').replace(/^Phase:\s*/i, '')).trim()) ||
+    ['completed', 'succeeded', 'cancelled', 'canceled'].some(c => row.classList.contains(c)),
   message: (row.querySelector('.info')?.textContent || row.textContent || '').trim().slice(0, 2000)
 });
 });
@@ -31,6 +34,7 @@ class BrowserUploadRow:
     failed: bool
     message: str
     asset_name: str = ""
+    settled: bool = False
 
 
 def normalize_browser_upload_rows(records: Any) -> list[BrowserUploadRow] | None:
@@ -49,7 +53,8 @@ def normalize_browser_upload_rows(records: Any) -> list[BrowserUploadRow] | None
             asset_id = ''  # Keep identity of collapsed cards for the pre-click baseline.
         rows.append(BrowserUploadRow(element_id, asset_id, record.get('failed') is True,
                                      str(record.get('message', '') or '')[:2000],
-                                     str(record.get('asset_name', '') or '').strip()))
+                                     str(record.get('asset_name', '') or '').strip(),
+                                     record.get('settled') is True))
     return rows
 
 

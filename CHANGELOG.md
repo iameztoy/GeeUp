@@ -1,5 +1,14 @@
 # Release history
 
+## 0.8.14 — 7 November 2026
+
+- Add two additional automatic upload recovery rounds after the initial stage, with a 30-second delay between rounds, EE synchronization before and after each round, and independent checkpoint/log paths for each attempt. Stop requests and system/authentication failures remain actionable.
+- Preserve active browser transfers: reuse an open editor without reloading, wait for local transfers before recovery, detach the driver without closing attached Chrome, and recheck late EE acknowledgements before another submission. Preserve uncertain submission records; an unknown outcome is not permission for a duplicate upload.
+- Let verified yearly Automation continue with explicit `upload_pending` exceptions when all preferred source checksums are represented by verified EE revisions or unchanged local mosaics. Missing inputs, changed bytes, duplicate ownership, failed processing and storage limits still block unsafe advancement. Upload errors alone do not prove corruption.
+- Persist pending filenames, destination IDs, source/checksum lineage and last errors in the saved run and verification reports. Statistics counts deferred years separately from completed years and exports a dedicated pending-upload CSV. Resume retries exceptions while reusing completed years; a pause does not erase unvisited pending records.
+- Keep cleanup guards intact. Unverified mosaics are retained; safely removed mosaics can justify upstream resume only through the same current full-pixel/source evidence required for deletion. No scientific processing, source selection or projection changes.
+- Add regression coverage for bounded retries, late success, active transfers, uncertain submissions, year continuation, cleanup/resume, damaged files and Statistics exports. Show v0.8.14 on Home and in the window title.
+
 ## 0.8.13 — 7 November 2026
 
 - Extend asset-name validation recovery to Earth Engine's "Please provide an asset ID" message, observed separately during the same continuing upload. The earlier generic error filter also discarded this wording.

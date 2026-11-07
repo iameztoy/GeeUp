@@ -39,7 +39,7 @@ not sufficient evidence that it contains the current file.
 
 ## Resume and Statistics
 
-Close the old app normally, reopen v0.8.7, open the existing project, and use
+Close the old app normally, reopen the current release, open the existing project, and use
 Automation → Resume Run. Authenticate Earthdata when the continuing campaign
 requires downloads for later batches. Retained local outputs are checked against
 the saved source selection and byte proofs; unchanged mosaics can be uploaded
@@ -71,7 +71,9 @@ The uploader now reads the local upload cards in the task pane as well as remote
 - **Fail fast on first error / fail_fast = false:** continue with other files after a confirmed file failure. This is the default.
 - **Fail fast on first error / fail_fast = true:** stop after recording a confirmed failure, including one detected during transfer monitoring.
 - **Retry attempts:** applies to immediate upload-dialog/UI failures; it is not an unlimited retry of later network transfers.
-- **Automation deferred repair:** after the current tile/year work and reconciliation, retry unresolved local outputs once, checking current EE assets and operations first. Successful outputs are skipped. If repair remains incomplete, keep the files and block later years of that tile until Resume resolves the required inputs.
+- **Automation deferred repair (v0.8.14):** after the initial stage, make up to two additional recovery rounds, with a 30-second delay between rounds and EE reconciliation before/after each round. Successful outputs are skipped. System/login failures stop retries; user pauses are honored between steps. For one attempt per round, keep Upload → Retry attempts at 1. That setting still controls immediate UI retries independently.
+- **Retained exceptions:** verified yearly runs can continue to later years if exact-source accounting finds only upload-pending inputs, each in a local mosaic that still matches its processing receipt. The earlier year remains `upload_pending`, never complete. Resume revisits it and skips already-complete years. Missing inputs, changed/corrupt outputs, ambiguous provenance and scientific processing failures still require intervention.
+- **Active or uncertain uploads:** recovery waits without reloading any open editor while local transfers are active or unreadable. It leaves attached Chrome open on exit. Late cloud acknowledgements are reconciled before clicking again. A prior uncertain submission without a matching terminal failure remains pending for review, rather than being blindly submitted again. Keep Chrome open while any transfer is active.
 
 An HTTP 400 message alone does not establish the underlying network/server cause or prove that a GeoTIFF is defective. A successful retry of the same verified local file establishes recovery of that attempt. Errors and later successes remain in upload event history; Statistics reflects the current status separately from historical attempts.
 
@@ -82,4 +84,16 @@ The fix does not cancel or restart a running uploader. A worker already in memor
 
 An intended asset name can be valid while the browser dialog still rejects its field. The app now retains Earth Engine's "Each part of the asset ID ... must contain ..." validation text, including line wrapping, and (in v0.8.13) "Please provide an asset ID", rather than discarding them as an unrecognized message. This allows the existing one-time pre-click correction to replace the field with the planned destination through real keyboard input. Direct element clearing avoids appending the name when Ctrl+A does not select the nested input.
 
-The Upload button must become enabled. If validation persists or the button disappears, the file remains a retryable error and is not submitted. Other files continue when Fail fast is off; any unresolved file keeps the affected year incomplete. A failure within the deferred repair pass can require another Resume; it is not silently counted as uploaded. Source lineage, revision bindings, duplicate prevention and Statistics reconciliation remain intact. No extra correction is performed for an already enabled Upload button.
+The Upload button must become enabled. If validation persists or the button disappears, the file remains a retryable error and is not submitted. Other files continue when Fail fast is off; any unresolved file keeps the affected year incomplete. After the bounded recovery rounds, eligible intact files can be deferred while later years continue; Resume retries those exceptions. They are not silently counted as uploaded. Source lineage, revision bindings, duplicate prevention and Statistics reconciliation remain intact. No extra correction is performed for an already enabled Upload button.
+
+## Error tracking, cleanup and continuation — v0.8.14
+
+The app detects browser validation/transfer errors, remote ingestion failures and missing or unbound expected assets. No single screenshot or asset-name match is treated as proof of success. A browser layout that cannot be read remains uncertain; it is not a silent pass. HTTP errors and exhausted retries do not establish file corruption. Actual byte/proof failures are reported separately and remain blocking integrity issues.
+
+Each run keeps the exception list in `automation_run.json` (`deferred_uploads`); verification reports retain the corresponding source filenames/checksums and EE completeness remains false. Statistics exports `00_logs/statistics/project_statistics_deferred_uploads.csv` with pending paths, asset IDs and last errors, alongside annual status/counts. Historical failures stay in upload events after a successful retry; current status and the next completed reconciliation remove recovered files from the pending list.
+
+Cleanup runs only when enabled and keeps its existing safeguards: intact downstream extraction/mosaic proofs for intermediates, and current full-pixel/source evidence for final mosaic deletion. Deferred local mosaics must be retained for recovery. This release does not loosen those requirements to save disk space.
+
+To continue an existing run, close the idle older app, reopen v0.8.14, open the same project and choose Automation → Resume Run. Keep Fail fast off for per-file continuation; enable Cleanup if desired before Resume. Do not create a new project or delete pending mosaics. Resume checks retained evidence first, so uploads may not begin immediately. Authenticate when a later year's downloads require it.
+
+Validation uses isolated fixtures and browser DOM tests. Production uploads are not started by the release tests; their recovery must still be observed in the real run.

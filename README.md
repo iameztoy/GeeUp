@@ -1,5 +1,7 @@
 # SWOTFlow
 
+New in v0.8.14: two automatic recovery rounds after the initial upload stage, with reconciliation and protection for active browser transfers. Verified yearly runs can continue with a retained **upload pending** exception list when all preferred inputs are accounted for in EE or intact local mosaics. These years remain incomplete in Statistics and retry on Resume; cleanup preserves unresolved outputs. See [upload recovery](UPLOAD_RECOVERY.md).
+
 New in v0.8.13: also recognize "Please provide an asset ID" and apply the same bounded pre-click Asset Name recovery introduced in v0.8.12. Both observed messages are covered by isolated Chrome tests.
 
 New in v0.8.12: recognize Earth Engine's asset-ID length validation and recover the planned name once before clicking Upload. Replace the nested field reliably and stop if validation remains; never bypass a disabled button. See [upload recovery](UPLOAD_RECOVERY.md).

@@ -76,6 +76,27 @@ class YearlyStatisticsTests(unittest.TestCase):
         self.assertEqual(complete["batches_complete"], 8)
         self.assertIn("pixel verification remain separate", complete["note"])
 
+    def test_upload_exceptions_are_exported_and_do_not_count_as_complete(self) -> None:
+        saved = self.state()
+        entry = {"asset_id": "projects/p/assets/a", "local_file": "mosaic.tif", "status": "ERROR",
+                 "last_error": "HTTP 400", "start_date": "2024-01-01", "end_date": "2024-12-31"}
+        saved['year_batches'] = [{**self.batch(2024, 'upload_pending'), 'deferred_uploads': [entry]}]
+        saved['deferred_uploads'] = [entry]
+        overview = yearly_automation_overview(saved, Path('example'))
+        self.assertEqual(overview['batches_complete'], 0)
+        self.assertEqual(overview['batches_upload_pending'], 1)
+        values = {item.name: [] for item in fields(ProjectInsights)}
+        values.update(metrics=OrderedDict(), update_coverage_campaign_rows={},
+                      active_update_campaign_id='', yearly_automation=overview)
+        with tempfile.TemporaryDirectory() as temporary:
+            config = {'processing': {'logs': temporary}}
+            path = write_project_insights_snapshot(config, ProjectInsights(**values))
+            with (path.parent / 'project_statistics_deferred_uploads.csv').open(encoding='utf-8', newline='') as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['asset_id'], entry['asset_id'])
+            self.assertEqual(rows[0]['last_error'], 'HTTP 400')
+
     def test_duplicate_unknown_and_low_space_receipts_fail_closed(self) -> None:
         saved = self.state()
         saved["year_batches"] = [self.batch(2023, "complete"), self.batch(2023, "complete"),

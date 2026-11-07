@@ -161,7 +161,7 @@ def yearly_automation_overview(saved: Mapping[str, Any], run_dir: Path) -> Dict[
     tiles = sorted({str(tile).upper() for tile in raw_tiles if UTM_TILE_TOKEN_RE.fullmatch(str(tile).upper())})
     receipts = saved.get("year_batches", [])
     receipts = receipts if isinstance(receipts, list) else []
-    statuses = {"pending", "running", "complete", "incomplete", "stopped", "low_space"}
+    statuses = {"pending", "running", "complete", "incomplete", "stopped", "low_space", "upload_pending"}
     batches = []
     years = list(range(start.year, end.year + 1))
     for tile in tiles:
@@ -177,7 +177,8 @@ def yearly_automation_overview(saved: Mapping[str, Any], run_dir: Path) -> Dict[
             if len(matches) > 1 or status not in statuses:
                 status = "incomplete"
             batches.append({"tile": tile, "year": year, "start_date": first, "end_date": last,
-                            "status": status, "run_dir": str(row.get("run_dir", ""))})
+                            "status": status, "run_dir": str(row.get("run_dir", "")),
+                            "deferred_upload_count": len(row.get("deferred_uploads", []))})
     counts = Counter(row["status"] for row in batches)
     if counts["low_space"]:
         status = "low_space"
@@ -187,6 +188,8 @@ def yearly_automation_overview(saved: Mapping[str, Any], run_dir: Path) -> Dict[
         status = "running"
     elif counts["incomplete"]:
         status = "incomplete"
+    elif counts["upload_pending"]:
+        status = "upload_pending"
     else:
         status = "complete" if batches and counts["complete"] == len(batches) else "pending"
     completed_years = sum(bool(tiles) and all(row["status"] == "complete" for row in batches
@@ -208,8 +211,10 @@ def yearly_automation_overview(saved: Mapping[str, Any], run_dir: Path) -> Dict[
             "batches_total": len(batches), "batches_complete": counts["complete"],
             "batches_pending": counts["pending"], "batches_remaining": len(batches) - counts["complete"],
             "status": status, "year_batches": batches,
+            "batches_upload_pending": counts["upload_pending"],
+            "deferred_uploads": list(saved.get("deferred_uploads", [])),
             "parent_campaign_id": update_campaign_id(parent_config),
-            "note": "A tile is complete only after all its yearly batches; a year is complete only across all selected tiles. Batch completion describes the Automation pipeline; input and pixel verification remain separate evidence."}
+            "note": "A tile is complete only after all its yearly batches; a year is complete only across all selected tiles. Upload-pending years can allow later work but remain incomplete and retry on Resume. Input and pixel verification remain separate evidence."}
 
 
 def read_yearly_automation_overview(config: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2395,6 +2400,8 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         metrics["Year-by-year remaining tile/year batches"] = str(yearly_automation["batches_remaining"])
         metrics["Year-by-year years complete across all tiles"] = f"{yearly_automation['years_complete']}/{yearly_automation['years_total']}"
         metrics["Year-by-year pipeline status"] = yearly_automation["status"].replace("_", " ")
+        metrics["Year-by-year batches with deferred uploads"] = str(yearly_automation["batches_upload_pending"])
+        metrics["Retained upload exceptions (not proof of corruption)"] = str(len(yearly_automation["deferred_uploads"]))
 
     return ProjectInsights(
         metrics=metrics,
@@ -2732,8 +2739,11 @@ def write_project_insights_snapshot(config: Mapping[str, Any], insights: Project
                     "downloaded_observations", "extracted_observations", "mosaicked_observations", "verified_observations"],
                    insights.update_campaign_details)
     write_csv_rows(folder / "project_statistics_yearly_automation.csv",
-                   ["tile", "year", "start_date", "end_date", "status", "run_dir"],
+                   ["tile", "year", "start_date", "end_date", "status", "run_dir", "deferred_upload_count"],
                    insights.yearly_automation.get("year_batches", []))
+    write_csv_rows(folder / "project_statistics_deferred_uploads.csv",
+                   ["asset_id", "local_file", "status", "last_error", "reason", "start_date", "end_date", "scan_id", "sha256"],
+                   insights.yearly_automation.get("deferred_uploads", []))
 
     write_csv_rows(
         folder / "project_statistics_metrics.csv",

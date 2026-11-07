@@ -45,3 +45,11 @@ From v0.8.7, a recognized mosaic whose cloud name exceeds 100 characters omits t
 Previously recorded mosaic filenames are preserved to avoid duplicate outputs/assets caused solely by upgrading. Their version summaries can still be recovered from the local manifest for future uploads. Existing EE assets are not renamed or edited by this release. Export the manifest alongside mosaics to retain complete lineage.
 
 Validation is automated local regression coverage, including interrupted-run checkpoints, sidecar safety, filename parsing and upload metadata. This release does not claim a new live NASA-to-EE acceptance run.
+
+## Deferred uploads after later years — v0.8.14
+
+Resume revisits `upload_pending` years and reuses completed years. It checks local
+proofs before upload; pending mosaics remain on disk. If cleanup already removed
+a successful mosaic, the upstream checkpoint can be reused only with the current
+full-pixel/source proof required by cleanup, never filename/asset presence alone.
+A changed local mosaic still invalidates reuse, even if a cloud copy exists.

@@ -201,6 +201,7 @@ class AutomationRunState:
     unresolved_upload_tiles: list[str] = field(default_factory=list)
     year_batches: list[dict[str, Any]] = field(default_factory=list)
     stop_reason: str = ""
+    deferred_uploads: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def csv_path(self) -> Path:
@@ -1230,6 +1231,7 @@ def write_run_state(state: AutomationRunState) -> None:
         "unresolved_upload_tiles": state.unresolved_upload_tiles,
         "year_batches": state.year_batches,
         "stop_reason": state.stop_reason,
+        "deferred_uploads": state.deferred_uploads,
     }
     # All scheduling modes need a durable checkpoint across power loss.
     temporary = None
@@ -1358,6 +1360,7 @@ def load_automation_run_state(path: str | Path) -> AutomationRunState:
         ],
         year_batches=[dict(row) for row in data.get("year_batches", []) or []],
         stop_reason=str(data.get("stop_reason", "") or ""),
+        deferred_uploads=[dict(row) for row in data.get("deferred_uploads", []) or []],
     )
     # v0.8.7 reported an ordinary stop as a failed year gate. Retain its
     # original row and append a display/current-state correction, once.
@@ -1575,62 +1578,11 @@ def execute_deferred_upload_repair_if_needed(
     normalized: AutomationConfig,
     gdal_python: Path,
     progress_callback: ProgressCallback | None = None,
+    stop_event: Any = None,
 ) -> list[AutomationStageResult]:
-    """Retry unresolved local mosaics once after the tile queue finishes."""
-    if not normalized.include_upload or state.stopped:
-        return []
-    before = retryable_upload_candidates(normalized.base_config, normalized.utm_tiles)
-    if not before:
-        return []
-
-    repair_dir = state.run_dir / "upload_repair"
-    config_path = write_tile_config(
-        build_upload_repair_config(normalized.base_config, normalized.utm_tiles),
-        repair_dir / "automation_config.yaml",
-    )
-    if progress_callback is not None:
-        progress_callback(
-            "REPAIR",
-            "upload",
-            "running",
-            f"Retrying {len(before)} unresolved local mosaic upload(s) after EE reconciliation.",
-        )
-    upload_result = execute_command_result(
-        state,
-        "REPAIR",
-        "upload",
-        config_path,
-        gdal_python,
-        progress_callback=progress_callback,
-    )
-    upload_result.message = (
-        f"Deferred upload repair considered {len(before)} unresolved local mosaic(s). "
-        f"{upload_result.message}"
-    )
-
-    if progress_callback is not None:
-        progress_callback(
-            "REPAIR",
-            "ee_sync",
-            "running",
-            "Reconciling repaired submissions with Earth Engine assets and operations.",
-        )
-    sync_result = execute_command_result(
-        state,
-        "REPAIR",
-        "ee_sync",
-        config_path,
-        gdal_python,
-        progress_callback=progress_callback,
-    )
-    after = retryable_upload_candidates(normalized.base_config, normalized.utm_tiles)
-    sync_result.message = (
-        f"Deferred upload repair reconciliation left {len(after)} unresolved local mosaic(s) "
-        f"from {len(before)} candidate(s). {sync_result.message}"
-    )
-    if after and sync_result.status == "success":
-        sync_result.status = "warning"
-    return [upload_result, sync_result]
+    """Run up to two checkpointed recovery rounds after normal uploads."""
+    from swotflow.processing.upload_recovery import recover_uploads
+    return recover_uploads(state, normalized, gdal_python, progress_callback, stop_event)
 
 
 def run_automation(
@@ -1863,21 +1815,8 @@ def _run_automation_normalized(
                 stop_after_failure = True
                 break
 
-    repair_results = execute_deferred_upload_repair_if_needed(
-        state,
-        normalized,
-        gdal_python,
-        progress_callback=progress_callback,
-    )
-    for repair_result in repair_results:
-        append_stage_result(state, repair_result)
-        if progress_callback is not None:
-            progress_callback(
-                repair_result.tile,
-                repair_result.stage,
-                repair_result.status,
-                repair_result.message,
-            )
+    execute_deferred_upload_repair_if_needed(
+        state, normalized, gdal_python, progress_callback=progress_callback, stop_event=stop_event)
 
     final_cleanup = execute_final_verified_mosaic_cleanup_if_needed(state, normalized)
     if final_cleanup is not None:
@@ -1928,6 +1867,7 @@ def reconcile_verified_run(state: AutomationRunState) -> None:
     inventory = load_inventory(store, str(config.get("destination_parent", "")))
     from swotflow.core.temporal import acquisition_scope
     ownership = acquisition_scope(config)
+    state.deferred_uploads = []
     for tile in state.config.utm_tiles:
         started = now_text()
         try:
@@ -1957,12 +1897,22 @@ def reconcile_verified_run(state: AutomationRunState) -> None:
                     "performed": refreshed, "mode": "metadata_only",
                     "previous_scan_id": scans[0]["id"], "scan_id": scan["id"],
                 }
+                from swotflow.processing.upload_recovery import retained_upload_exceptions
+                deferred = retained_upload_exceptions(report, store, config)
+                report["deferred_uploads"] = deferred
                 path = save_report(store, report)
-                if not report["input_accounting_complete"]:
+                if not report["input_accounting_complete"] and not deferred:
                     raise ValueError(f"Exact-input accounting is incomplete; inspect {path}")
-                status = "success" if report["pixel_verification_complete"] else "warning"
-                message = (("NASA catalogue metadata automatically refreshed. " if refreshed else "")
-                           + f"Recorded input accounting complete. Full pixel checks {'passed' if status == 'success' else 'remain pending'}. {path}")
+                if deferred:
+                    state.deferred_uploads.extend(deferred)
+                    status = "warning"
+                    message = (f"{len(deferred)} upload(s) retained for later recovery; exact preferred inputs "
+                               f"are represented by verified EE revisions or unchanged local mosaics. "
+                               f"EE completeness is NOT achieved. Later years may continue. {path}")
+                else:
+                    status = "success" if report["pixel_verification_complete"] else "warning"
+                    message = (("NASA catalogue metadata automatically refreshed. " if refreshed else "")
+                               + f"Recorded input accounting complete. Full pixel checks {'passed' if status == 'success' else 'remain pending'}. {path}")
             if status == "warning":
                 state.warnings.append(f"{tile}: {message}")
             result = AutomationStageResult(state.run_id, tile, "reconciliation", status, started, now_text(), message=message)
@@ -1974,3 +1924,5 @@ def reconcile_verified_run(state: AutomationRunState) -> None:
             result.period_start = state.config.start_date
             result.period_end = state.config.end_date
         append_stage_result(state, result)
+    state.unresolved_upload_count = max(state.unresolved_upload_count, len(state.deferred_uploads))
+    write_run_state(state)

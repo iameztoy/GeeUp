@@ -1311,6 +1311,7 @@ class EarthEngineUIUploader:
 
     def _run(self) -> int:
         """Run the upload workflow end to end."""
+        prior_rows = {key: dict(row) for key, row in self.report.rows.items()}
         try:
             planned_items = self.build_upload_plan()
         except KeyboardInterrupt:
@@ -1328,11 +1329,41 @@ class EarthEngineUIUploader:
             return 0
 
         self.confirm_before_real_upload(planned_items)
+        scope_items = list(planned_items)
         self.driver = self.create_driver()
 
         try:
             self.open_earth_engine()
             self.ensure_logged_in()
+            if not self.wait_for_existing_browser_transfers():
+                return 2
+            # A prior process can have finished a transfer while this one was
+            # planning or waiting. Reconcile again before any new click.
+            self.sync_earth_engine_inventory()
+            remaining = []
+            for item in planned_items:
+                operation = self.ee_operations_by_asset.get(item.asset_id)
+                prior = prior_rows.get(item.asset_id, {})
+                if item.asset_id in self.ee_existing_asset_ids:
+                    status = self.existing_revision_status(item.local_file, item.asset_id)
+                    if status != EE_VERIFIED_EXISTS_STATUS:
+                        raise ValueError("Existing asset requires revision review: " + item.asset_id)
+                elif operation is not None and (not operation.done or operation.state == "SUCCEEDED"):
+                    status = "RUNNING" if not operation.done else SUBMITTED_PENDING_VERIFICATION_STATUS
+                elif (prior.get("final_status") in {"SUBMITTED", SUBMITTED_PENDING_VERIFICATION_STATUS,
+                                                    UNKNOWN_AFTER_CLICK_STATUS, "READY", "RUNNING"}
+                      and not (operation is not None and operation.done and operation.state in {"FAILED", "CANCELLED"}
+                               and prior.get("detected_task_name") == operation.operation_name)):
+                    self.report.upsert({**prior, "final_status": UNKNOWN_AFTER_CLICK_STATUS,
+                        "error_message": "Prior submission remains uncertain after EE/browser reconciliation; retained for review, not blindly resubmitted."})
+                    continue
+                else:
+                    remaining.append(item)
+                    continue
+                self.report.upsert(self.make_report_row(item=item, submit_time=str(prior.get("submit_time", "") or ""),
+                    detected_task_name=operation.operation_name if operation else "",
+                    final_status=status, error_message="Reconciled before retry; no duplicate upload submitted."))
+            planned_items = remaining
             self.process_batches(planned_items)
             if self.browser_transfer_backlog_stalled:
                 self.reconcile_submit_and_continue_uploads()
@@ -1361,11 +1392,15 @@ class EarthEngineUIUploader:
         finally:
             if self.driver is not None:
                 try:
-                    self.driver.quit()
+                    if (self.config.chrome.connection_mode == "attach" or self.browser_transfer_backlog_stalled
+                            or self.pending_browser_upload_asset_ids()):
+                        self.driver.service.stop()  # Leave Chrome and its local transfers alive.
+                    else:
+                        self.driver.quit()
                 except WebDriverException:
                     pass
 
-        counts = self.report.counts(asset.asset_id for asset in planned_items)
+        counts = self.report.counts(asset.asset_id for asset in scope_items)
         self.logger.info("Run finished. Status summary: %s", counts)
         if counts.get("FAILED") or counts.get("ERROR") or counts.get(UNKNOWN_AFTER_CLICK_STATUS):
             return 2
@@ -1621,7 +1656,8 @@ class EarthEngineUIUploader:
             for item in batch:
                 item.batch_number = batch_index
                 self.tracked_items[item.asset_id] = item
-                if not self.config.execution.dry_run:
+                if (not self.config.execution.dry_run and self.report.get_status(item.asset_id) not in
+                        {"SUBMITTED", SUBMITTED_PENDING_VERIFICATION_STATUS, UNKNOWN_AFTER_CLICK_STATUS, "READY", "RUNNING"}):
                     report_rows.append(
                         self.make_report_row(
                             item=item,
@@ -1772,6 +1808,7 @@ class EarthEngineUIUploader:
         provisional_statuses = {
             "SUBMITTED",
             SUBMITTED_PENDING_VERIFICATION_STATUS,
+            UNKNOWN_AFTER_CLICK_STATUS,
         }
         return {
             asset_id
@@ -2340,6 +2377,7 @@ class EarthEngineUIUploader:
         options.add_argument("--disable-popup-blocking")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
+        options.add_experimental_option("detach", True)
         if self.config.chrome.binary_location:
             options.binary_location = self.config.chrome.binary_location
 
@@ -2457,9 +2495,43 @@ class EarthEngineUIUploader:
         )
 
     def open_earth_engine(self) -> None:
-        """Open the Earth Engine Code Editor."""
+        """Reuse an attached editor without reloading its local transfers."""
+        assert self.driver is not None
+        for handle in self.driver.window_handles:
+            self.driver.switch_to.window(handle)
+            if self.driver.current_url.startswith("https://code.earthengine.google.com/"):
+                return
         self.logger.info("Opening Earth Engine: %s", self.config.earth_engine_url)
         self.navigate_to_earth_engine("opening Earth Engine")
+
+    def wait_for_existing_browser_transfers(self) -> bool:
+        """Wait without navigation for every open editor's local transfers.
+
+        Failed and explicitly completed cards are settled; unknown/unreadable
+        cards are not permission to reload or submit another copy. This also
+        covers transfers inherited from an interrupted uploader process.
+        """
+        assert self.driver is not None
+        original = self.driver.current_window_handle
+        deadline = time.monotonic() + self.config.upload.submission_transfer_timeout_minutes * 60
+        while True:
+            blocked = False
+            try:
+                for handle in self.driver.window_handles:
+                    self.driver.switch_to.window(handle)
+                    if self.driver.current_url.startswith("https://code.earthengine.google.com/"):
+                        rows = self.read_browser_upload_rows()
+                        blocked |= rows is None or any(not r.failed and not r.settled for r in rows)
+            finally:
+                self.driver.switch_to.window(original)
+            if not blocked:
+                return True
+            if time.monotonic() >= deadline:
+                self.browser_transfer_backlog_stalled = True
+                self.logger.warning("Existing browser transfers are active or unreadable. Leaving Chrome untouched; uploads remain pending for Resume.")
+                return False
+            self.logger.info("Waiting for existing browser transfers without reloading Chrome.")
+            time.sleep(max(2, min(10, self.config.execution.task_poll_seconds)))
 
     def navigate_to_earth_engine(self, action_description: str) -> None:
         """Navigate to Earth Engine, tolerating page-load timeouts when the UI is usable."""
@@ -2555,6 +2627,8 @@ class EarthEngineUIUploader:
         for batch_index, batch in enumerate(batches, start=1):
             self.logger.info("Starting batch %s of %s (%s files).", batch_index, len(batches), len(batch))
             for item in batch:
+                if self.browser_transfer_backlog_stalled:
+                    return
                 self.submit_with_retries(item)
                 if self.config.upload.fail_fast and self.report.get_status(item.asset_id) in {"FAILED", "ERROR"}:
                     raise RuntimeError(f"Fail-fast stopping after a failure on {item.asset_id}")
@@ -4257,6 +4331,8 @@ class EarthEngineUIUploader:
 
     def recover_ui_state(self) -> None:
         """Reload the page and return to a known-good state."""
+        if not self.wait_for_existing_browser_transfers():
+            raise RetryableUIError("UI refresh deferred to preserve active browser uploads.")
         self.logger.info("Refreshing the Earth Engine page to recover UI state.")
         self.navigate_to_earth_engine("refreshing Earth Engine to recover UI state")
         self.ensure_logged_in()

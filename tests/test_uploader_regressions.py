@@ -244,6 +244,8 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                 mock.patch.object(uploader, "create_driver", return_value=mock.Mock()),
                 mock.patch.object(uploader, "open_earth_engine"),
                 mock.patch.object(uploader, "ensure_logged_in"),
+                mock.patch.object(uploader, "wait_for_existing_browser_transfers", return_value=True),
+                mock.patch.object(uploader, "read_browser_upload_rows", return_value=[]),
                 mock.patch.object(uploader, "process_batches", side_effect=mark_pending),
                 mock.patch.object(uploader, "wait_for_all_tracked_tasks"),
             ):
@@ -276,6 +278,8 @@ class UploaderDialogRegressionTests(unittest.TestCase):
                 mock.patch.object(uploader, "create_driver", return_value=mock.Mock()),
                 mock.patch.object(uploader, "open_earth_engine"),
                 mock.patch.object(uploader, "ensure_logged_in"),
+                mock.patch.object(uploader, "wait_for_existing_browser_transfers", return_value=True),
+                mock.patch.object(uploader, "read_browser_upload_rows", return_value=[]),
                 mock.patch.object(uploader, "process_batches", side_effect=mark_pending),
                 mock.patch.object(uploader, "reconcile_submit_and_continue_uploads"),
             ):
@@ -461,7 +465,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             uploader = self.uploader(self.uploader_config(root))
-            uploader.driver = mock.Mock()
+            uploader.driver = mock.Mock(window_handles=[])
             uploader.driver.get.side_effect = TimeoutException("slow page load")
 
             with mock.patch.object(uploader, "wait_for_any_selector", return_value=mock.Mock()) as wait:
@@ -474,7 +478,7 @@ class UploaderDialogRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             uploader = self.uploader(self.uploader_config(root))
-            uploader.driver = mock.Mock()
+            uploader.driver = mock.Mock(window_handles=[])
             uploader.driver.get.side_effect = TimeoutException("slow page load")
 
             with mock.patch.object(
