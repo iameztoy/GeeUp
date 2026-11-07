@@ -12,6 +12,9 @@ LENGTH_ERROR = ('Each part of the asset ID between slashes must contain at least
                 'and at most 100 characters.')
 
 
+REQUIRED_ERROR = 'Please provide an asset ID.'
+
+
 class AssetDialogValidationTests(unittest.TestCase):
     def make_uploader(self, root):
         fixture = fixtures.UploaderDialogRegressionTests()
@@ -23,6 +26,9 @@ class AssetDialogValidationTests(unittest.TestCase):
         self.assertEqual(normalize_dialog_error_messages([LENGTH_ERROR, LENGTH_ERROR]),
                          LENGTH_ERROR.replace('\n', ' '))
         self.assertEqual(normalize_dialog_error_messages(['testtiles-461713', 'Asset ID', '']), '')
+
+    def test_required_id_validation_survives_normalization(self):
+        self.assertEqual(normalize_dialog_error_messages([REQUIRED_ERROR]), REQUIRED_ERROR)
 
     def test_disabled_length_validation_retypes_once_before_click(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,6 +75,12 @@ class AssetDialogValidationTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('SWOTFLOW_BROWSER_TESTS') == '1', 'Opt-in isolated Chrome DOM test')
 class AssetDialogDOMTests(unittest.TestCase):
     def test_visible_length_error_triggers_real_keyboard_recovery(self):
+        self.check_message(LENGTH_ERROR)
+
+    def test_visible_required_id_triggers_real_keyboard_recovery(self):
+        self.check_message(REQUIRED_ERROR)
+
+    def check_message(self, message):
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,10 +106,10 @@ class AssetDialogDOMTests(unittest.TestCase):
                         button.disabled=false;error.textContent='';
                       }
                     });
-                ''', LENGTH_ERROR)
+                ''', message)
                 uploader = AssetDialogValidationTests().make_uploader(Path(tmp))
                 uploader.driver = driver
-                self.assertIn('at most 100 characters', uploader.read_dialog_error_message())
+                self.assertEqual(uploader.read_dialog_error_message(), ' '.join(message.split()))
                 uploader._click_current_ui_upload_button()
                 self.assertEqual(driver.execute_script('return window.clicked;'), 1)
                 self.assertEqual(uploader.read_dialog_error_message(), '')

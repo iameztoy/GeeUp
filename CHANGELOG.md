@@ -1,5 +1,10 @@
 # Release history
 
+## 0.8.13 — 7 November 2026
+
+- Extend asset-name validation recovery to Earth Engine's "Please provide an asset ID" message, observed separately during the same continuing upload. The earlier generic error filter also discarded this wording.
+- Cover both observed validation messages with real keyboard recovery tests in isolated Chrome. Keep persistent-error/no-click guards, source history, Statistics and the v0.8.11 catalogue freshness correction intact. Show v0.8.13 on Home and in the window title at the next launch.
+
 ## 0.8.12 — 7 November 2026
 
 - Preserve Earth Engine's asset-ID length validation message, including wrapped text. Previously it was discarded because it did not contain generic words such as "error" or "invalid", preventing the existing pre-click recovery from running.

@@ -78,8 +78,8 @@ An HTTP 400 message alone does not establish the underlying network/server cause
 The fix does not cancel or restart a running uploader. A worker already in memory uses its original code until it exits; subsequent uploader processes use the updated files. Restart the GUI between runs to load the new displayed version. No change to projections, pixel values, processing-version selection or deletion safeguards is required.
 
 
-## Asset-ID validation recovery — v0.8.12
+## Asset-ID validation recovery — v0.8.12–v0.8.13
 
-An intended asset name can be valid while the browser dialog still rejects its field. The app now retains Earth Engine's "Each part of the asset ID ... must contain ..." validation text, including line wrapping, rather than discarding it as an unrecognized message. This allows the existing one-time pre-click correction to replace the field with the planned destination through real keyboard input. Direct element clearing avoids appending the name when Ctrl+A does not select the nested input.
+An intended asset name can be valid while the browser dialog still rejects its field. The app now retains Earth Engine's "Each part of the asset ID ... must contain ..." validation text, including line wrapping, and (in v0.8.13) "Please provide an asset ID", rather than discarding them as an unrecognized message. This allows the existing one-time pre-click correction to replace the field with the planned destination through real keyboard input. Direct element clearing avoids appending the name when Ctrl+A does not select the nested input.
 
 The Upload button must become enabled. If validation persists or the button disappears, the file remains a retryable error and is not submitted. Other files continue when Fail fast is off; any unresolved file keeps the affected year incomplete. A failure within the deferred repair pass can require another Resume; it is not silently counted as uploaded. Source lineage, revision bindings, duplicate prevention and Statistics reconciliation remain intact. No extra correction is performed for an already enabled Upload button.

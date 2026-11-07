@@ -356,7 +356,7 @@ def active_upload_dialog_helper_js() -> str:
 
 
 DIALOG_ERROR_KEYWORD_RE = re.compile(
-    r"(already exists|does not exist|not found|invalid|error|failed|required|asset id.*must contain)",
+    r"(already exists|does not exist|not found|invalid|error|failed|required|asset id.*must contain|please provide an asset id)",
     re.IGNORECASE,
 )
 
