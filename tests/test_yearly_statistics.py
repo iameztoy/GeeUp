@@ -96,6 +96,22 @@ class YearlyStatisticsTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]['asset_id'], entry['asset_id'])
             self.assertEqual(rows[0]['last_error'], 'HTTP 400')
+            self.assertEqual(rows[0]['kind'], 'retry_pending')
+
+    def test_checkpoint_backlog_distinguishes_verification_retry_and_unknown(self) -> None:
+        saved = self.state()
+        entries = [{'asset_id': f'projects/p/assets/{i}', 'status': status}
+                   for i, status in enumerate(('RUNNING', 'SUBMITTED_PENDING_VERIFICATION', 'ERROR', 'UNKNOWN_AFTER_CLICK'))]
+        saved['year_batches'] = [{**self.batch(2024, 'upload_pending'), 'deferred_uploads': entries}]
+        saved['deferred_uploads'] = entries
+        overview = yearly_automation_overview(saved, Path('example'))
+        self.assertEqual(overview['uploads_verification_pending'], 2)
+        self.assertEqual(overview['uploads_retry_pending'], 1)
+        self.assertEqual(overview['uploads_outcome_unknown'], 1)
+        self.assertEqual(overview['batches_complete'], 0)
+        self.assertEqual(overview['tiles_complete'], 0)
+        self.assertIn('last yearly reconciliation', overview['note'])
+        self.assertNotIn('kind', entries[0])  # Statistics does not rewrite the run.
 
     def test_duplicate_unknown_and_low_space_receipts_fail_closed(self) -> None:
         saved = self.state()

@@ -1,5 +1,13 @@
 # Release history
 
+## 0.8.15 — 7 November 2026
+
+- Respect the selected Upload completion mode in yearly Automation, child configurations and Resume. Remove the implicit `wait_for_ee` override; the existing conservative mode remains available and the default when no mode is configured.
+- In Submit and continue, finish local browser transfers and reconcile EE once without waiting for cloud ingestion. Automatic recovery now targets confirmed failures or unsubmitted outputs, with up to two additional rounds. Active/uncertain submissions stay retained; fresh reconciliation and uploader guards prevent blind resubmission.
+- Preserve exact-input year-boundary checks. Pending years can advance only with unchanged local mosaic/source evidence; they remain incomplete. Missing inputs, unsafe lineage, processing failures and storage limits still block advancement.
+- Distinguish awaiting verification, retry and unknown outcome in Statistics and its pending-upload CSV. Explain that yearly backlog counts are checkpoint snapshots; Resume refreshes them and skips active/verified uploads. Preserve cumulative NASA histories and completed scientific checkpoints.
+- Keep cleanup eligibility unchanged: unverified mosaics remain on disk, and local transfers must finish before advancing. Add mode, retry, cleanup, Resume and Statistics regression coverage. Display v0.8.15 on Home and in the window title after updating and reopening.
+
 ## 0.8.14 — 7 November 2026
 
 - Add two additional automatic upload recovery rounds after the initial stage, with a 30-second delay between rounds, EE synchronization before and after each round, and independent checkpoint/log paths for each attempt. Stop requests and system/authentication failures remain actionable.

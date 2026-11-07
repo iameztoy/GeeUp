@@ -203,6 +203,10 @@ def yearly_automation_overview(saved: Mapping[str, Any], run_dir: Path) -> Dict[
     download_config = parent_config.get("download", {})
     parent_config["download"] = {**(download_config if isinstance(download_config, Mapping) else {}),
                                  "start_date": start_text, "end_date": end_text}
+    from swotflow.processing.upload_recovery import pending_upload_kind
+    deferred = [{**row, "kind": pending_upload_kind(row.get("status", ""))}
+                for row in saved.get("deferred_uploads", [])]
+    pending_counts = Counter(row["kind"] for row in deferred)
     return {"run_id": str(saved.get("run_id", run_dir.name)), "run_dir": str(run_dir),
             "start_date": start_text, "end_date": end_text, "tiles": tiles,
             "unique_tiles": len(tiles), "tiles_complete": completed_tiles,
@@ -212,9 +216,12 @@ def yearly_automation_overview(saved: Mapping[str, Any], run_dir: Path) -> Dict[
             "batches_pending": counts["pending"], "batches_remaining": len(batches) - counts["complete"],
             "status": status, "year_batches": batches,
             "batches_upload_pending": counts["upload_pending"],
-            "deferred_uploads": list(saved.get("deferred_uploads", [])),
+            "deferred_uploads": deferred,
+            "uploads_verification_pending": pending_counts["verification_pending"],
+            "uploads_retry_pending": pending_counts["retry_pending"],
+            "uploads_outcome_unknown": pending_counts["outcome_unknown"],
             "parent_campaign_id": update_campaign_id(parent_config),
-            "note": "A tile is complete only after all its yearly batches; a year is complete only across all selected tiles. Upload-pending years can allow later work but remain incomplete and retry on Resume. Input and pixel verification remain separate evidence."}
+            "note": "A tile is complete only after all its yearly batches; a year is complete only across all selected tiles. Upload-pending years can allow later work but remain incomplete. Pending counts describe the last yearly reconciliation; Resume refreshes them, skips active or verified uploads and retries eligible failures. Input and pixel verification remain separate evidence."}
 
 
 def read_yearly_automation_overview(config: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2401,7 +2408,10 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         metrics["Year-by-year years complete across all tiles"] = f"{yearly_automation['years_complete']}/{yearly_automation['years_total']}"
         metrics["Year-by-year pipeline status"] = yearly_automation["status"].replace("_", " ")
         metrics["Year-by-year batches with deferred uploads"] = str(yearly_automation["batches_upload_pending"])
-        metrics["Retained upload exceptions (not proof of corruption)"] = str(len(yearly_automation["deferred_uploads"]))
+        metrics["Retained uploads awaiting verification or recovery"] = str(len(yearly_automation["deferred_uploads"]))
+        metrics["Yearly checkpoint uploads awaiting EE verification"] = str(yearly_automation["uploads_verification_pending"])
+        metrics["Yearly checkpoint uploads awaiting retry"] = str(yearly_automation["uploads_retry_pending"])
+        metrics["Yearly checkpoint uploads with unknown outcome"] = str(yearly_automation["uploads_outcome_unknown"])
 
     return ProjectInsights(
         metrics=metrics,
@@ -2742,7 +2752,7 @@ def write_project_insights_snapshot(config: Mapping[str, Any], insights: Project
                    ["tile", "year", "start_date", "end_date", "status", "run_dir", "deferred_upload_count"],
                    insights.yearly_automation.get("year_batches", []))
     write_csv_rows(folder / "project_statistics_deferred_uploads.csv",
-                   ["asset_id", "local_file", "status", "last_error", "reason", "start_date", "end_date", "scan_id", "sha256"],
+                   ["asset_id", "local_file", "status", "kind", "last_error", "reason", "start_date", "end_date", "scan_id", "sha256"],
                    insights.yearly_automation.get("deferred_uploads", []))
 
     write_csv_rows(

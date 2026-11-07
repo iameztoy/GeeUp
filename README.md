@@ -1,5 +1,7 @@
 # SWOTFlow
 
+New in v0.8.15: yearly Automation respects **Upload completion mode**, including on Resume. **Submit and continue** waits for local transfers, then allows later years while EE ingestion remains pending; it no longer launches recovery just for an active task. Two recovery rounds remain available for failed/unsubmitted files. Statistics distinguishes pending verification, retry and unknown outcomes; cleanup and source-history safeguards remain intact. See [yearly Automation](YEARLY_AUTOMATION.md).
+
 New in v0.8.14: two automatic recovery rounds after the initial upload stage, with reconciliation and protection for active browser transfers. Verified yearly runs can continue with a retained **upload pending** exception list when all preferred inputs are accounted for in EE or intact local mosaics. These years remain incomplete in Statistics and retry on Resume; cleanup preserves unresolved outputs. See [upload recovery](UPLOAD_RECOVERY.md).
 
 New in v0.8.13: also recognize "Please provide an asset ID" and apply the same bounded pre-click Asset Name recovery introduced in v0.8.12. Both observed messages are covered by isolated Chrome tests.
@@ -16,7 +18,7 @@ New in v0.8.8: report **Stop after current step** as a resumable pause, with a r
 
 New in v0.8.7: fix Earth Engine uploads rejected by the 100-character asset-name limit. Oversized mosaic names omit the optional processing-range suffix in the cloud only; local filenames and full lineage remain intact. Reject invalid names before browser work, reduce redundant mosaic metadata rows, retain revision/checksum guards, and keep rejected naming attempts separate from current Statistics totals. See [upload naming and recovery](UPLOAD_RECOVERY.md).
 
-Current application version: **v0.8.13** (7 November 2026). The Home page and application window title display this version on the next normal launch.
+Current application version: **v0.8.15** (7 November 2026). The Home page and application window title display this version on the next normal launch.
 
 Fixed in v0.8.6: verified cleanup removes recorded raster sidecars; Automation Resume reuses checksum-verified intermediate files after raw cleanup; new mosaic names and upload metadata show the contributing processing-version range. Existing mosaic names remain usable. See [resume, cleanup and version ranges](RESUME_AND_LINEAGE.md). The existing EE Consolidation priority fix, yearly scheduling, NASA histories and Statistics remain in place.
 

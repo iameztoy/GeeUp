@@ -40,7 +40,7 @@ class RecoveryRoundTests(unittest.TestCase):
                 status = 'failed'
             return engine.AutomationStageResult(s.run_id, tile, stage, status, config_path=str(path))
 
-        with mock.patch.object(engine, 'retryable_upload_candidates', side_effect=lambda *a: list(unresolved)), \
+        with mock.patch.object(engine, 'retryable_upload_candidates', side_effect=lambda *a, **kw: list(unresolved)), \
              mock.patch.object(engine, 'execute_command_result', side_effect=execute), \
              mock.patch.object(recovery.time, 'sleep') as sleep:
             results = recovery.recover_uploads(state, cfg, Path('python'), stop_event=stop)
@@ -157,7 +157,7 @@ class YearContinuationTests(unittest.TestCase):
             overview = yearly_automation_overview(saved, state.run_dir)
             self.assertEqual(overview['batches_complete'], 5)
             self.assertEqual(overview['batches_upload_pending'], 1)
-            self.assertEqual(overview['deferred_uploads'], [entry])
+            self.assertEqual(overview['deferred_uploads'], [{**entry, 'kind': 'retry_pending'}])
             self.assertEqual(overview['tiles_complete'], 1)
             self.assertEqual(overview['status'], 'upload_pending')
             resumed = engine.load_automation_run_state(state.run_dir)

@@ -97,3 +97,19 @@ Cleanup runs only when enabled and keeps its existing safeguards: intact downstr
 To continue an existing run, close the idle older app, reopen v0.8.14, open the same project and choose Automation → Resume Run. Keep Fail fast off for per-file continuation; enable Cleanup if desired before Resume. Do not create a new project or delete pending mosaics. Resume checks retained evidence first, so uploads may not begin immediately. Authenticate when a later year's downloads require it.
 
 Validation uses isolated fixtures and browser DOM tests. Production uploads are not started by the release tests; their recovery must still be observed in the real run.
+
+## Selected yearly upload mode — v0.8.15
+
+Yearly Automation no longer forces conservative upload completion. Submit and
+continue drains local transfers, reconciles status and allows the next year when
+exact input accounting permits it. Healthy pending ingestion is not an error and
+does not consume automatic recovery rounds. Only confirmed failed or unsubmitted
+files trigger the two additional rounds in this mode; synchronization runs before
+any retry. Unknown outcomes stay retained for reconciliation, never blind retry.
+The existing browser-transfer and late-acknowledgement guards still apply.
+
+Resume reads the current selected mode without invalidating scientific checkpoints.
+Changing the selection does not retune an already-running worker. Unverified
+mosaics cannot be deleted by cleanup in either mode. A legacy configuration without
+verification evidence may still stop at the input-accounting boundary; the mode
+controls cloud waiting, not whether missing lineage can be ignored.

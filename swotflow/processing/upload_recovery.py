@@ -8,6 +8,18 @@ from typing import Any
 
 RECOVERY_ROUNDS = 2
 RECOVERY_DELAY_SECONDS = 30
+CONFIRMED_RETRY_STATUSES = frozenset({"ERROR", "FAILED", "PLANNED_UPLOAD"})
+VERIFICATION_PENDING_STATUSES = frozenset({"SUBMITTED", "SUBMITTED_PENDING_VERIFICATION", "READY", "RUNNING"})
+
+
+def pending_upload_kind(status: str) -> str:
+    """A submitted task is not a failed file; uncertain outcomes need reconciliation."""
+    status = str(status).strip().upper()
+    if status in VERIFICATION_PENDING_STATUSES:
+        return "verification_pending"
+    if status in CONFIRMED_RETRY_STATUSES:
+        return "retry_pending"
+    return "outcome_unknown"
 
 
 def recover_uploads(state: Any, config: Any, gdal_python: Path,
@@ -16,6 +28,15 @@ def recover_uploads(state: Any, config: Any, gdal_python: Path,
     from swotflow.processing import automation as engine
     if not config.include_upload or state.stopped:
         return []
+    # Throughput mode must not open another uploader merely because ingestion
+    # is still running. Reconcile first, then recover only confirmed failures or
+    # unsubmitted files. Unknown outcomes remain retained, never blindly retried.
+    throughput = str(config.base_config.get("upload", {}).get("completion_mode", "")).strip().lower() == "submit_and_continue"
+    statuses = CONFIRMED_RETRY_STATUSES if throughput else None
+
+    def candidates() -> list[Path]:
+        return engine.retryable_upload_candidates(config.base_config, config.utm_tiles, statuses=statuses)
+
     results = []
     attempt_dir = state.run_dir / "upload_repair" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
@@ -37,7 +58,7 @@ def recover_uploads(state: Any, config: Any, gdal_python: Path,
         return result
 
     for number in range(1, RECOVERY_ROUNDS + 1):
-        if stopped() or not engine.retryable_upload_candidates(config.base_config, config.utm_tiles):
+        if stopped() or not candidates():
             break
         if number > 1:
             if stop_event is not None:
@@ -51,7 +72,7 @@ def recover_uploads(state: Any, config: Any, gdal_python: Path,
         # Never resubmit based solely on a stale error, including a timed-out monitor.
         if execute("ee_sync", path, number).status == "failed" or stopped():
             break
-        if not engine.retryable_upload_candidates(config.base_config, config.utm_tiles):
+        if not candidates():
             break
         upload = execute("upload", path, number)
         if stopped():
@@ -100,9 +121,15 @@ def retained_upload_exceptions(report: dict, store: Any, config: dict) -> list[d
         if any(pending[n] != c or n in represented for n, c in sources.items()) or not artifact_current(proof):
             return []
         represented.update(sources)
-        entries.append({"asset_id": row["asset_id"], "local_file": str(path),
+        kind = pending_upload_kind(row["final_status"])
+        reason = {
+            "verification_pending": "Submission awaiting EE verification; not an upload failure. Local mosaic matches its processing receipt.",
+            "retry_pending": "Upload unresolved; local mosaic matches its processing receipt. Corruption is not established.",
+            "outcome_unknown": "Submission outcome unknown; reconcile before retry. Local mosaic matches its processing receipt.",
+        }[kind]
+        entries.append({"asset_id": row["asset_id"], "local_file": str(path), "kind": kind,
                         "status": row["final_status"], "last_error": row.get("error_message", ""),
                         "sha256": proof["sha256"], "sources": sources,
-                        "reason": "Upload unresolved; local mosaic matches its processing receipt. Corruption is not established.",
+                        "reason": reason,
                         "start_date": start, "end_date": end, "scan_id": report["scan_id"]})
     return entries if represented == pending else []

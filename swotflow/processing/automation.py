@@ -478,15 +478,17 @@ def upload_row_tiles(row: Mapping[str, Any]) -> list[str]:
 def retryable_upload_candidates(
     base_config: Mapping[str, Any],
     selected_tiles: Iterable[str],
+    *, statuses: Iterable[str] | None = None,
 ) -> list[Path]:
-    """Return local mosaics whose upload is unresolved and safe to retry."""
+    """Return scoped unresolved mosaics; the uploader still reconciles before retry."""
+    allowed = RETRYABLE_UPLOAD_STATUSES if statuses is None else set(statuses)
     wanted = set(normalize_utm_tiles(list(selected_tiles)))
     from swotflow.core.temporal import acquisition_window, within_acquisition_window
     start, end = acquisition_window(base_config)
     candidates: list[Path] = []
     for row in read_project_rows(upload_report_path(base_config), "upload_report"):
         status = str(row.get("final_status", "") or "").strip().upper()
-        if status not in RETRYABLE_UPLOAD_STATUSES:
+        if status not in allowed:
             continue
         local_file = Path(str(row.get("local_file", "") or ""))
         if not local_file.is_file() or local_file.suffix.lower() not in {".tif", ".tiff"}:
@@ -1906,7 +1908,7 @@ def reconcile_verified_run(state: AutomationRunState) -> None:
                 if deferred:
                     state.deferred_uploads.extend(deferred)
                     status = "warning"
-                    message = (f"{len(deferred)} upload(s) retained for later recovery; exact preferred inputs "
+                    message = (f"{len(deferred)} upload(s) retained awaiting verification or recovery; exact preferred inputs "
                                f"are represented by verified EE revisions or unchanged local mosaics. "
                                f"EE completeness is NOT achieved. Later years may continue. {path}")
                 else:

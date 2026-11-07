@@ -32,3 +32,18 @@ file paths, asset IDs, last errors and dates in
 in the run JSON and verification reports. These are upload exceptions, not missing
 NASA acquisitions or proof of file corruption. Resume/reconciliation refreshes
 the current list after recovery; historical failed attempts remain in upload events.
+
+## Yearly throughput checkpoints — v0.8.15
+
+Submit and continue may leave a year `upload_pending` while later years run.
+The pending-upload CSV includes `kind`: `verification_pending` for submitted or
+active tasks, `retry_pending` for failed/unsubmitted outputs, and `outcome_unknown`
+for uncertain submissions. These are separate from completed years and verified
+source totals. An awaiting-verification task is not reported as file corruption.
+
+The yearly backlog is a snapshot of the last year-boundary reconciliation;
+refreshing Statistics alone does not poll EE or rewrite run checkpoints. An EE
+sync can update cumulative upload/source totals before the earlier yearly
+checkpoint is revisited. Resume reconciles that checkpoint and skips currently
+active or verified assets. Cleanup never subtracts retained filename/source
+history; local disk counts and historical processing counts remain distinct.

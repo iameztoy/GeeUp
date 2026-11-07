@@ -22,8 +22,8 @@ def yearly_config(parent: engine.AutomationConfig, start: str, end: str, tile: s
     base["download"].update(start_date=start, end_date=end, utm_tiles=[tile])
     base.setdefault("extract", {})["year_selection"] = "all"
     base.setdefault("automation", {}).update(yearly_batch=True, parent_run_id=parent.run_id)
-    if parent.include_upload:
-        base.setdefault("upload", {})["completion_mode"] = "wait_for_ee"
+    # Preserve the selected upload mode, including on Resume. Year-boundary
+    # accounting retains pending mosaics without certifying them as uploaded.
     return replace(parent, base_config=base, start_date=start, end_date=end,
                    process_by_year=False, refresh_cmr=True, utm_tiles=[tile],
                    run_id=f"{parent.run_id}_{tile}_{start[:4]}",
@@ -250,9 +250,9 @@ def run_yearly_automation(
             if warning not in state.warnings:
                 state.warnings.append(warning)
         if batch["status"] == "upload_pending":
-            message = (f"{tile} / {batch['year']}: {len(child.deferred_uploads)} retained upload exception(s). "
+            message = (f"{tile} / {batch['year']}: {len(child.deferred_uploads)} retained upload(s) awaiting verification or recovery. "
                        "Continuing to later years; this year remains incomplete in EE. "
-                       "Resume Run will retry these files; cleanup cannot remove unverified mosaics.")
+                       "Resume Run reconciles pending tasks and retries eligible failures; cleanup cannot remove unverified mosaics.")
             stamp = engine.now_text()
             engine.append_stage_result(state, engine.AutomationStageResult(
                 state.run_id, tile, "year_gate", "warning", stamp, stamp, message=message,

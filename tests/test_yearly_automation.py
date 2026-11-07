@@ -73,14 +73,14 @@ class YearlyAutomationTests(unittest.TestCase):
             cfg.process_by_year = False
             self.assertEqual(auto.automation_periods(cfg), [('2023-07-01','2025-02-10')])
 
-    def test_tile_first_order_shared_manifests_and_explicit_upload_wait(self):
+    def test_tile_first_order_shared_manifests_and_selected_upload_mode(self):
         with TemporaryDirectory() as tmp:
             cfg = config_at(Path(tmp), include_upload=True)
             child = yearly_config(cfg, '2024-01-01', '2024-12-31', 'UTM30R')
             self.assertEqual(child.utm_tiles, ['UTM30R'])
             self.assertEqual(child.base_config['download']['manifest_csv'], cfg.base_config['download']['manifest_csv'])
             self.assertEqual(child.base_config['processing']['raw_downloads'], cfg.base_config['processing']['raw_downloads'])
-            self.assertEqual(child.base_config['upload']['completion_mode'], 'wait_for_ee')
+            self.assertEqual(child.base_config['upload']['completion_mode'], 'submit_and_continue')
             self.assertEqual(child.base_config['extract']['year_selection'], 'all')
             self.assertEqual(cfg.base_config['upload']['completion_mode'], 'submit_and_continue')
             calls = []

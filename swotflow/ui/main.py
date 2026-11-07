@@ -1075,7 +1075,7 @@ class LauncherApp:
         ).grid(row=2, column=1, columnspan=3, sticky="w", padx=(8, 14), pady=(8, 0))
         ttk.Label(
             settings,
-            text="Used only when Include upload is enabled.",
+            text="Also applies to yearly batches. Pending uploads stay retained.",
             foreground="#555555",
         ).grid(row=2, column=4, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Button(
@@ -5780,7 +5780,7 @@ class LauncherApp:
         if state.unresolved_upload_count:
             pending_notice = (
                 f" Upload verification incomplete: {state.unresolved_upload_count} local mosaic(s) "
-                f"remain retryable across {len(state.unresolved_upload_tiles)} tile(s) "
+                f"await verification or recovery across {len(state.unresolved_upload_tiles)} tile(s) "
                 f"({self.compact_tile_list(state.unresolved_upload_tiles)})."
             )
         elif not state.stopped and not failed and progress_percent < 99.999:
@@ -5804,10 +5804,10 @@ class LauncherApp:
                 f"Failed stages: {failed}\n"
                 f"Warning stages: {warnings}\n"
                 + (f"Yearly-run errors: {len(run_errors)}\n" if state.config.process_by_year else "")
-                + (f"Retained upload exceptions: {len(state.deferred_uploads)} (Resume retries these; later years may proceed).\n"
+                + (f"Retained uploads: {len(state.deferred_uploads)} (awaiting verification or recovery; Resume reconciles).\n"
                    if state.deferred_uploads else "")
                 +
-                f"Unverified retryable mosaics: {state.unresolved_upload_count}\n"
+                f"Mosaics awaiting verification or recovery: {state.unresolved_upload_count}\n"
                 f"Affected tiles: {self.compact_tile_list(state.unresolved_upload_tiles)}\n"
                 f"{first_failure.strip()}\n"
                 f"Run CSV:\n{state.csv_path}\n"

@@ -71,14 +71,27 @@ Consolidation remains available for combining the uploaded outputs separately.
 
 ## Uploads, cleanup and storage
 
-When uploading in this mode, Automation waits for Earth Engine confirmation
-(`wait_for_ee`) before advancing. This override applies to the annual run and
-does not change the saved manual upload setting. From v0.8.14, two automatic
-recovery rounds follow the initial upload stage. After those rounds, an exact-input
-check can classify a year as **upload pending** if every missing upload has an
-unchanged local mosaic and all remaining inputs are accounted for in EE. That
-explicit exception allows later years to run, even with Continue on tile failure
-off, while keeping the earlier year incomplete and retryable on Resume.
+From v0.8.15, yearly Automation uses the **Upload completion mode** selected
+in Automation/Upload; it does not override that choice. Start and Resume both
+apply the selected mode to subsequent workers. A running worker is unchanged.
+
+- **Wait for EE verification before next tile** (`wait_for_ee`) keeps the
+  existing cloud-task wait and bounded recovery behavior.
+- **Submit and continue; verify later** (`submit_and_continue`) finishes the
+  local browser transfers, then reconciles once without waiting for EE ingestion
+  to finish. It can advance to the next year while acknowledged tasks run in EE.
+  Pending verification is not counted as a failed upload. Two additional recovery
+  rounds are reserved for confirmed failures or unsubmitted files; active and
+  uncertain submissions are retained instead of being blindly retried.
+
+Both modes retain the exact-input boundary check. Verified workflow can classify
+a year as **upload pending** only if each missing upload has an unchanged local
+mosaic and all remaining inputs are accounted for in EE. That allows later years
+to run, even with Continue on tile failure off, while the earlier year stays
+incomplete. Resume refreshes EE status, skips verified/active submissions and
+retries eligible failures. Legacy runs without verification receipts retain their
+conservative input-accounting gate; selecting throughput does not manufacture
+missing lineage or bypass that gate.
 
 Missing inputs, failed processing, changed local bytes, uncertain source lineage
 or a failed batch-boundary check still prevent later years of the affected tile
@@ -161,7 +174,11 @@ Verified upload reconciliation automatically renews aged catalogue metadata in v
 
 `upload_pending` is distinct from `complete`, `incomplete`, and a user pause.
 The parent and child checkpoints retain the pending files, asset IDs, exact source
-checksums and last upload errors. Statistics exposes deferred batch/file counts
-and a pending-upload CSV. Completed years stay reusable on Resume; deferred years
+checksums and last upload errors. Statistics distinguishes **verification pending**,
+**retry pending** and **unknown outcome** in its counts and pending-upload CSV.
+These yearly backlog counts describe the last yearly reconciliation, not a live
+EE task poll. Current upload/source totals use the cumulative upload records;
+Resume refreshes a pending year's boundary checkpoint. Neither pending submissions
+nor their retained bytes count as completed EE coverage. Completed years stay reusable on Resume; deferred years
 are revisited without calling them complete. Recovery rounds have separate logs
 and checkpoint every stage so interruption preserves earlier attempts.
