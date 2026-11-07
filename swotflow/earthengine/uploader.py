@@ -93,6 +93,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 import swotflow.earthengine.selectors as ee_selectors
 from swotflow.earthengine.upload_history import preserve_verified_submission, restore_verified_submissions
+from swotflow.earthengine.browser_uploads import (
+    BROWSER_UPLOAD_ROWS_SCRIPT, BrowserUploadRow, current_transfer_failures, normalize_browser_upload_rows,
+)
 from swotflow.core.metadata import (
     DEFAULT_METADATA_EXTRA_PROPERTIES,
     ParsedMetadata,
@@ -1293,6 +1296,7 @@ class EarthEngineUIUploader:
         self.ee_client: Any = None
         self.browser_transfer_backlog_stalled = False
         self._current_dialog_asset_trailer = ""
+        self.browser_upload_baselines: Dict[str, set[str] | None] = {}
 
         self.config.artifacts.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.config.artifacts.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -1779,6 +1783,48 @@ class EarthEngineUIUploader:
             and asset_id not in self.ee_existing_asset_ids
         }
 
+    def read_browser_upload_rows(self, *, expand_failures: bool = False) -> list[BrowserUploadRow] | None:
+        """Read local cards, optionally opening failed details to bind the exact asset."""
+        if self.driver is None:
+            return None
+        try:
+            return normalize_browser_upload_rows(self.execute_script(BROWSER_UPLOAD_ROWS_SCRIPT, expand_failures))
+        except WebDriverException as exc:
+            raise_if_invalid_browser_session(exc)
+            self.logger.warning("Could not inspect local browser transfers: %s", exc)
+            return None
+
+    def remember_browser_upload_baseline(self, asset_id: str) -> None:
+        """Remember pre-existing cards immediately before this attempt is clicked."""
+        rows = self.read_browser_upload_rows()
+        self.browser_upload_baselines[asset_id] = (
+            {row.element_id for row in rows}
+            if rows is not None else None
+        )
+
+    def reconcile_browser_upload_failures(self) -> int:
+        """Release confirmed failed transfers from backpressure; do not resubmit."""
+        pending = self.pending_browser_upload_asset_ids()
+        if not pending:
+            return 0
+        rows = self.read_browser_upload_rows(expand_failures=True)
+        if rows is None:
+            return 0
+        failures = current_transfer_failures(rows, pending, self.browser_upload_baselines)
+        for asset_id, message in failures.items():
+            item = self.tracked_items[asset_id]
+            current = self.report.rows.get(asset_id, {})
+            self.report.upsert(self.make_report_row(
+                item=item, submit_time=str(current.get("submit_time", "") or ""),
+                detected_task_name="", final_status="ERROR",
+                error_message="Browser transfer failed before EE ingestion: " + message,
+            ))
+            self.logger.warning("Browser upload failed for %s; preserving its mosaic for deferred repair: %s",
+                                asset_id, message)
+        if failures and self.config.upload.fail_fast:
+            raise RuntimeError("Fail-fast stopping after a confirmed browser transfer failure.")
+        return len(failures)
+
     def wait_for_browser_upload_capacity(self, *, target_pending: int) -> bool:
         """Wait until browser-side transfers fall to the requested safe count.
 
@@ -1817,6 +1863,9 @@ class EarthEngineUIUploader:
                     "Could not refresh Earth Engine operations while throttling browser uploads: %s",
                     exc,
                 )
+            # Remote acknowledgements take precedence over older browser cards.
+            # A failure before ingestion never appears in the EE operations API.
+            self.reconcile_browser_upload_failures()
             pending = self.pending_browser_upload_asset_ids()
             self.logger.info(
                 "Browser-transfer queue: %s pending local transfer(s); cap %s.",
@@ -2596,6 +2645,7 @@ class EarthEngineUIUploader:
                     from swotflow.verification.pipeline import artifact_current
                     if not artifact_current(proof):
                         raise ValueError("Local mosaic changed while preparing the upload")
+                self.remember_browser_upload_baseline(item.asset_id)
                 outcome = self.submit_upload_dialog(item)
                 if self.config.verified_workflow:
                     store.record_ingestion({**item.ingestion_revision, "phase": "submitted", "task_id": outcome.task_name})

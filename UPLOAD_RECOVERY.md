@@ -60,3 +60,19 @@ Planned, dry-run and active tasks are not counted as upload failures.
 Validation includes maintained offline regressions and an isolated upload-plan
 check against retained local mosaics. A successful new live upload must still be
 confirmed by the actual EE task/inventory when the user resumes.
+
+
+## Browser transfer errors — v0.8.10
+
+An upload has two phases: Chrome transfers the local file, then Earth Engine creates an ingestion operation. A browser-side **File upload unsuccessful / HTTP 400** can happen before an operation exists. Checking the operations API alone cannot detect that failure.
+
+The uploader now reads the local upload cards in the task pane as well as remote operations. It expands only failed cards when their destination details are collapsed. A newly observed failed card for the exact current upload is recorded as ERROR and released from the transfer queue. Existing cards are remembered immediately before submission so a prior failure cannot poison a retry. Unknown or ambiguous outcomes still use the bounded transfer wait; they are not assumed failed merely because an asset is absent.
+
+- **Fail fast on first error / fail_fast = false:** continue with other files after a confirmed file failure. This is the default.
+- **Fail fast on first error / fail_fast = true:** stop after recording a confirmed failure, including one detected during transfer monitoring.
+- **Retry attempts:** applies to immediate upload-dialog/UI failures; it is not an unlimited retry of later network transfers.
+- **Automation deferred repair:** after the current tile/year work and reconciliation, retry unresolved local outputs once, checking current EE assets and operations first. Successful outputs are skipped. If repair remains incomplete, keep the files and block later years of that tile until Resume resolves the required inputs.
+
+An HTTP 400 message alone does not establish the underlying network/server cause or prove that a GeoTIFF is defective. A successful retry of the same verified local file establishes recovery of that attempt. Errors and later successes remain in upload event history; Statistics reflects the current status separately from historical attempts.
+
+The fix does not cancel or restart a running uploader. A worker already in memory uses its original code until it exits; subsequent uploader processes use the updated files. Restart the GUI between runs to load the new displayed version. No change to projections, pixel values, processing-version selection or deletion safeguards is required.

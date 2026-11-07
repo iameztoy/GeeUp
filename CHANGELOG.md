@@ -1,5 +1,13 @@
 # Release history
 
+## 0.8.10 — 7 November 2026
+
+- Detect failed local browser transfers in the Earth Engine task pane, including HTTP 400 failures that never produce an ingestion operation. Open only failed cards' details when needed to identify the exact destination.
+- Remove confirmed failed transfers from the browser queue so other files continue when fail-fast is disabled. Record the failure and retain the mosaic for normal deferred repair; never resubmit within the monitor.
+- Bind failures to newly created upload cards using a pre-submit element baseline. Ignore old failure cards from earlier attempts, unknown baselines and ambiguous active transfers; remote operations/assets take precedence.
+- Preserve the existing bounded wait for transfers whose outcome is unknown, inventory/operation reconciliation before retries, yearly completeness gates and local cleanup safeguards.
+- Add regression tests, including an isolated Chrome fixture for the observed shadow-DOM layout. Keep current production uploads, imagery, scientific settings and histories unchanged; display v0.8.10 on Home and in the title.
+
 ## 0.8.9 — 6 November 2026
 
 - Correct Statistics so empty JSON lists do not become phantom excluded source files or lineage rows.
