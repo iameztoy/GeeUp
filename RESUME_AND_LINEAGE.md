@@ -1,4 +1,4 @@
-# Resume, cleanup and processing versions — v0.8.16
+# Resume, cleanup and processing versions — v0.8.17
 
 ## Resume after a shutdown
 
@@ -55,3 +55,10 @@ a successful mosaic, the upstream checkpoint requires current full-pixel/source
 proof or confirmed ingestion of that exact local revision and source history,
 never filename/asset presence alone. The latter is operational reuse, not pixel certification.
 A changed local mosaic still invalidates reuse, even if a cloud copy exists.
+
+
+From v0.8.17, an older successful confirmed-ingestion cleanup (including a
+zero-file result) is revisited once after updating. This only updates cleanup
+eligibility; it does not invalidate completed scientific or upload checkpoints.
+Rejected overlength-name attempts remain in history and no longer conflict with
+their verified valid destination. Real ambiguous destinations still retain files.

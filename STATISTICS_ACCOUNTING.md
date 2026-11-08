@@ -59,3 +59,11 @@ failed files stay local and remain in their existing backlog categories. Cleanup
 stage JSON/CSV records its policy, deleted-file count and bytes. Refresh Statistics
 after manual cleanup; selecting a policy alone does not change processing totals.
 See [mosaic cleanup and Resume](MOSAIC_CLEANUP.md).
+
+
+v0.8.17 aligns cleanup with the existing Statistics exclusion for
+`REPLACED_INVALID_ASSET_ID`: archived rejected names remain historical records,
+not extra active uploads. Removing an eligible mosaic decreases disk counts, not
+uploaded totals or source history. A one-time cleanup-rule recheck on Resume adds
+a cleanup attempt to the run record without counting the imagery again. Refresh
+Statistics to update a previously saved snapshot after cleanup.

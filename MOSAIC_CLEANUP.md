@@ -1,4 +1,4 @@
-# Optional mosaic cleanup — v0.8.16
+# Optional mosaic cleanup — v0.8.17
 
 In Automation, these controls are independent:
 
@@ -20,6 +20,12 @@ To enable removal for a continuing project:
 3. Choose **Resume Run**. Eligible cleanup in completed years is revisited without repeating verified scientific work. For manual review while Automation is idle, use **Cleanup → Sync EE Assets + Preview Cleanup**, inspect the candidates, then delete the chosen rows.
 
 Selecting a checkbox or installing a release alone deletes nothing. Changing a preference during execution affects the next Start/Resume; a running worker retains its captured settings. Old assets without sufficient receipts remain for review, even if visible in EE. Cleanup only removes local files and proven raster sidecars, never EE assets.
+
+## Archived rejected names and the v0.8.17 correction
+
+Earlier upload retries sometimes retain two records for one local file: the rejected overlength asset name, marked `REPLACED_INVALID_ASSET_ID`, and its valid uploaded destination. v0.8.16 mistakenly treated these as conflicting current uploads and retained the mosaic. v0.8.17 keeps the rejected attempt as history but excludes it from cleanup ownership, as Statistics already does. A second genuinely active, failed or uncertain destination still blocks deletion; the archive alone never proves successful ingestion.
+
+After updating at a normal pause, keep **Remove uploaded mosaics** and **Confirmed EE ingestion + matching provenance** selected and Resume. The new cleanup-rule version causes one revisit of earlier successful cleanup attempts, including zero-file results in completed years. Only cleanup repeats; completed downloads, mosaicking and uploads are not invalidated. The recorded rule version prevents that same migration from repeating on subsequent Resumes. Existing hash, sidecar, inventory and provenance checks still apply. Updating while a worker is active is unnecessary and should be avoided.
 
 ## Resume and Statistics
 

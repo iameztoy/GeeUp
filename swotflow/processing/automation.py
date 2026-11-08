@@ -77,6 +77,7 @@ AUTOMATION_RUN_COLUMNS = [
     "deleted_files",
     "deleted_bytes",
     "cleanup_policy",
+    "cleanup_rule_version",
     "period_start",
     "period_end",
 ]
@@ -182,6 +183,7 @@ class AutomationStageResult:
     period_start: str = ""
     period_end: str = ""
     cleanup_policy: str = ""
+    cleanup_rule_version: int = 0
 
 
 @dataclass
@@ -1333,6 +1335,7 @@ def _stage_result_from_mapping(data: Mapping[str, Any]) -> AutomationStageResult
         deleted_files=_coerce_int(data.get("deleted_files")),
         deleted_bytes=_coerce_int(data.get("deleted_bytes")),
         cleanup_policy=str(data.get("cleanup_policy", "") or ""),
+        cleanup_rule_version=_coerce_int(data.get("cleanup_rule_version")),
         period_start=str(data.get("period_start", "") or ""),
         period_end=str(data.get("period_end", "") or ""),
     )
@@ -1419,14 +1422,19 @@ def completed_stage_keys(state: AutomationRunState) -> set[tuple[str, str]]:
 
 
 def cleanup_due_on_resume(state: AutomationRunState, result: AutomationStageResult) -> bool:
-    """Retry disabled/interrupted cleanup or a newly selected mosaic policy."""
-    from swotflow.verification.retention import mosaic_cleanup_policy, mosaic_cleanup_enabled
+    """Retry disabled/interrupted cleanup or a changed mosaic policy/rule."""
+    from swotflow.verification.retention import (
+        mosaic_cleanup_policy, mosaic_cleanup_enabled, CONFIRMED_INGESTION,
+        INGESTION_CLEANUP_RULE_VERSION)
     enabled = (mosaic_cleanup_enabled(state.config.base_config, legacy_enabled=state.config.cleanup_enabled)
                if result.stage == "mosaic_cleanup" else state.config.cleanup_enabled)
     policy_changed = (result.stage == "mosaic_cleanup" and
                       (result.cleanup_policy or "full_pixels") != mosaic_cleanup_policy(state.config.base_config))
+    rule_changed = (result.stage == "mosaic_cleanup" and result.status == "success"
+                    and mosaic_cleanup_policy(state.config.base_config) == CONFIRMED_INGESTION
+                    and result.cleanup_rule_version < INGESTION_CLEANUP_RULE_VERSION)
     return (enabled and result.stage.endswith("_cleanup")
-            and (policy_changed or result.status in {"warning", "failed"}
+            and (policy_changed or rule_changed or result.status in {"warning", "failed"}
                  or (result.status == "skipped" and "Cleanup disabled" in result.message)))
 
 
@@ -1509,8 +1517,10 @@ def execute_cleanup_result(
     deleted, bytes_deleted, errors = cleanup_stage(tile_config, tile, cleanup_stage_name)
     status = "success" if not errors else "warning"
     scope = "global verified mosaic sweep" if stage == "mosaic_cleanup" else f"{tile} {cleanup_stage_name}"
-    from swotflow.verification.retention import mosaic_cleanup_policy
+    from swotflow.verification.retention import (
+        mosaic_cleanup_policy, CONFIRMED_INGESTION, INGESTION_CLEANUP_RULE_VERSION)
     policy = mosaic_cleanup_policy(tile_config) if stage == "mosaic_cleanup" else ""
+    rule_version = INGESTION_CLEANUP_RULE_VERSION if policy == CONFIRMED_INGESTION else 0
     message = f"{scope}: deleted {deleted} file(s), {format_bytes(bytes_deleted)}."
     if policy:
         message += f" Mosaic cleanup policy: {policy}."
@@ -1527,6 +1537,7 @@ def execute_cleanup_result(
         deleted_files=deleted,
         deleted_bytes=bytes_deleted,
         cleanup_policy=policy,
+        cleanup_rule_version=rule_version,
     )
 
 

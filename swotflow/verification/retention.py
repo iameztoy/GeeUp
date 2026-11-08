@@ -4,6 +4,8 @@ from typing import Any, Mapping
 
 FULL_PIXELS = "full_pixels"
 CONFIRMED_INGESTION = "confirmed_ingestion"
+# Version only the cleanup eligibility rule; never invalidate scientific checkpoints.
+INGESTION_CLEANUP_RULE_VERSION = 1
 POLICY_LABELS = {
     "Full pixel verification (strict)": FULL_PIXELS,
     "Confirmed EE ingestion + matching provenance": CONFIRMED_INGESTION,
@@ -56,6 +58,7 @@ def current_cleanup_evidence(logs: Path, collection: str, policy: str,
     from swotflow.catalog.history import recent
     from swotflow.consolidation.register import default_path
     from swotflow.project.database import read_project_rows, database_path_for
+    from swotflow.core.metadata import REPLACED_INVALID_ASSET_ID_STATUS
     paths = {p for p in (logs.iterdir() if logs.exists() else []) if p.is_file() and
              (p.suffix in {".sqlite3", ".db", ".csv", ".json"} or p.name.endswith(("-wal", "-shm")))}
     paths.add(logs.parent / "project.yaml")
@@ -75,6 +78,11 @@ def current_cleanup_evidence(logs: Path, collection: str, policy: str,
     uploads: dict[str, dict] = {}
     if report_path:
         for row in read_project_rows(Path(report_path), "upload_report"):
+            # The uploader archives rejected overlength names only after ruling
+            # out an existing asset/task. Preserve that history, but apply the
+            # same current-row exclusion as Statistics. Real conflicts remain.
+            if row.get("final_status") == REPLACED_INVALID_ASSET_ID_STATUS:
+                continue
             if row.get("local_file"):
                 path = str(Path(row["local_file"]).resolve())
                 uploads[path] = {} if path in uploads else row  # Ambiguous destinations retain the file.

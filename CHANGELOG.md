@@ -1,5 +1,12 @@
 # Release history
 
+## 0.8.17 — 8 November 2026
+
+- Fix confirmed-ingestion cleanup retaining verified mosaics when their upload history also contains a rejected overlength asset name. Exclude only `REPLACED_INVALID_ASSET_ID` history from current cleanup ownership, matching Statistics; preserve all archived attempts and their errors. Genuine conflicting destinations, pending/failed uploads, changed bytes and mismatched provenance remain protected.
+- Version the cleanup eligibility rule in stage JSON/CSV. Resume revisits successful cleanup attempts made with the older rule once, even when they deleted zero files, without invalidating completed download, extraction, mosaic or upload checkpoints. Apply this to ordinary and yearly Automation; disabled cleanup and the strict pixel-verification policy remain unchanged.
+- Test real fixture deletion, retained history/Statistics, cache invalidation after status changes, ambiguous destinations and repeated Resume. The read-only check of all 81 retained 2023 project mosaics resolves their metadata conflict; actual removal still requires the normal current-inventory and local-byte checks.
+- Keep the active local application and ongoing run unchanged while publishing this correction. Update after a normal pause/completion, keep **Remove uploaded mosaics → Confirmed EE ingestion + matching provenance** enabled, and Resume. Display v0.8.17 on Home and in the title after updating/reopening.
+
 ## 0.8.16 — 8 November 2026
 
 - Separate **Clean downloaded and extracted files** from the opt-in **Remove uploaded mosaics** control in Automation. Share the mosaic setting with Cleanup and apply the same eligibility rules in ordinary and calendar-year runs.

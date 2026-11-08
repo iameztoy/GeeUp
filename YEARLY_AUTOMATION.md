@@ -164,6 +164,12 @@ This option reduces the amount of time-range data awaiting downstream processing
 It does not itself establish that historical gaps or shifts are repaired, or
 replace a representative end-to-end acceptance pilot before a large rebuild.
 
+From v0.8.17, Resume also revisits successful mosaic cleanup recorded under the
+older confirmed-ingestion rule once. This recovers files retained because of
+archived rejected asset names, without repeating completed processing or upload
+stages. The cleanup-rule version is retained in stage JSON/CSV; it does not mark
+a completed year incomplete or enable a disabled cleanup option.
+
 ## Upload concurrency on resume
 
 In **Upload → Max pending browser uploads**, choose the number of simultaneous local browser transfers (for example 1 or 2). This is separate from batch size and the limit on Earth Engine ingestion tasks. Start/Resume reads the current setting, including when it loads a saved run. Changing this throughput setting alone does not invalidate completed scientific checkpoints. Already-verified uploads are reconciled and skipped.

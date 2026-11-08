@@ -9,7 +9,7 @@ from unittest import mock
 from swotflow.processing import automation as auto
 from swotflow.project.insights import CleanupCandidate, collect_project_insights, delete_cleanup_candidates
 from swotflow.verification import pipeline as p
-from swotflow.verification.retention import mosaic_cleanup_policy, CONFIRMED_INGESTION
+from swotflow.verification.retention import mosaic_cleanup_policy, CONFIRMED_INGESTION, INGESTION_CLEANUP_RULE_VERSION
 from swotflow.verification.resume import verified_resume_stages
 from tests import test_pipeline_verification as fixtures
 from tests import test_resume_cleanup_lineage as resume_fixtures
@@ -37,6 +37,14 @@ class IngestionCleanupTests(unittest.TestCase):
             'local_file': str(self.mosaic), 'final_status': status, 'source_utm_tiles': '["UTM30R"]'}],
             dataset='upload_report', export_csv=export_csv)
 
+    def archived_name(self, status='REPLACED_INVALID_ASSET_ID'):
+        from swotflow.project.database import upsert_project_rows
+        row = {'asset_id': self.inventory['collection'] + '/' + 'x' * 101,
+               'local_file': str(self.mosaic), 'final_status': status,
+               'error_message': 'Rejected overlength name retained as history'}
+        upsert_project_rows(Path(self.base['artifacts']['report_csv']), [row],
+                            dataset='upload_report', export_csv=False)
+
     def candidates(self):
         return p.cleanup_guards(self.base, [CleanupCandidate('mosaic', self.mosaic, 'uploaded', 'fixture')])
 
@@ -51,6 +59,7 @@ class IngestionCleanupTests(unittest.TestCase):
         self.assertEqual(self.store.cloud_receipts(), {})
 
     def test_confirmed_mosaic_deleted_without_erasing_receipts_or_redownloading_sources(self):
+        self.archived_name()
         retained = self.store.artifact(self.mosaic)
         candidates = self.candidates()
         self.assertEqual(delete_cleanup_candidates(candidates)[::2], (1, []))
@@ -69,6 +78,7 @@ class IngestionCleanupTests(unittest.TestCase):
         self.assertEqual(p.reusable_download_groups([self.g], self.store, self.inventory['collection']), set())
 
     def test_pending_failed_unknown_and_missing_upload_records_retain_file(self):
+        self.archived_name()
         for status in ('SUBMITTED', 'SUBMITTED_PENDING_VERIFICATION', 'RUNNING', 'READY', 'ERROR', 'FAILED', 'UNKNOWN_AFTER_CLICK', ''):
             with self.subTest(status=status):
                 self.upload(status)
@@ -131,6 +141,22 @@ class IngestionCleanupTests(unittest.TestCase):
         count, _, errors = delete_cleanup_candidates([CleanupCandidate('mosaic', self.mosaic, '', '', verification_guard=guard)])
         self.assertEqual(count, 0); self.assertTrue(errors); self.assertTrue(self.mosaic.exists())
 
+    def test_archived_name_is_history_not_success_or_permission_to_ignore_conflicts(self):
+        # Even with a current EE receipt, an archive alone cannot authorize deletion.
+        self.base['artifacts']['report_csv'] = str(self.root / 'custom_history' / 'upload_report.csv')
+        self.archived_name()
+        self.assertEqual(self.candidates(), [])
+        self.upload('EE_VERIFIED_EXISTS')
+        guard = self.candidates()[0].verification_guard
+        cache = {}
+        self.assertTrue(p.check_cleanup_guard(guard, evidence_cache=cache))
+        # A genuinely unresolved second attempt remains a conflict, including
+        # when its status changes after preview without a CSV export.
+        self.archived_name('FAILED')
+        self.assertFalse(p.check_cleanup_guard(guard, evidence_cache=cache))
+        self.archived_name()
+        self.assertTrue(p.check_cleanup_guard(guard, evidence_cache=cache))
+
     def test_cache_tracks_custom_upload_database_and_ambiguous_destination(self):
         from swotflow.project.database import upsert_project_rows
         self.base['artifacts']['report_csv'] = str(self.root / 'custom_history' / 'uploads.csv')
@@ -177,6 +203,7 @@ class IngestionCleanupTests(unittest.TestCase):
         self.assertEqual(p.reusable_download_groups([self.g, extra], self.store, self.inventory['collection']), set())
 
     def test_statistics_retains_historical_counts_and_labels_policy_after_real_cleanup(self):
+        self.archived_name()
         write_csv(Path(self.base['mosaic']['manifest_csv']), [{'output_file': str(self.mosaic),
             'input_files': json.dumps([str(self.extract)]), 'status': 'MOSAIC_CREATED', 'input_count': '1'}])
         before = collect_project_insights(self.base)
@@ -184,6 +211,11 @@ class IngestionCleanupTests(unittest.TestCase):
         self.assertEqual((count, errors), (1, []))
         after = collect_project_insights(self.base)
         self.assertEqual(before.upload_status_counts, after.upload_status_counts)
+        self.assertEqual(after.metrics['Uploaded/already-existing assets recorded'], '1')
+        self.assertEqual(after.metrics['Rejected asset names retained as history'], '1')
+        from swotflow.project.database import read_project_rows
+        rows = read_project_rows(Path(self.base['artifacts']['report_csv']), 'upload_report')
+        self.assertEqual({r['final_status'] for r in rows}, {'REPLACED_INVALID_ASSET_ID', 'EE_VERIFIED_EXISTS'})
         self.assertEqual(before.metrics['Uploaded/already-existing assets recorded'], after.metrics['Uploaded/already-existing assets recorded'])
         self.assertEqual(before.metrics['Mosaic GeoTIFFs on disk'], '1')
         self.assertEqual(after.metrics['Mosaic GeoTIFFs on disk'], '0')
@@ -193,6 +225,60 @@ class IngestionCleanupTests(unittest.TestCase):
 
 
 class PolicyResumeTests(unittest.TestCase):
+    def test_old_successful_zero_cleanup_revisited_once_without_download_or_upload(self):
+        for annual in (False, True):
+            with self.subTest(annual=annual), TemporaryDirectory() as tmp:
+                cfg = yearly.config_at(Path(tmp), utm_tiles=['UTM30R'], include_upload=True,
+                    process_by_year=annual, end_date='2023-12-31')
+                cfg.base_config['cleanup'] = {'mosaics_enabled': True, 'mosaic_policy': CONFIRMED_INGESTION}
+                cfg.base_config['processing'].update(acquisition_start_date=cfg.start_date, acquisition_end_date=cfg.end_date)
+                helper, calls = yearly.YearlyAutomationTests(), []
+                with helper.harness(calls):
+                    first = auto.run_automation(cfg, preflight_state=yearly.preflight(cfg))
+                # Reproduce v0.8.16 JSON: same policy, successful zero deletion,
+                # and no cleanup-rule field in either parent or annual child.
+                paths = [first.run_dir / 'automation_run.json']
+                paths += [Path(b['run_dir']) / 'automation_run.json' for b in first.year_batches]
+                for path in paths:
+                    data = json.loads(path.read_text(encoding='utf-8'))
+                    for result in data['stage_results']:
+                        result.pop('cleanup_rule_version', None)
+                        if result['stage'] == 'mosaic_cleanup':
+                            result.update(cleanup_policy=CONFIRMED_INGESTION, deleted_files=0, status='success')
+                    path.write_text(json.dumps(data), encoding='utf-8')
+                resumed = auto.load_automation_run_state(first.run_dir)
+                calls.clear()
+                actual_cleanup = auto.execute_cleanup_result
+                def clean(state, config, tile, stage):
+                    calls.append((state.config.start_date[:4], tile, stage))
+                    return actual_cleanup(state, config, tile, stage)
+                with helper.harness(calls), mock.patch.object(auto, 'execute_cleanup_result', side_effect=clean), \
+                     mock.patch.object(auto, 'cleanup_stage', return_value=(0, 0, [])):
+                    final = auto.run_automation(resumed.config, preflight_state=resumed)
+                self.assertEqual(calls, [('2023', 'UTM30R', 'mosaic_cleanup')])
+                latest = auto.latest_stage_results_by_key(final)[('UTM30R', 'mosaic_cleanup')]
+                self.assertEqual(latest.cleanup_rule_version, INGESTION_CLEANUP_RULE_VERSION)
+                self.assertFalse(final.errors)
+                calls.clear()
+                restored = auto.load_automation_run_state(final.run_dir)
+                with helper.harness(calls):
+                    repeated = auto.run_automation(restored.config, preflight_state=restored)
+                self.assertEqual(calls, [])
+                self.assertFalse(repeated.errors)
+                if annual:
+                    self.assertEqual(repeated.year_batches[0]['status'], 'complete')
+
+    def test_rule_change_never_enables_disabled_cleanup_or_changes_strict_policy(self):
+        with TemporaryDirectory() as tmp:
+            state = yearly.preflight(yearly.config_at(Path(tmp)))
+            result = auto.AutomationStageResult(state.run_id, 'UTM30R', 'mosaic_cleanup', 'success',
+                                                cleanup_policy=CONFIRMED_INGESTION)
+            state.config.base_config['cleanup'] = {'mosaics_enabled': False, 'mosaic_policy': CONFIRMED_INGESTION}
+            self.assertFalse(auto.cleanup_due_on_resume(state, result))
+            state.config.base_config['cleanup'] = {'mosaics_enabled': True, 'mosaic_policy': 'full_pixels'}
+            result.cleanup_policy = 'full_pixels'
+            self.assertFalse(auto.cleanup_due_on_resume(state, result))
+
     def test_completed_year_cleanup_policy_change_does_not_repeat_scientific_work(self):
         with TemporaryDirectory() as tmp:
             cfg = yearly.config_at(Path(tmp), utm_tiles=['UTM30R'], include_upload=True, end_date='2023-12-31')
@@ -229,7 +315,13 @@ class PolicyResumeTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             state = yearly.preflight(yearly.config_at(Path(tmp)))
             state.stage_results.append(auto.AutomationStageResult(state.run_id, 'UTM30R', 'mosaic_cleanup', 'success',
-                                       deleted_files=1, cleanup_policy=CONFIRMED_INGESTION))
+                                       deleted_files=1, cleanup_policy=CONFIRMED_INGESTION,
+                                       cleanup_rule_version=INGESTION_CLEANUP_RULE_VERSION))
             auto.write_run_state(state)
             self.assertEqual(auto.load_automation_run_state(state.run_dir).stage_results[0].cleanup_policy, CONFIRMED_INGESTION)
             self.assertIn(CONFIRMED_INGESTION, state.csv_path.read_text())
+            self.assertEqual(auto.load_automation_run_state(state.run_dir).stage_results[0].cleanup_rule_version,
+                             INGESTION_CLEANUP_RULE_VERSION)
+            import csv
+            with state.csv_path.open(encoding='utf-8', newline='') as stream:
+                self.assertEqual(next(csv.DictReader(stream))['cleanup_rule_version'], str(INGESTION_CLEANUP_RULE_VERSION))
