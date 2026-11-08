@@ -62,3 +62,11 @@ zero-file result) is revisited once after updating. This only updates cleanup
 eligibility; it does not invalidate completed scientific or upload checkpoints.
 Rejected overlength-name attempts remain in history and no longer conflict with
 their verified valid destination. Real ambiguous destinations still retain files.
+
+## Per-output interruption recovery — v0.8.18
+
+Extraction and mosaicking commit each completed output to the indexed manifest before proceeding. CSV exports remain at stage completion to avoid repeatedly exporting the full history. If a process dies after a verified artifact receipt but before its manifest checkpoint, Resume can reuse that output only when its current bytes, sources, sidecars and scientific settings still match. A partial or changed output is not promoted to success.
+
+Upload persists a synchronous uncertain-attempt checkpoint before the external click. If the process dies or the browser response is lost, the attempt is reconciled against EE and retained as unknown/pending until resolved; absence of an immediate task is not permission for a second submission. Worker launch failures get an ordinary failed-stage record and follow the selected continuation policy.
+
+A saved run keeps its scientific/source/output configuration. Restore those settings to Resume, or use a separate project for a different product. Runtime options such as supported upload completion/concurrency preferences and cleanup can still change on Resume. Previous failed attempts remain in history after current errors are resolved.

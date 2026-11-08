@@ -997,16 +997,23 @@ def run_subprocess_stage(
         merged_env.update(dict(env))
     output_tail: list[str] = []
     with log_path.open("w", encoding="utf-8", newline="") as log_handle:
-        process = subprocess.Popen(
-            list(command),
-            cwd=str(PROJECT_ROOT),
-            env=merged_env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
+        try:
+            process = subprocess.Popen(
+                list(command),
+                cwd=str(PROJECT_ROOT),
+                env=merged_env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            # A missing/inaccessible worker is a failed stage, with a durable
+            # result and the same continue/stop policy as a nonzero worker exit.
+            message = f"Could not start stage process: {exc}"
+            log_handle.write(message + "\n")
+            return 127, message
         assert process.stdout is not None
         for line in process.stdout:
             log_handle.write(line)
@@ -1616,6 +1623,21 @@ def execute_deferred_upload_repair_if_needed(
     return recover_uploads(state, normalized, gdal_python, progress_callback, stop_event)
 
 
+def validate_resume_settings(config: AutomationConfig, state: AutomationRunState) -> None:
+    """Reject science/source changes before overwriting a saved workflow checkpoint."""
+    from swotflow.processing.automation_years import settings_identity
+    # UI/CLI callers may mutate state.config itself. The retained JSON remains
+    # the authority until this request has passed validation.
+    saved = load_automation_run_state(state.json_path).config if state.json_path.is_file() else state.config
+    def scope(value: AutomationConfig) -> tuple:
+        return (value.project_root, value.start_date, value.end_date, sorted(value.utm_tiles),
+                value.include_upload, value.process_by_year)
+    if scope(saved) != scope(config) or settings_identity(saved) != settings_identity(config):
+        kind = "annual" if saved.process_by_year else "workflow"
+        raise ValueError(f"Saved {kind} scope or scientific settings differ from this request. "
+                         "Restore the saved settings, or use a separate project for a different scientific product.")
+
+
 def run_automation(
     config: AutomationConfig,
     *,
@@ -1631,6 +1653,8 @@ def run_automation(
         enabled=normalized.prevent_system_sleep,
         keep_display_awake=normalized.prevent_display_sleep,
     ):
+        if preflight_state is not None:
+            validate_resume_settings(normalized, preflight_state)
         return _run_automation_normalized(
             normalized,
             preflight_state=preflight_state,
@@ -1659,6 +1683,9 @@ def _run_automation_normalized(
     state.finished_at = ""
     state.stopped = False
     state.stop_reason = ""
+    # Resume recomputes current run errors; previous failures remain in the
+    # append-only stage history even after fresh reconciliation succeeds.
+    state.errors = []
     if normalized.cleanup_enabled:
         state.warnings = [w for w in state.warnings if "Cleanup is disabled: files will accumulate" not in w]
     write_run_state(state)

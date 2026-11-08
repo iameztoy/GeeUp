@@ -113,3 +113,9 @@ Changing the selection does not retune an already-running worker. Unverified
 mosaics cannot be deleted by cleanup in either mode. A legacy configuration without
 verification evidence may still stop at the input-accounting boundary; the mode
 controls cloud waiting, not whether missing lineage can be ignored.
+
+## Interrupted submission — v0.8.18
+
+Before clicking Upload, persist the attempted destination and uncertain outcome using a synchronous SQLite commit. This closes the process-death window between browser submission and recording its response. A lost post-click WebDriver response remains uncertain and does not cause an immediate retry. Reopen the same project and Resume so the existing task/inventory reconciliation can resolve it; retain the local file meanwhile. No timeout alone proves that the TIFF is corrupt.
+
+A verified upload also saves its attempted ingestion revision before the click. A later inventory can confirm that attempt only when the asset echoes its exact unique revision token, local checksum and source digest. Merely preparing an upload or observing the same asset name remains insufficient. This allows a successful late ingestion to recover after a lost response without uploading the file again.

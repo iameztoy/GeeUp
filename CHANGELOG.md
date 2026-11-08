@@ -1,5 +1,16 @@
 # Release history
 
+## 0.8.18 — 8 November 2026
+
+- Avoid repeatedly hashing one large downstream mosaic for each input and companion during cleanup. Reuse hashes only within the current operation, with file identity/change metadata, sidecar membership and current proof checks; revalidate after a locked-file retry. Unsupported change metadata falls back to fresh hashing.
+- Enforce explicitly selected full-pixel cleanup even when verified downloads are off. Both mosaic cleanup policies require the exact local revision, current cloud proof and an unambiguous successful upload owner. Keep pending, failed, changed and conflicting files.
+- Make Statistics refresh metadata-only: retain cumulative NASA/download/extraction/mosaic/upload counts, refresh disk counts, and show cleanup eligibility as not evaluated until explicitly previewed in Cleanup.
+- Checkpoint each completed extraction and mosaic in SQLite before the next output. Recover the narrow receipt-before-manifest crash interval from current source/settings/byte proof. Remove stale `.aux`, mask, overview and world-file companions when replacing rasters; leave unrelated files alone.
+- Flush an uncertain upload-attempt record to disk before clicking Upload. A lost browser response or process death cannot silently become an unsubmitted file and trigger a duplicate click; a later exact revision echo from EE can still confirm the attempted ingestion. Existing task/inventory reconciliation and bounded recovery remain in place.
+- Record worker launch failures as failed stages, and recompute current ordinary-run errors on Resume while retaining historical attempts. Reject scientific/source/output changes to saved Resume runs; cleanup and upload execution preferences remain adjustable.
+- Correct projected extraction nodata in the existing Africa LAEA and WGS84 modes: preserve independent source masks and use one shared WSE fill in the GeoTIFF. Invalidate old projected local receipts; native extraction is unchanged. Previously uploaded projected products require explicit review rather than automatic replacement.
+- Add workflow option matrices, process-exit/reopen checks, cleanup mutation tests and real-GDAL regressions. Home and the window title show v0.8.18. No production collection or active run is changed by installing this release; reopen after a normal stop or completion.
+
 ## 0.8.17 — 8 November 2026
 
 - Fix confirmed-ingestion cleanup retaining verified mosaics when their upload history also contains a rejected overlength asset name. Exclude only `REPLACED_INVALID_ASSET_ID` history from current cleanup ownership, matching Statistics; preserve all archived attempts and their errors. Genuine conflicting destinations, pending/failed uploads, changed bytes and mismatched provenance remain protected.

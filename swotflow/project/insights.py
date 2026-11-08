@@ -1907,20 +1907,20 @@ def plan_cleanup_candidates(
     result = sorted(candidates.values(), key=cleanup_order)
     if candidate_filter is not None:
         result = [candidate for candidate in result if candidate_filter(candidate)]
-    from swotflow.verification.retention import mosaic_cleanup_policy, mosaic_cleanup_enabled, CONFIRMED_INGESTION
+    from swotflow.verification.retention import mosaic_cleanup_enabled
     if not mosaic_cleanup_enabled(config):
         result = [r for r in result if r.stage != "mosaic"]
     if config.get("download", {}).get("verified_downloads", False):
         from swotflow.verification.pipeline import cleanup_guards
         result = cleanup_guards(dict(config), result)
-    elif mosaic_cleanup_policy(config) == CONFIRMED_INGESTION:
+    elif "mosaic_policy" in config.get("cleanup", {}):
         from swotflow.verification.pipeline import cleanup_guards
         mosaics = cleanup_guards(dict(config), [r for r in result if r.stage == "mosaic"])
         result = [r for r in result if r.stage != "mosaic"] + mosaics
     return result
 
 
-def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
+def _collect_project_insights(config: Mapping[str, Any], *, include_cleanup: bool = True) -> ProjectInsights:
     """Compute project-level metrics from manifests, reports, and local folders."""
     raw_folder = processing_path(config, "raw_downloads")
     extracted_folder = processing_path(config, "extracted_geotiffs")
@@ -2006,7 +2006,7 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
             if path.is_file() and moved_name in path.relative_to(raw_folder).parts
         )
 
-    cleanup_candidates = plan_cleanup_candidates(config)
+    cleanup_candidates = plan_cleanup_candidates(config) if include_cleanup else []
     mosaic_lineage_rows = build_mosaic_lineage_rows(
         download_rows,
         extract_rows,
@@ -2316,8 +2316,8 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Extracted folder size"] = format_bytes(extracted_size)
     metrics["Mosaic folder size"] = format_bytes(mosaic_size)
     metrics["Logs folder size"] = format_bytes(logs_size)
-    metrics["Cleanup candidates"] = str(len(cleanup_candidates))
-    metrics["Cleanup candidate size"] = format_bytes(sum(item.size_bytes for item in cleanup_candidates))
+    metrics["Cleanup candidates"] = str(len(cleanup_candidates)) if include_cleanup else "Not evaluated"
+    metrics["Cleanup candidate size"] = format_bytes(sum(item.size_bytes for item in cleanup_candidates)) if include_cleanup else "Not evaluated"
 
     level_rows = [
         (
@@ -2369,6 +2369,9 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     metrics["Mosaic cleanup policy"] = next(label for label, value in POLICY_LABELS.items() if value == policy)
     metrics["Mosaic cleanup verification scope"] = ("Confirmed revision/provenance; pixel certification separate"
         if policy == "confirmed_ingestion" else "Full pixel verification required")
+    if not config.get("download", {}).get("verified_downloads", False) and "mosaic_policy" not in config.get("cleanup", {}):
+        metrics["Mosaic cleanup policy"] = "Legacy manifest-based cleanup"
+        metrics["Mosaic cleanup verification scope"] = "Historical status only; pixel certification not required"
     yearly_automation = read_yearly_automation_overview(config)
     (
         update_campaign_summaries,
@@ -2463,11 +2466,11 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
     )
 
 
-def collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
-    """Compute project insights with a bounded per-refresh filename cache."""
+def collect_project_insights(config: Mapping[str, Any], *, include_cleanup: bool = True) -> ProjectInsights:
+    """Compute insights; metadata-only refreshes can omit costly cleanup proofs."""
     cached_swot_filename_fields.cache_clear()
     try:
-        return _collect_project_insights(config)
+        return _collect_project_insights(config, include_cleanup=include_cleanup)
     finally:
         cached_swot_filename_fields.cache_clear()
 
@@ -2486,17 +2489,9 @@ def delete_cleanup_candidates(candidates: Iterable[CleanupCandidate]) -> tuple[i
     errors: List[str] = []
     partials: List[PartialDownloadProof] = []
     evidence_cache: dict = {}
+    from swotflow.verification.file_cache import CleanupHashCache
+    hash_cache = CleanupHashCache()
     for candidate in sorted(candidates, key=cleanup_order):
-        if candidate.verification_guard is not None:
-            from swotflow.verification.pipeline import check_cleanup_guard
-            try:
-                valid = check_cleanup_guard(candidate.verification_guard, evidence_cache=evidence_cache)
-            except (OSError, ValueError) as exc:
-                errors.append(f"{candidate.path}: verification failed: {exc}")
-                continue
-            if not valid:
-                errors.append(f"{candidate.path}: downstream verification changed; preview again.")
-                continue
         if candidate.stage == "partial" or candidate.path.name.startswith("partial_"):
             if candidate.partial_proof is None or candidate.partial_proof.path != candidate.path:
                 errors.append(f"{candidate.path}: Missing partial-download proof; preview again.")
@@ -2505,6 +2500,20 @@ def delete_cleanup_candidates(candidates: Iterable[CleanupCandidate]) -> tuple[i
             continue
         last_error: OSError | None = None
         for attempt in range(1, 4):
+            # A Windows file lock may release after a retry delay. Recheck the
+            # proof on each attempt, since downstream evidence can change then.
+            if candidate.verification_guard is not None:
+                from swotflow.verification.pipeline import check_cleanup_guard
+                try:
+                    valid = check_cleanup_guard(candidate.verification_guard, evidence_cache=evidence_cache, hash_cache=hash_cache)
+                except (OSError, ValueError) as exc:
+                    errors.append(f"{candidate.path}: verification failed: {exc}")
+                    last_error = None
+                    break
+                if not valid:
+                    errors.append(f"{candidate.path}: downstream verification changed; preview again.")
+                    last_error = None
+                    break
             try:
                 size = cleanup_path_size(candidate.path)
                 candidate.path.unlink()

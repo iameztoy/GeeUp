@@ -93,7 +93,11 @@ def current_cleanup_evidence(logs: Path, collection: str, policy: str,
 
 
 def ingestion_cleanup_matches(proof: dict, active: dict, uploads: dict) -> bool:
-    """Retain pending/failed rows even when a same-named asset is present."""
+    """Require this exact local revision and its unambiguous terminal upload owner.
+
+    Both cleanup policies use this binding; active evidence selects whether the
+    additional full-pixel certificate is required.
+    """
     if not source_proof_matches(proof, active):
         return False
     if any(active[n].get("local_sha256") != proof["sha256"] or

@@ -37,6 +37,7 @@ DEFAULT_PROCESSING_PATHS = {
 TARGET_CRS_ORIGINAL = "original"
 TARGET_CRS_AFRICA_LAEA = "africa_laea"
 TARGET_CRS_WGS84 = "wgs84"
+PROJECTED_NODATA_POLICY = "shared-wse-fill-v1"
 VALID_TARGET_CRS_MODES = {
     TARGET_CRS_ORIGINAL,
     TARGET_CRS_AFRICA_LAEA,
@@ -96,6 +97,7 @@ MANIFEST_COLUMNS = [
     "input_nc",
     "output_tif",
     "target_crs_mode",
+    "nodata_policy",
     "xsize",
     "ysize",
     "band_count",
@@ -492,10 +494,17 @@ def export_geotiff_from_vrt(
             format="GTiff",
             dstSRS=target_wkt,
             resampleAlg=config.resampling_alg,
+            # GeoTIFF embeds one nodata value for every band. Keep each source
+            # mask independent, then use the WSE fill for both destination bands
+            # so the quality fill cannot replace WSE nodata when reopened.
+            dstNodata=vrt_dataset.GetRasterBand(1).GetNoDataValue(),
+            warpOptions=["UNIFIED_SRC_NODATA=NO"],
         )
 
     if output_dataset is None:
         raise RuntimeError(f"Failed to write {output_path}")
+    if target_wkt is not None:
+        output_dataset.SetMetadataItem("SWOTFLOW_NODATA_POLICY", PROJECTED_NODATA_POLICY)
     output_dataset.FlushCache()
     output_dataset = None
 
@@ -537,12 +546,8 @@ def manifest_row_completed(row: Dict[str, str] | None) -> bool:
 
 def geotiff_sidecar_paths(path: Path) -> List[Path]:
     """Return GDAL sidecars that may accompany one extracted GeoTIFF."""
-    if path.suffix.lower() not in {".tif", ".tiff"}:
-        return []
-    return [
-        path.with_suffix(".tfw"),
-        path.with_suffix(f"{path.suffix}.aux.xml"),
-    ]
+    from swotflow.core.sidecars import geotiff_sidecars
+    return geotiff_sidecars(path)
 
 
 def remove_geotiff_and_sidecars(path: Path) -> None:
@@ -624,6 +629,14 @@ def write_extract_manifest(config: ExtractConfig, results: Iterable[Dict[str, An
     )
 
 
+def checkpoint_extract_result(config: ExtractConfig, row: Dict[str, Any]) -> None:
+    """Commit one completed output before proceeding; export CSV once at stage end."""
+    upsert_project_rows(
+        config.manifest_csv, [enrich_extract_row(dict(row), config)],
+        dataset="extract_manifest", export_csv=False,
+    )
+
+
 def write_extract_workflow_manifest(
     config: ExtractConfig,
     results: Iterable[Dict[str, Any]],
@@ -681,6 +694,11 @@ def _process_one_file(
     output_path = build_output_path(source.path, config.output_folder, config.target_crs_mode)
     record_id = extract_record_id(source, config)
     manifest_row = (existing_manifest or {}).get(record_id)
+    if (config.target_crs_mode != TARGET_CRS_ORIGINAL
+            and (manifest_row or {}).get("nodata_policy") != PROJECTED_NODATA_POLICY):
+        # Old projected history cannot prove that the WSE mask survived reopen.
+        # Native extraction retains its existing reuse behavior.
+        manifest_row = None
     rewritten_invalid_existing = False
     if config.skip_existing and output_path.exists():
         if gdal is None:
@@ -759,7 +777,9 @@ def process_one_file(
 ) -> Dict[str, Any]:
     """Require current byte evidence for verified-mode extraction reuse."""
     if not config.verified_workflow:
-        return _process_one_file(source, config, gdal, existing_manifest)
+        result = _process_one_file(source, config, gdal, existing_manifest)
+        result["nodata_policy"] = PROJECTED_NODATA_POLICY if config.target_crs_mode != TARGET_CRS_ORIGINAL else ""
+        return result
     from dataclasses import replace
     from swotflow.verification.pipeline import VerificationStore
     store = VerificationStore(config.manifest_csv.parent)
@@ -768,7 +788,21 @@ def process_one_file(
     effective = replace(config, skip_existing=bool(reusable), skip_manifest_existing=False)
     if output.exists() and not reusable:
         remove_geotiff_and_sidecars(output)
-    result = _process_one_file(source, effective, gdal, existing_manifest)
+    # A power loss can occur after the durable artifact receipt but before the
+    # parent checkpoints the stage manifest. Current byte/source/settings proof
+    # is sufficient to reopen that output; an absent CSV row must not erase it.
+    effective_manifest = existing_manifest
+    manifest_row = (existing_manifest or {}).get(extract_record_id(source, config))
+    if reusable and (not manifest_row_completed(manifest_row)
+                     or (config.target_crs_mode != TARGET_CRS_ORIGINAL
+                         and manifest_row.get("nodata_policy") != PROJECTED_NODATA_POLICY)):
+        effective_manifest = dict(existing_manifest or {})
+        effective_manifest[extract_record_id(source, config)] = {
+            "status": "written",
+            "nodata_policy": PROJECTED_NODATA_POLICY if config.target_crs_mode != TARGET_CRS_ORIGINAL else "",
+        }
+    result = _process_one_file(source, effective, gdal, effective_manifest)
+    result["nodata_policy"] = PROJECTED_NODATA_POLICY if config.target_crs_mode != TARGET_CRS_ORIGINAL else ""
     if not reusable:
         driver = gdal or require_gdal()
         ds = driver.Open(str(output))
@@ -873,6 +907,7 @@ def run_extract(
             status = "done"
             try:
                 row = process_one_file(source, config, gdal, existing_manifest)
+                checkpoint_extract_result(config, row)
                 results.append(row)
                 status = row.get("status", "done")
             except Exception as exc:  # noqa: BLE001
@@ -929,6 +964,7 @@ def run_extract(
                             **source.metadata,
                         }
                     if result_type == "result":
+                        checkpoint_extract_result(config, payload)
                         indexed_results.append((result_index, payload))
                         status = str(payload.get("status", "done"))
                     else:

@@ -747,8 +747,8 @@ class ReportManager:
         self.rows[asset_id] = existing
         return existing
 
-    def upsert(self, row: Dict[str, str]) -> None:
-        """Insert or replace a report row."""
+    def upsert(self, row: Dict[str, str], *, durable: bool = False) -> None:
+        """Insert or replace a report row, optionally syncing a critical checkpoint."""
         row = preserve_verified_submission(row, self.rows.get(row.get("asset_id", ""), {}))
         events = self.transition_events([row])
         existing = self.merge_row(row)
@@ -756,6 +756,7 @@ class ReportManager:
             self.report_path,
             [existing],
             dataset="upload_report",
+            durable=durable,
         )
         self.write_workflow_rows([existing])
         self.write_events(events)
@@ -2718,22 +2719,44 @@ class EarthEngineUIUploader:
                     if not artifact_current(proof):
                         raise ValueError("Local mosaic changed while preparing the upload")
                 self.remember_browser_upload_baseline(item.asset_id)
-                outcome = self.submit_upload_dialog(item)
+                # Commit intent before the browser can accept a click. A process
+                # death between click and outcome must never reopen as PLANNED
+                # and blindly submit a second copy while EE is still silent.
+                self.report.upsert(self.make_report_row(
+                    item=item, submit_time=now_iso(), detected_task_name="",
+                    final_status=UNKNOWN_AFTER_CLICK_STATUS,
+                    error_message="Upload attempt checkpointed before clicking; outcome requires reconciliation if interrupted.",
+                ), durable=True)
                 if self.config.verified_workflow:
-                    store.record_ingestion({**item.ingestion_revision, "phase": "submitted", "task_id": outcome.task_name})
-                self.report.upsert(
-                    self.make_report_row(
-                        item=item,
-                        submit_time=now_iso(),
-                        detected_task_name=outcome.task_name,
-                        final_status=outcome.status,
-                        error_message=(
-                            "Upload dialog closed; awaiting Tasks-panel or Earth Engine asset verification."
-                            if outcome.status == SUBMITTED_PENDING_VERIFICATION_STATUS
-                            else ""
-                        ),
+                    # Preserve the unique revision through a crash/lost response.
+                    # Inventory can confirm it only when EE echoes this exact
+                    # token, local hash and source digest; prepared alone cannot.
+                    store.record_ingestion({**item.ingestion_revision, "phase": "attempted"})
+                try:
+                    outcome = self.submit_upload_dialog(item)
+                    if self.config.verified_workflow:
+                        store.record_ingestion({**item.ingestion_revision, "phase": "submitted", "task_id": outcome.task_name})
+                    self.report.upsert(
+                        self.make_report_row(
+                            item=item,
+                            submit_time=now_iso(),
+                            detected_task_name=outcome.task_name,
+                            final_status=outcome.status,
+                            error_message=(
+                                "Upload dialog closed; awaiting Tasks-panel or Earth Engine asset verification."
+                                if outcome.status == SUBMITTED_PENDING_VERIFICATION_STATUS
+                                else ""
+                            ),
+                        )
                     )
-                )
+                except (AlreadyExistsError, RetryableUIError, UnknownAfterClickError):
+                    raise  # Explicit dialog rejection/known uncertainty keeps its existing handling.
+                except Exception as exc:
+                    raise_if_invalid_browser_session(exc)
+                    raise UnknownAfterClickError(
+                        "Upload may have been clicked, but its outcome could not be recorded. "
+                        "Reconcile the retained attempt before retrying: " + str(exc)
+                    ) from exc
                 return
             except AlreadyExistsError as exc:
                 self.logger.warning("%s", exc)

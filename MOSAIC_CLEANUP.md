@@ -44,3 +44,11 @@ cleanup:
 The GUI writes the explicit choice. Older non-GUI configurations without this section retain the prior strict policy and master cleanup behavior; there is no automatic deletion-policy migration in a running process. Confirmed-ingestion cleanup requires the verification receipts even when the surrounding project uses legacy download mode.
 
 Validation uses isolated application regression fixtures, including real local deletions and SQLite histories, both scheduling modes, sidecars, changed evidence, Resume and Statistics. No production imagery is deleted during release testing.
+
+## Cleanup review — v0.8.18
+
+Each cleanup operation hashes an unchanged downstream file once and reuses that result for its dependent inputs/companions. File identity, size, modification and change times are checked again; sidecar membership and the current proof remain checked. On Windows this uses the actual change timestamp, not creation time. If change metadata is unavailable, the file is hashed again. The cache is bounded and never persisted or reused between cleanup operations. Each deletion target is checked freshly, including retries after a file lock.
+
+An explicitly selected full-pixel policy is enforced even with verified downloads disabled. Both explicit policies bind the exact local mosaic hash/sidecars to its current cloud owner and terminal upload record. Genuine conflicting, pending or failed records retain the file. Legacy non-GUI configurations without an explicit policy preserve their earlier behavior and Statistics labels it as legacy.
+
+Statistics refresh no longer calculates deletion eligibility. Use Cleanup's preview/synchronization controls for proof-checked candidate counts; this avoids reading large TIFFs during routine Statistics refreshes.

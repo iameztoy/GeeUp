@@ -67,3 +67,9 @@ not extra active uploads. Removing an eligible mosaic decreases disk counts, not
 uploaded totals or source history. A one-time cleanup-rule recheck on Resume adds
 a cleanup attempt to the run record without counting the imagery again. Refresh
 Statistics to update a previously saved snapshot after cleanup.
+
+## Refresh cost and interrupted stages — v0.8.18
+
+Routine Statistics refresh reads saved records and filesystem metadata without hashing cleanup candidates. **Cleanup candidates** and **Cleanup candidate size** show **Not evaluated**; use Cleanup's explicit preview for eligibility. This is not a zero-candidate result. Local file counts still refresh normally, while cleanup does not remove historical filename, processing-version or upload records.
+
+Completed local outputs are checkpointed individually, so their records remain available after an interrupted stage even if its final CSV export was not written. Unknown upload outcomes remain separate from confirmed uploads. An explicitly selected strict cleanup policy cannot be reported as satisfied merely because legacy download mode is in use.

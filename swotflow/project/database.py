@@ -383,10 +383,16 @@ class ProjectDatabase:
         *,
         replace_dataset: bool = False,
         mark_initialized: bool = True,
+        durable: bool = False,
     ) -> int:
+        """Upsert records, optionally syncing the WAL before acknowledging commit."""
         normalized_rows = [_normalize_row(row) for row in rows]
         timestamp = now_iso()
         with self.session() as connection:
+            if durable:
+                # Use only for external-action checkpoints. Bulk history keeps
+                # NORMAL; this connection must flush intent before a UI click.
+                connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN IMMEDIATE")
             if replace_dataset:
                 connection.execute("DELETE FROM records WHERE dataset = ?", (dataset,))
@@ -561,6 +567,7 @@ def upsert_project_rows(
     replace_dataset: bool = False,
     export_csv: bool = False,
     fieldnames: Sequence[str] | None = None,
+    durable: bool = False,
 ) -> int:
     csv_path = Path(path)
     dataset_name = dataset or dataset_for_path(csv_path)
@@ -568,7 +575,7 @@ def upsert_project_rows(
         raise ValueError(f"No project dataset is registered for {csv_path.name}")
     database = ProjectDatabase(database_path_for(csv_path))
     database.ensure_imported(dataset_name, csv_path)
-    count = database.upsert_rows(dataset_name, rows, replace_dataset=replace_dataset)
+    count = database.upsert_rows(dataset_name, rows, replace_dataset=replace_dataset, durable=durable)
     if export_csv:
         database.export_csv(dataset_name, csv_path, fieldnames)
     return count

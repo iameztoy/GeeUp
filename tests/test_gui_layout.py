@@ -708,6 +708,34 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_ordinary_resume_summary_and_progress_use_current_attempt(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            config = AutomationConfig(Path("."), {}, ["UTM34M"], "2023-01-01", "2024-12-31")
+            state = AutomationRunState("run", Path("run"), config, stage_results=[
+                AutomationStageResult("run", "UTM34M", "download", status)
+                for status in ("failed", "success")
+            ])
+            app.apply_automation_run_state(state)
+            self.assertIn("failed stages 0", app.automation_status_var.get())
+            with mock.patch("swotflow.ui.main.messagebox.showinfo"), \
+                 mock.patch.object(app, "refresh_project_statistics_if_active"):
+                app.finish_automation(state)
+                self.assertIn("Failed stages: 0", app.automation_status_var.get())
+                self.assertNotIn("First failure", app.automation_status_var.get())
+                state.errors = ["Current reconciliation incomplete"]
+                app.finish_automation(state)
+                self.assertIn(state.errors[0], app.automation_status_var.get())
+                self.assertIn("outstanding work", app.automation_activity_var.get())
+            self.assertEqual(len(state.stage_results), 2)  # History retained.
+            state.stage_results.append(AutomationStageResult("run", "UTM34M", "download", "failed"))
+            app.initialize_automation_progress_tracker(state)
+            self.assertNotIn(("UTM34M", "download"), app.automation_progress_completed_keys)
+        finally:
+            root.destroy()
+
     def test_resume_keeps_new_cleanup_selection_when_loading_old_run(self) -> None:
         root = tk.Tk()
         root.withdraw()
@@ -1456,7 +1484,7 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_statistics_refresh_populates_metrics_and_cleanup(self) -> None:
+    def test_statistics_refresh_does_not_run_cleanup_verification(self) -> None:
         root = tk.Tk()
         root.withdraw()
         try:
@@ -1484,7 +1512,8 @@ class GuiLayoutTests(unittest.TestCase):
                     ],
                 )
 
-                app.refresh_project_statistics()
+                with mock.patch("swotflow.project.insights.plan_cleanup_candidates", side_effect=AssertionError("Statistics must not hash cleanup candidates")):
+                    app.refresh_project_statistics()
 
                 metrics = [
                     app.stats_metrics_tree.item(item, "values")
@@ -1492,7 +1521,8 @@ class GuiLayoutTests(unittest.TestCase):
                 ]
                 cleanup_rows = app.cleanup_tree.get_children()
                 self.assertIn(("Raw NetCDF files on disk", "1"), metrics)
-                self.assertEqual(len(cleanup_rows), 1)
+                self.assertFalse(cleanup_rows)
+                self.assertIn(("Cleanup candidates", "Not evaluated"), metrics)
                 app.verified_downloads_var.set(True)
                 app.refresh_project_statistics()
                 self.assertFalse(app.cleanup_tree.get_children())

@@ -34,6 +34,10 @@ def settings_identity(config: engine.AutomationConfig) -> dict:
     """Protect completed checkpoints against source/output/processing setting changes."""
     keys = ("processing", "download", "extract", "mosaic", "metadata", "destination_parent", "input_folder")
     result = {key: deepcopy(config.base_config.get(key)) for key in keys}
+    # Scheduling throughput does not change the selected sources or pixels.
+    for section, key in (("download", "threads"), ("extract", "workers"), ("mosaic", "workers")):
+        if isinstance(result.get(section), dict):
+            result[section].pop(key, None)
     result['upload'] = {key: deepcopy(value) for key, value in config.base_config.get('upload', {}).items()
                         if key in {'pyramiding_policy', 'prefix', 'suffix', 'replacement_rules',
                                    'invalid_char_pattern', 'invalid_char_replacement'}}
@@ -185,7 +189,7 @@ def run_yearly_automation(
                 a.base_config.get("destination_parent")) != (
                     b.start_date, b.end_date, b.utm_tiles, b.include_upload,
                     b.base_config.get("destination_parent")) or settings_identity(a) != settings_identity(b):
-                raise ValueError("Saved annual scope differs from this request. Run a new preflight.")
+                raise ValueError("Saved annual scope differs from this request. Restore the saved settings, or use a separate project for a different scientific product.")
         if batch["status"] == "complete" and child is not None and child_outcome(child) == "complete":
             child.config = child_config
             # Enabling cleanup later must revisit previously disabled cleanup,

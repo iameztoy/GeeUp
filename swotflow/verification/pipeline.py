@@ -6,6 +6,7 @@ correctness; only an explicit native-pixel receipt can certify an EE comparison.
 from __future__ import annotations
 
 from swotflow.paths import APP_ROOT
+from swotflow.verification.file_cache import CleanupHashCache
 
 import hashlib
 import json
@@ -41,7 +42,7 @@ def file_hash(path: Path, algorithm: str = "sha256") -> str:
         for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
             h.update(block)
     after = path.stat()
-    if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
         raise ValueError(f"File changed during verification: {path.name}")
     return h.hexdigest()
 
@@ -52,11 +53,12 @@ def product_name(value: str | Path) -> str:
     return canonical_name(str(value))
 
 
-def auxiliary_hashes(path: Path) -> dict[str, str]:
+def auxiliary_hashes(path: Path, *, hash_cache: CleanupHashCache | None = None) -> dict[str, str]:
     """Capture sidecars that can change masks/georeferencing without TIFF changes."""
     candidates = [Path(str(path)+s) for s in (".aux.xml", ".aux", ".msk")]
     candidates += [path.with_suffix(s) for s in (".tfw", ".tifw", ".wld")]
-    return {str(p.resolve()): file_hash(p) for p in candidates if p.is_file()}
+    hash_file = hash_cache.hash if hash_cache is not None else file_hash
+    return {str(p.resolve()): hash_file(p) for p in candidates if p.is_file()}
 
 
 def settings_key(stage: str, config: Any) -> dict:
@@ -65,6 +67,8 @@ def settings_key(stage: str, config: Any) -> dict:
         "grouping_mode", "target_crs_label", "resampling_alg", "nodata", "require_all_inputs")
     return {"algorithm": ALGORITHM,
             **({"overlap_rule": "paired-lowest-quality-v2"} if stage == "mosaic" else {}),
+            **({"nodata_policy": "shared-wse-fill-v1"}
+               if stage == "extract" and getattr(config, "target_crs_mode", "original") != "original" else {}),
             **{k: getattr(config, k, None) for k in names}}
 
 
@@ -289,11 +293,12 @@ def mapped_receipt(db: sqlite3.Connection, proof: Any) -> Any:
     return proof
 
 
-def artifact_current(proof: dict) -> bool:
+def artifact_current(proof: dict, *, hash_cache: CleanupHashCache | None = None) -> bool:
     """Check a local output against its saved content hash."""
     p = Path(proof["path"])
-    return (p.is_file() and p.stat().st_size == proof["size"] and file_hash(p) == proof["sha256"]
-            and auxiliary_hashes(p) == proof.get("auxiliary_hashes", {}))
+    hash_file = hash_cache.hash if hash_cache is not None else file_hash
+    return (p.is_file() and p.stat().st_size == proof["size"] and hash_file(p) == proof["sha256"]
+            and auxiliary_hashes(p, hash_cache=hash_cache) == proof.get("auxiliary_hashes", {}))
 
 
 def download_proof(logs: Path, filename: str) -> dict | None:
@@ -493,7 +498,7 @@ def save_inventory(store: VerificationStore, inventory: dict) -> None:
     submissions = store.ingestions()
     for asset in inventory["assets"]:
         receipt = submissions.get(asset["id"], {})
-        if receipt.get("phase") == "submitted" and all(asset.get("properties", {}).get(k) == v
+        if receipt.get("phase") in {"attempted", "submitted"} and all(asset.get("properties", {}).get(k) == v
                                                        for k, v in ingestion_properties(receipt).items()):
             store.record_ingestion({**receipt, "phase": "confirmed", "observed_utc": utc_now(),
                                     "asset_fingerprint": digest(snapshot_asset(asset))})
@@ -646,6 +651,7 @@ def cleanup_guards(config: dict, candidates: list[Any]) -> list[Any]:
         parent = Path(name)
         for sidecar in geotiff_sidecars(parent):
             parents[sidecar].add(parent)
+    hash_cache = CleanupHashCache()
     approved = []
     for item in candidates:
         path = item.path.resolve()
@@ -661,24 +667,24 @@ def cleanup_guards(config: dict, candidates: list[Any]) -> list[Any]:
             path = next(iter(owners))
         if item.stage == "mosaic":
             own = artifacts.get(str(path))
-            good = own and (artifact_current(own) if path.exists() else sidecar) and own["sources"] and all(active.get(n, {}).get("checksum") == h for n, h in own["sources"].items())
-            if good and policy == CONFIRMED_INGESTION:
+            good = own and (artifact_current(own, hash_cache=hash_cache) if path.exists() else sidecar) and own["sources"] and all(active.get(n, {}).get("checksum") == h for n, h in own["sources"].items())
+            if good:
                 good = ingestion_cleanup_matches(own, active, uploads)
             proof = own if good else None
         else:
             stage = "extract" if item.stage == "raw" else "mosaic"
-            proof = next((p for p in downstream.get(str(path), []) if p["stage"] == stage and artifact_current(p)), None)
+            proof = next((p for p in downstream.get(str(path), []) if p["stage"] == stage and artifact_current(p, hash_cache=hash_cache)), None)
         if proof and (path.is_file() or sidecar):
             if item.stage == "raw":
                 source = proof["sources"].get(product_name(path), {})
-                if not source or file_hash(path, source["algorithm"]) != source["hash"]:
+                if not source or hash_cache.hash(path, source["algorithm"]) != source["hash"]:
                     continue
-            elif path.is_file() and item.stage == "extracted" and (file_hash(path) != proof["inputs"].get(str(path))
-                    or auxiliary_hashes(path) != proof.get("input_auxiliaries", {}).get(str(path), {})):
+            elif path.is_file() and item.stage == "extracted" and (hash_cache.hash(path) != proof["inputs"].get(str(path))
+                    or auxiliary_hashes(path, hash_cache=hash_cache) != proof.get("input_auxiliaries", {}).get(str(path), {})):
                 continue
             guard = {"logs": str(store.logs), "collection": config.get("destination_parent", ""),
-                     "target": str(target), "target_sha256": proof["sha256"] if item.stage == "mosaic" and not sidecar else file_hash(target), "stage": item.stage,
-                     "downstream": proof, "target_auxiliary_hashes": auxiliary_hashes(target),
+                     "target": str(target), "target_sha256": proof["sha256"] if item.stage == "mosaic" and not sidecar else hash_cache.hash(target), "stage": item.stage,
+                     "downstream": proof, "target_auxiliary_hashes": auxiliary_hashes(target, hash_cache=hash_cache),
                      "mosaic_policy": policy, "upload_report": report_path}
             if sidecar:
                 guard["sidecar_parent"] = str(path)
@@ -689,7 +695,8 @@ def cleanup_guards(config: dict, candidates: list[Any]) -> list[Any]:
     return approved
 
 
-def check_cleanup_guard(guard: dict, *, evidence_cache: dict | None = None) -> bool:
+def check_cleanup_guard(guard: dict, *, evidence_cache: dict | None = None,
+                        hash_cache: CleanupHashCache | None = None) -> bool:
     """Fail closed when a preview's target or its downstream proof has changed."""
     target = Path(guard["target"])
     if guard.get("sidecar_parent") and Path(guard["sidecar_parent"]).exists():
@@ -698,12 +705,11 @@ def check_cleanup_guard(guard: dict, *, evidence_cache: dict | None = None) -> b
             or (not guard.get("sidecar_parent") and auxiliary_hashes(target) != guard.get("target_auxiliary_hashes", {}))):
         return False
     if guard["stage"] == "mosaic":
-        from swotflow.verification.retention import current_cleanup_evidence, ingestion_cleanup_matches, CONFIRMED_INGESTION
+        from swotflow.verification.retention import current_cleanup_evidence, ingestion_cleanup_matches
         policy = guard.get("mosaic_policy", "full_pixels")
         active, uploads = current_cleanup_evidence(Path(guard["logs"]), guard["collection"], policy,
                                                    guard.get("upload_report", ""), evidence_cache)
-        if policy == CONFIRMED_INGESTION:
-            current = VerificationStore(Path(guard["logs"])).artifact(Path(guard["downstream"]["path"]))
-            return current == guard["downstream"] and ingestion_cleanup_matches(current, active, uploads)
-        return all(active.get(n, {}).get("checksum") == h for n, h in guard["downstream"]["sources"].items())
-    return artifact_current(guard["downstream"])
+        current = VerificationStore(Path(guard["logs"])).artifact(Path(guard["downstream"]["path"]))
+        return current == guard["downstream"] and ingestion_cleanup_matches(current, active, uploads)
+    current = VerificationStore(Path(guard["logs"])).artifact(Path(guard["downstream"]["path"]))
+    return current == guard["downstream"] and artifact_current(current, hash_cache=hash_cache)

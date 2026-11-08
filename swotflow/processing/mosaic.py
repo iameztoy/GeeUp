@@ -542,6 +542,14 @@ def write_mosaic_manifest(config: MosaicConfig, rows: Iterable[Dict[str, str]]) 
     )
 
 
+def checkpoint_mosaic_result(config: MosaicConfig, row: Dict[str, str]) -> None:
+    """Persist each completed group without rereading/exporting the whole history."""
+    if mosaic_manifest_completed(row) and row.get("output_file"):
+        upsert_project_rows(
+            config.manifest_csv, [row], dataset="mosaic_manifest", export_csv=False,
+        )
+
+
 def write_mosaic_workflow_manifest(config: MosaicConfig, rows: Iterable[Dict[str, str]]) -> None:
     """Update the shared workflow manifest with mosaic rows."""
     workflow_rows: List[Dict[str, Any]] = []
@@ -638,11 +646,12 @@ def preflight_mosaic_group(
         stale = bool(previous_signature and previous_signature != signature)
         if config.verified_workflow:
             from swotflow.verification.pipeline import VerificationStore
-            if not VerificationStore(config.manifest_csv.parent).reusable(
+            stale = not VerificationStore(config.manifest_csv.parent).reusable(
                 "mosaic", group.output_file, [s.path for s in group.sources], config
-            ):
-                stale = True
-        if config.require_all_inputs and not mosaic_manifest_completed(manifest_row):
+            )
+        # Verified current bytes/source membership survive a crash before the
+        # parent writes its manifest row. Legacy mode still requires that row.
+        if config.require_all_inputs and not config.verified_workflow and not mosaic_manifest_completed(manifest_row):
             stale = True
         status = "STALE_EXISTS" if stale else "SKIPPED_EXISTS"
         message = (
@@ -839,6 +848,8 @@ def run_mosaic(
             progress_callback(completed, total, f"Planning {group.output_file.name}")
         row, signature = preflight_mosaic_group(group, config, existing_manifest, dry_run)
         if row is not None:
+            if not dry_run:
+                checkpoint_mosaic_result(config, row)
             group_rows.append((index, row))
             completed += 1
             if progress_callback is not None:
@@ -852,6 +863,7 @@ def run_mosaic(
                 if progress_callback is not None:
                     progress_callback(completed, total, f"Processing {group.output_file.name}")
                 row = execute_mosaic_group(group, config, signature)
+                checkpoint_mosaic_result(config, row)
                 group_rows.append((index, row))
                 completed += 1
                 if progress_callback is not None:
@@ -884,6 +896,7 @@ def run_mosaic(
                             )
                             result_index = index
                             cleanup_temporary_output(group.output_file)
+                        checkpoint_mosaic_result(config, row)
                         group_rows.append((result_index, row))
                         completed += 1
                         if progress_callback is not None:
@@ -1127,11 +1140,8 @@ def world_file_path(path: Path) -> Path:
 def cleanup_temporary_output(output_file: Path) -> None:
     """Remove temporary mosaic files left after a failed write."""
     temp_file = temporary_mosaic_path(output_file)
-    for path in (
-        temp_file,
-        world_file_path(temp_file),
-        temp_file.with_suffix(f"{temp_file.suffix}.aux.xml"),
-    ):
+    from swotflow.core.sidecars import geotiff_sidecars
+    for path in [temp_file, *geotiff_sidecars(temp_file)]:
         try:
             if path.exists():
                 path.unlink()
@@ -1141,29 +1151,23 @@ def cleanup_temporary_output(output_file: Path) -> None:
 
 def promote_temporary_output(temp_file: Path, output_file: Path, config: MosaicConfig) -> None:
     """Atomically promote a completed temporary GeoTIFF to the final output name."""
+    from swotflow.core.sidecars import geotiff_sidecars
     temp_world = world_file_path(temp_file)
     final_world = world_file_path(output_file)
-    temp_aux = temp_file.with_suffix(f"{temp_file.suffix}.aux.xml")
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    # Preserve the previous raster family if replacing a locked TIFF fails.
+    # After replacement, failure to remove stale scientific companions fails
+    # the write and cannot produce a new verified artifact receipt.
     temp_file.replace(output_file)
+    for sidecar in geotiff_sidecars(output_file):
+        sidecar.unlink(missing_ok=True)
     if temp_world.exists():
         temp_world.replace(final_world)
-    elif config.write_world_file:
-        try:
-            if final_world.exists():
-                final_world.unlink()
-        except OSError:
-            pass
-    # An old final-name PAM file could override the new TIFF's grid/masks.
-    # Failure to remove it must fail the write, never certify a mixed artifact.
-    final_aux = output_file.with_suffix(f"{output_file.suffix}.aux.xml")
-    if final_aux.exists():
-        final_aux.unlink()
-    try:
-        if temp_aux.exists():
-            temp_aux.unlink()
-    except OSError:
-        pass
+    # Mosaic writers put nodata/masks in the TIFF itself. Discard temporary PAM
+    # metadata as before, and clean other temporary companions consistently.
+    for sidecar in geotiff_sidecars(temp_file):
+        sidecar.unlink(missing_ok=True)
+
 
 
 def is_disk_space_error(exc: BaseException) -> bool:

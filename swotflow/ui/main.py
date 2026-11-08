@@ -5418,6 +5418,14 @@ class LauncherApp:
         start = getattr(result, "period_start", "")
         return f"{start[:4]}/{result.stage}" if start else result.stage
 
+    @staticmethod
+    def current_automation_results(state: AutomationRunState) -> list[AutomationStageResult]:
+        """Summarize latest outcomes while retaining every attempt in the run history."""
+        return list({
+            (result.tile, result.period_start, result.period_end, result.stage): result
+            for result in state.stage_results
+        }.values())
+
     def apply_automation_run_state(
         self,
         state: AutomationRunState,
@@ -5454,12 +5462,7 @@ class LauncherApp:
         else:
             self.set_automation_progress_text("latest automation run loaded")
         if not status_text:
-            current_results = state.stage_results
-            if state.config.process_by_year:
-                current_results = list({
-                    (result.tile, result.period_start, result.period_end, result.stage): result
-                    for result in state.stage_results
-                }.values())
+            current_results = self.current_automation_results(state)
             failed = sum(1 for result in current_results if result.status == "failed")
             status_text = (
                 f"Loaded automation run {state.run_id}: {len(state.tile_plans)} tile(s), "
@@ -5664,24 +5667,15 @@ class LauncherApp:
         valid_tiles = set(self.automation_progress_tiles)
         valid_stages = set(self.automation_progress_stages)
         terminal_statuses = {"success", "skipped", "warning"}
-        if self.automation_progress_years:
-            latest_results = {
-                (result.tile, self.automation_result_stage_key(result)): result
-                for result in state.stage_results
-            }
-            self.automation_progress_completed_keys = {
-                key for key, result in latest_results.items()
-                if key[0] in valid_tiles and key[1] in valid_stages
-                and str(result.status or "").lower() in terminal_statuses
-            }
-        else:
-            self.automation_progress_completed_keys = {
-                (result.tile, result.stage)
-                for result in state.stage_results
-                if result.tile in valid_tiles
-                and result.stage in valid_stages
-                and str(result.status or "").lower() in terminal_statuses
-            }
+        latest_results = {
+            (result.tile, self.automation_result_stage_key(result)): result
+            for result in self.current_automation_results(state)
+        }
+        self.automation_progress_completed_keys = {
+            key for key, result in latest_results.items()
+            if key[0] in valid_tiles and key[1] in valid_stages
+            and str(result.status or "").lower() in terminal_statuses
+        }
         for plan in state.tile_plans:
             # Annual children revalidate each scoped window. A full-range parent
             # preflight classification is not an executed tile/year receipt.
@@ -5691,6 +5685,10 @@ class LauncherApp:
                 self.automation_progress_completed_keys.update(
                     (plan.tile, stage) for stage in self.automation_progress_stages
                 )
+        # A later failed attempt overrides an earlier success/preflight label.
+        for key, result in latest_results.items():
+            if str(result.status or "").lower() not in terminal_statuses:
+                self.automation_progress_completed_keys.discard(key)
         self.automation_progress_total_units = (
             len(self.automation_progress_tiles) * len(self.automation_progress_stages)
         )
@@ -5776,13 +5774,8 @@ class LauncherApp:
         self.automation_preflight_state = state
         self.populate_automation_tree(state)
         self.initialize_automation_progress_tracker(state)
-        current_results = state.stage_results
-        run_errors = state.errors if state.config.process_by_year else []
-        if state.config.process_by_year:
-            current_results = list({
-                (result.tile, result.period_start, result.period_end, result.stage): result
-                for result in state.stage_results
-            }.values())
+        current_results = self.current_automation_results(state)
+        run_errors = state.errors
         failed_results = [result for result in current_results if result.status == "failed"]
         warning_results = [result for result in current_results if result.status == "warning"]
         failed = len(failed_results)
@@ -5798,7 +5791,7 @@ class LauncherApp:
             result = failed_results[0]
             first_failure = f" First failure: {result.tile}/{self.automation_result_stage_key(result)}: {result.message[:300]}"
         elif run_errors:
-            first_failure = f" Outstanding yearly-run error: {run_errors[0][:300]}"
+            first_failure = f" Outstanding run error: {run_errors[0][:300]}"
         pending_notice = ""
         if state.unresolved_upload_count:
             pending_notice = (
@@ -5826,7 +5819,7 @@ class LauncherApp:
                 +
                 f"Failed stages: {failed}\n"
                 f"Warning stages: {warnings}\n"
-                + (f"Yearly-run errors: {len(run_errors)}\n" if state.config.process_by_year else "")
+                + (f"Yearly-run errors: {len(run_errors)}\n" if state.config.process_by_year else f"Run errors: {len(run_errors)}\n")
                 + (f"Retained uploads: {len(state.deferred_uploads)} (awaiting verification or recovery; Resume reconciles).\n"
                    if state.deferred_uploads else "")
                 +
@@ -6833,8 +6826,8 @@ class LauncherApp:
             self.cleanup_candidates = []
             self.populate_cleanup_tree([])
             self.cleanup_status_var.set(
-                "Cleanup preview is not loaded from the saved statistics snapshot. "
-                "Click Preview Cleanup or Refresh Statistics to compute current candidates."
+                "Statistics refresh does not evaluate cleanup eligibility. "
+                "Click Preview Cleanup to compute current candidates."
             )
 
         stage_totals: Dict[str, int] = {}
@@ -6945,7 +6938,7 @@ class LauncherApp:
     ) -> None:
         """Compute and save statistics off the Tkinter UI thread."""
         try:
-            insights = collect_project_insights(config)
+            insights = collect_project_insights(config, include_cleanup=False)
         except Exception as exc:
             self.root.after(0, self.finish_project_statistics_error, exc, notify)
             return
@@ -6991,7 +6984,7 @@ class LauncherApp:
         self.display_project_statistics(
             insights,
             status_text=f"Project statistics refreshed{suffix}.{snapshot_text}",
-            include_cleanup=True,
+            include_cleanup=False,
         )
         self.run_pending_statistics_refresh()
 
@@ -7013,7 +7006,7 @@ class LauncherApp:
                 self.require_active_project("refresh project statistics")
             return
         try:
-            insights = collect_project_insights(self.build_config())
+            insights = collect_project_insights(self.build_config(), include_cleanup=False)
         except Exception as exc:
             self.statistics_status_var.set(f"Could not refresh project statistics: {exc}")
             if notify:
@@ -7033,7 +7026,7 @@ class LauncherApp:
         self.display_project_statistics(
             insights,
             status_text=f"Project statistics refreshed{suffix}.{snapshot_text}",
-            include_cleanup=True,
+            include_cleanup=False,
         )
 
     def draw_bar_chart(

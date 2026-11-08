@@ -1,4 +1,4 @@
-# Workflow verification — v0.8.16
+# Workflow verification — v0.8.18
 
 Verified mode connects exact preferred NASA filenames and checksums to local outputs and current Earth Engine assets. It applies to initial runs and updates in the same project. Preserve the project logs and databases when cleaning rasters; independent projects do not automatically share history.
 
@@ -88,3 +88,9 @@ Approved consolidation evidence is reused only when it can be connected to check
 Back up `00_logs/nasa_catalog_history.sqlite3`, `download_verification.sqlite3`, `workflow_verification.sqlite3`, project manifests/database and consolidation plans/register. Dated stage reports are in `verification_reports/`; original-source results in `source_pixel_checks/`. Credentials are excluded from receipts.
 
 Broader historical refresh and integrity checks are manually launched; verified Automation now renews aged metadata for its current scope at reconciliation. Scheduling, automatic repair execution, a stratified collection-wide audit queue, automatic cloud retirement and a spatial gap atlas remain future work. A limited successful pilot supports those tested native cases; it does not certify every grid, date, processing version or optional projection. Investigation reports/data stay outside the application repository. Use the current application version in every GitHub release title and description. The historical spatial-shift mechanism remains unresolved; these safeguards and independent checks do not establish that cause.
+
+## Projected extraction correction — v0.8.18
+
+The existing Africa LAEA and WGS84 paths now use the WSE fill consistently across both GeoTIFF bands while preserving each source mask independently. Previously, reopening a projected TIFF could expose the quality fill as WSE nodata. Tests compare reopened values and masks against independently warped bands and preserve a valid elevation of 255 m.
+
+Old local projected extraction receipts/manifests cannot satisfy the corrected policy and require regeneration when processing those inputs. Native UTM extraction and its receipt signature are unchanged. This release does not automatically re-download, replace or certify previously ingested projected assets; those require an explicit scoped review/rebuild. A new run in an existing history is not a general scientific reprocessing command. Use a separate project for a different product.
