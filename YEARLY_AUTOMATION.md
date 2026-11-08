@@ -14,8 +14,9 @@ over the tile list or results table it scrolls that list/table instead.
    settings in the corresponding tabs. Check their input and output folders.
 2. In **Automation**, select the full date range and UTM tiles. Enable
    **Process each tile year by year**.
-3. Choose whether to upload and whether to enable cleanup. Set the minimum free
-   space reserve for the output volumes.
+3. Choose whether to upload. Select **Clean downloaded and extracted files**
+   and **Remove uploaded mosaics** independently; choose the mosaic cleanup policy.
+   Set the minimum free space reserve for the output volumes.
 4. Run **Preflight** and review the expected inputs and warnings. Authenticate
    Earthdata when downloads are needed, then start Automation.
 
@@ -98,11 +99,12 @@ or a failed batch-boundary check still prevent later years of the affected tile
 from starting. Continue on tile failure can then allow other tiles to proceed.
 Low storage and user stop requests always stop further batches for all tiles.
 
-Cleanup remains optional and uses the existing verification requirements. Raw
-and extracted files are removed only when their downstream evidence permits it.
-Final mosaics may remain locally while full pixel-verification evidence is
-pending; Earth Engine asset existence alone is not sufficient for deleting those
-files. With cleanup disabled, local files accumulate across tile/year batches.
+Cleanup is optional, with separate controls for downloaded/extracted files and
+uploaded mosaics. Raw/extracted cleanup keeps its existing downstream proof rules.
+From v0.8.16, **Remove uploaded mosaics** can use confirmed EE ingestion with
+matching provenance, or the stricter full pixel policy. Pending/failed/uncertain
+files remain local. The same rules apply without yearly scheduling; see
+[mosaic cleanup](MOSAIC_CLEANUP.md). Disabled categories accumulate on disk.
 
 Before download, extraction and mosaicking stages, Automation checks the free
 space on the volume containing that stage's configured output folder. A reserve
@@ -135,12 +137,12 @@ it does not create a failed year or discard outputs. The stop reason is retained
 in the run checkpoint. A genuine failed stage or low-disk-space gate remains a
 separate error requiring review. **Resume Run** continues pending stages.
 
-If cleanup was initially disabled, enable **Cleanup after verified stages**
-before Resume. Completed years are revisited for their skipped cleanup only,
+If cleanup was initially disabled, enable the desired **Clean downloaded and
+extracted files** and/or **Remove uploaded mosaics** control before Resume. Completed years are revisited for their skipped cleanup only,
 without downloading, mosaicking or uploading those years again. Remaining years
 use the new setting. Changing it during execution takes effect on the next
 Start/Resume, not in a running worker. Current verification guards still decide
-which files are eligible; final mosaics require full EE pixel evidence. Logs,
+which files are eligible under the selected mosaic policy. Logs,
 filename/version histories and source memberships remain, and Statistics updates
 on-disk counts after cleanup without subtracting historical processing totals.
 

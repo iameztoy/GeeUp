@@ -1907,9 +1907,16 @@ def plan_cleanup_candidates(
     result = sorted(candidates.values(), key=cleanup_order)
     if candidate_filter is not None:
         result = [candidate for candidate in result if candidate_filter(candidate)]
+    from swotflow.verification.retention import mosaic_cleanup_policy, mosaic_cleanup_enabled, CONFIRMED_INGESTION
+    if not mosaic_cleanup_enabled(config):
+        result = [r for r in result if r.stage != "mosaic"]
     if config.get("download", {}).get("verified_downloads", False):
         from swotflow.verification.pipeline import cleanup_guards
         result = cleanup_guards(dict(config), result)
+    elif mosaic_cleanup_policy(config) == CONFIRMED_INGESTION:
+        from swotflow.verification.pipeline import cleanup_guards
+        mosaics = cleanup_guards(dict(config), [r for r in result if r.stage == "mosaic"])
+        result = [r for r in result if r.stage != "mosaic"] + mosaics
     return result
 
 
@@ -2356,6 +2363,12 @@ def _collect_project_insights(config: Mapping[str, Any]) -> ProjectInsights:
         )
         for tile in all_qa_tiles
     ]
+    from swotflow.verification.retention import mosaic_cleanup_policy, mosaic_cleanup_enabled, POLICY_LABELS
+    metrics["Mosaic cleanup enabled"] = "Yes" if mosaic_cleanup_enabled(config) else "No"
+    policy = mosaic_cleanup_policy(config)
+    metrics["Mosaic cleanup policy"] = next(label for label, value in POLICY_LABELS.items() if value == policy)
+    metrics["Mosaic cleanup verification scope"] = ("Confirmed revision/provenance; pixel certification separate"
+        if policy == "confirmed_ingestion" else "Full pixel verification required")
     yearly_automation = read_yearly_automation_overview(config)
     (
         update_campaign_summaries,
@@ -2472,11 +2485,12 @@ def delete_cleanup_candidates(candidates: Iterable[CleanupCandidate]) -> tuple[i
     bytes_deleted = 0
     errors: List[str] = []
     partials: List[PartialDownloadProof] = []
+    evidence_cache: dict = {}
     for candidate in sorted(candidates, key=cleanup_order):
         if candidate.verification_guard is not None:
             from swotflow.verification.pipeline import check_cleanup_guard
             try:
-                valid = check_cleanup_guard(candidate.verification_guard)
+                valid = check_cleanup_guard(candidate.verification_guard, evidence_cache=evidence_cache)
             except (OSError, ValueError) as exc:
                 errors.append(f"{candidate.path}: verification failed: {exc}")
                 continue

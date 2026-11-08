@@ -1,5 +1,14 @@
 # Release history
 
+## 0.8.16 — 8 November 2026
+
+- Separate **Clean downloaded and extracted files** from the opt-in **Remove uploaded mosaics** control in Automation. Share the mosaic setting with Cleanup and apply the same eligibility rules in ordinary and calendar-year runs.
+- Offer **Confirmed EE ingestion + matching provenance** for mosaic removal without reading every cloud pixel. Require a recent complete inventory, matching asset revision token, local SHA-256, source checksums, recorded destination and successful upload state. Retain pending, failed, unknown, changed, duplicate or unproven files; known current pixel failures block this policy. Full pixel verification remains a separate stricter choice.
+- Recheck local bytes and current records immediately before deletion; remove proven sidecars with their parent. Reuse metadata within a deletion batch and invalidate it when inventories or SQLite histories change, including updates not yet exported to CSV.
+- Preserve NASA filenames, processing versions, source membership, upload records and receipts. Resume and download reuse accept current confirmed ingestion evidence after cleanup without calling it pixel certification; new/changed sources and changed settings still invalidate reuse.
+- Record the selected cleanup policy in run JSON/CSV and Statistics. Refresh on-disk counts without subtracting historical processing totals. Changing cleanup preferences applies on Start/Resume, including eligible completed-year cleanup, without altering an active worker.
+- Keep mosaic removal off by default in the GUI. Legacy non-GUI configurations without the new section retain their previous strict/master-cleanup behavior. Add cleanup, scheduling, Resume, sidecar, Statistics and GUI regression coverage; show v0.8.16 on Home and in the window title.
+
 ## 0.8.15 — 7 November 2026
 
 - Respect the selected Upload completion mode in yearly Automation, child configurations and Resume. Remove the implicit `wait_for_ee` override; the existing conservative mode remains available and the default when no mode is configured.

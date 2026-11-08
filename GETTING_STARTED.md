@@ -96,7 +96,7 @@ SWOTFlow opens on the **Home** tab. Use it for the project summary, selected-til
 
 The **Automation** tab is for unattended tile-by-tile runs inside an open project. Use `Authenticate Earthdata` there, or authenticate from Download, before a run that needs new PO.DAAC downloads. Select tiles, choose the date range, run `Run Preflight`, then start automation only after the preflight passes. When `Include upload` is enabled, preflight first synchronizes the target Earth Engine collection automatically so tile classifications and cleanup decisions use current verified assets. Preflight also warns about pending Windows reboot markers and active-hours restart risk; restart, pause updates, or adjust Windows Update settings before overnight runs when those warnings appear. Use `Upload completion mode` to choose whether Automation waits for active EE ingestion tasks before moving to the next tile or submits and verifies them later. Keep `Prevent computer sleep while automation runs` enabled for overnight work; on Windows this asks the OS to stay awake while Automation is active. Enable `Start automatically after successful preflight` when you want the run to begin without a second click. `Stop After Current Stage` records a resumable run. After reopening an unchanged project, authenticate Earthdata if downloads remain and click `Resume Run`; a new preflight is not required. Run a fresh preflight instead when dates, tiles, settings, project files, uploads, cleanup, or manual processing changed while Automation was stopped. Use `Copy Download Date Range` when you want automation to use the same temporal window as the manual Download tab; SWOTFlow warns when the two date ranges differ. Upload is optional because browser-based Earth Engine upload still needs an untouched Chrome/session.
 
-During execution, Automation reports `Stage execution`, an aggregate percentage based on completed or skipped tile-stage units, together with the current tile position and stage. This gives a stable overview for large queues while detailed file progress remains in the status message and stage logs. A 100% stage-execution value means all configured stages were attempted; the final message separately reports any mosaics still awaiting upload verification. Tiles already complete for the requested date range are skipped on resume; cleanup is not rerun for those complete tiles. If a CMR/Earthdata metadata search times out, the tile is left resumable, later tiles can continue, and Automation retries deferred CMR/download-search failures after the first tile pass.
+During execution, Automation reports `Stage execution`, an aggregate percentage based on completed or skipped tile-stage units, together with the current tile position and stage. This gives a stable overview for large queues while detailed file progress remains in the status message and stage logs. A 100% stage-execution value means all configured stages were attempted; the final message separately reports any mosaics still awaiting upload verification. Tiles already complete for the requested date range are skipped on resume; eligible skipped cleanup can be revisited after enabling its controls before Resume. If a CMR/Earthdata metadata search times out, the tile is left resumable, later tiles can continue, and Automation retries deferred CMR/download-search failures after the first tile pass.
 
 Use this restart rule:
 
@@ -124,8 +124,9 @@ manifests and filename/version history remain cumulative. Run a new preflight
 after changing the run's scope or processing settings.
 
 Cleanup still requires verified downstream evidence. Raw and extracted files
-can be released when eligible; final mosaics can remain until full pixel checks
-permit their deletion. Free-space checks examine each stage's actual output
+can be released when eligible. **Remove uploaded mosaics** is a separate opt-in,
+using confirmed ingestion with matching provenance or the strict full-pixel policy;
+pending files remain local. See [mosaic cleanup](MOSAIC_CLEANUP.md). Free-space checks examine each stage's actual output
 volume before that stage starts, but do not predict its peak disk use. One
 tile-year can still exceed capacity. With cleanup disabled, files accumulate.
 
@@ -360,7 +361,9 @@ A different date window creates a separate campaign. Reusing the exact dates of 
 
 ### 7. Cleanup
 
-Cleanup is a separate tab because it can delete local intermediate files. Click `Preview Cleanup` first; SWOTFlow only offers files with downstream project-record proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine. Then delete selected rows, or delete all previewed candidates when you are sure the project stage is complete.
+Cleanup is a separate tab because it can delete local intermediate files. Select
+**Remove uploaded mosaics** separately to include eligible mosaics under the selected
+[mosaic cleanup policy](MOSAIC_CLEANUP.md). This setting is shared with Automation. Click `Preview Cleanup` first; SWOTFlow only offers files with downstream project-record proof, such as raw files that were already extracted or mosaics that were uploaded or verified in Earth Engine. Then delete selected rows, or delete all previewed candidates when you are sure the project stage is complete.
 
 Interrupted Earthdata transfers can also leave `partial_*` files in the raw download folder. **Preview Cleanup** includes these under **partial** only when their embedded metadata identifies the exact HR Raster product/version and the project confirms a later successful download and extraction. The complete raw and extracted files may already have been cleaned up; their history remains sufficient proof. Unknown or ambiguous fragments, missing proof, and files modified within the last hour are retained.
 

@@ -260,7 +260,9 @@ def ingestion_properties(receipt: dict) -> dict[str, str]:
 def bound_ingestion(receipt: dict, asset: dict) -> bool:
     """Require the same confirmed EE revision, never presence/name alone."""
     from swotflow.consolidation.core import snapshot_asset
-    return bool(receipt.get("phase") == "confirmed" and
+    required = {"token", "local_sha256", "sources", "asset_id"}
+    return bool(required <= receipt.keys() and receipt.get("sources") and receipt.get("local_sha256")
+                and receipt.get("asset_id") == asset.get("id") and receipt.get("phase") == "confirmed" and
                 receipt.get("asset_fingerprint") == digest(snapshot_asset(asset)) and
                 all(asset.get("properties", {}).get(k) == v for k, v in ingestion_properties(receipt).items()))
 
@@ -504,9 +506,11 @@ def load_inventory(store: VerificationStore, collection: str) -> dict:
     return value if value.get("collection") == collection else {}
 
 
-def active_proofs(store: VerificationStore, collection: str) -> dict[str, dict]:
+def active_proofs(store: VerificationStore, collection: str, *, include_ingestion: bool = False) -> dict[str, dict]:
     """Resolve full-pixel original or approved replacement proofs to source bytes.
 
+    Operational callers can explicitly include confirmed ingestion receipts;
+    that evidence does not certify pixels. Scientific reports keep the default.
     A consolidated replacement must preserve a checksum chain to independently
     checked source assets. Legacy filename-only approvals remain unverified here.
     """
@@ -517,6 +521,7 @@ def active_proofs(store: VerificationStore, collection: str) -> dict[str, dict]:
     if not history.recent(inventory.get("finished_utc")):
         return {}
     receipts = store.cloud_receipts()
+    ingestions = store.ingestions() if include_ingestion else {}
     coverage = ReplacementRegister(default_path(collection), collection).coverage()
     excluded = {p["asset_id"] for p in coverage["products"] if p["role"] in {"represented original", "superseded revision"}}
     candidates: dict[str, list[dict]] = defaultdict(list)
@@ -524,9 +529,22 @@ def active_proofs(store: VerificationStore, collection: str) -> dict[str, dict]:
         if asset["id"] in excluded:
             continue
         receipt = receipts.get(asset["id"], {})
-        if receipt.get("passed") is True and receipt.get("mode") == "full" and receipt.get("asset_fingerprint") == digest(c.snapshot_asset(asset)):
-            for name, checksum in receipt.get("sources", {}).items():
-                candidates[name].append({"asset_id": asset["id"], "checksum": checksum})
+        fingerprint = digest(c.snapshot_asset(asset))
+        # A known current pixel failure vetoes operational reuse as well.
+        if receipt.get("passed") is False and receipt.get("asset_fingerprint") == fingerprint:
+            continue
+        evidence = "full_pixels"
+        if not (receipt.get("passed") is True and receipt.get("mode") == "full"
+                and receipt.get("asset_fingerprint") == fingerprint):
+            receipt = ingestions.get(asset["id"], {})
+            if not include_ingestion or not bound_ingestion(receipt, asset):
+                continue
+            evidence = "confirmed_ingestion"
+        for name, checksum in receipt.get("sources", {}).items():
+            candidates[name].append({"asset_id": asset["id"], "checksum": checksum,
+                                     "local_sha256": receipt.get("local_sha256", ""),
+                                     "auxiliary_hashes": receipt.get("auxiliary_hashes", receipt.get("local_auxiliary_hashes", {})),
+                                     "evidence": evidence})
     conflicts = {aid for row in coverage.get("conflicts", []) for aid in row.get("asset_id", "").split(", ")}
     for product in coverage["products"]:
         if (product["kind"] != "consolidated" or product["role"] != "active" or product["availability"] != "present"
@@ -567,7 +585,7 @@ def reusable_download_groups(granules: list[Any], store: VerificationStore, coll
     """Reuse only wholly represented local grouping keys; additions rebuild their group."""
     from swotflow.verification.download import provider_integrity
     from swotflow.core.metadata import parse_swot_l2_hr_raster_metadata
-    active = active_proofs(store, collection) if collection else {}
+    active = active_proofs(store, collection, include_ingestion=True) if collection else {}
     groups: dict[tuple, list[tuple[str, bool]]] = defaultdict(list)
     for g in granules:
         fields = parse_swot_l2_hr_raster_metadata(g.file_name).fields
@@ -616,7 +634,12 @@ def cleanup_guards(config: dict, candidates: list[Any]) -> list[Any]:
     for proof in artifacts.values():
         for path in proof["inputs"]:
             downstream[path].append(proof)
-    active = active_proofs(store, config.get("destination_parent", ""))
+    from swotflow.verification.retention import (
+        mosaic_cleanup_policy, CONFIRMED_INGESTION, current_cleanup_evidence, ingestion_cleanup_matches)
+    policy = mosaic_cleanup_policy(config)
+    report_path = str(config.get("artifacts", {}).get("report_csv", ""))
+    active, uploads = (current_cleanup_evidence(store.logs, config.get("destination_parent", ""), policy, report_path)
+                       if any(item.stage == "mosaic" for item in candidates) else ({}, {}))
     from swotflow.core.sidecars import geotiff_sidecars
     parents: dict[Path, set[Path]] = defaultdict(set)
     for name in set(artifacts) | set(downstream):
@@ -639,6 +662,8 @@ def cleanup_guards(config: dict, candidates: list[Any]) -> list[Any]:
         if item.stage == "mosaic":
             own = artifacts.get(str(path))
             good = own and (artifact_current(own) if path.exists() else sidecar) and own["sources"] and all(active.get(n, {}).get("checksum") == h for n, h in own["sources"].items())
+            if good and policy == CONFIRMED_INGESTION:
+                good = ingestion_cleanup_matches(own, active, uploads)
             proof = own if good else None
         else:
             stage = "extract" if item.stage == "raw" else "mosaic"
@@ -652,15 +677,19 @@ def cleanup_guards(config: dict, candidates: list[Any]) -> list[Any]:
                     or auxiliary_hashes(path) != proof.get("input_auxiliaries", {}).get(str(path), {})):
                 continue
             guard = {"logs": str(store.logs), "collection": config.get("destination_parent", ""),
-                     "target": str(target), "target_sha256": file_hash(target), "stage": item.stage,
-                     "downstream": proof, "target_auxiliary_hashes": auxiliary_hashes(target)}
+                     "target": str(target), "target_sha256": proof["sha256"] if item.stage == "mosaic" and not sidecar else file_hash(target), "stage": item.stage,
+                     "downstream": proof, "target_auxiliary_hashes": auxiliary_hashes(target),
+                     "mosaic_policy": policy, "upload_report": report_path}
             if sidecar:
                 guard["sidecar_parent"] = str(path)
-            approved.append(replace(item, verification_guard=guard, reason="Current downstream file/EE evidence; rechecked immediately before deletion."))
+            reason = ("Confirmed EE ingestion + matching provenance (pixels not certified)." if
+                      item.stage == "mosaic" and policy == CONFIRMED_INGESTION else
+                      "Current downstream file/EE evidence.")
+            approved.append(replace(item, verification_guard=guard, reason=reason + " Rechecked immediately before deletion."))
     return approved
 
 
-def check_cleanup_guard(guard: dict) -> bool:
+def check_cleanup_guard(guard: dict, *, evidence_cache: dict | None = None) -> bool:
     """Fail closed when a preview's target or its downstream proof has changed."""
     target = Path(guard["target"])
     if guard.get("sidecar_parent") and Path(guard["sidecar_parent"]).exists():
@@ -669,6 +698,12 @@ def check_cleanup_guard(guard: dict) -> bool:
             or (not guard.get("sidecar_parent") and auxiliary_hashes(target) != guard.get("target_auxiliary_hashes", {}))):
         return False
     if guard["stage"] == "mosaic":
-        active = active_proofs(VerificationStore(Path(guard["logs"])), guard["collection"])
+        from swotflow.verification.retention import current_cleanup_evidence, ingestion_cleanup_matches, CONFIRMED_INGESTION
+        policy = guard.get("mosaic_policy", "full_pixels")
+        active, uploads = current_cleanup_evidence(Path(guard["logs"]), guard["collection"], policy,
+                                                   guard.get("upload_report", ""), evidence_cache)
+        if policy == CONFIRMED_INGESTION:
+            current = VerificationStore(Path(guard["logs"])).artifact(Path(guard["downstream"]["path"]))
+            return current == guard["downstream"] and ingestion_cleanup_matches(current, active, uploads)
         return all(active.get(n, {}).get("checksum") == h for n, h in guard["downstream"]["sources"].items())
     return artifact_current(guard["downstream"])

@@ -377,3 +377,11 @@ automation:
   # Search NASA again to discover late/reprocessed products. False uses saved
   # expected matches where available and cannot discover newly published files.
   refresh_cmr: true
+
+# Mosaic removal is a separate opt-in. The selected policy applies once enabled.
+# Legacy configs without this section retain their prior strict cleanup behavior.
+# confirmed_ingestion requires current EE revision + local hash/source provenance.
+# Both policies retain pending/failed files; ingestion proof does not certify pixels.
+cleanup:
+  mosaics_enabled: false  # Explicit opt-in, independent of raw/extracted cleanup.
+  mosaic_policy: confirmed_ingestion  # confirmed_ingestion | full_pixels

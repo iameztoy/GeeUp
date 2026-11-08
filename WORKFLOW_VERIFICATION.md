@@ -1,4 +1,4 @@
-# Workflow verification — v0.8.11
+# Workflow verification — v0.8.16
 
 Verified mode connects exact preferred NASA filenames and checksums to local outputs and current Earth Engine assets. It applies to initial runs and updates in the same project. Preserve the project logs and databases when cleaning rasters; independent projects do not automatically share history.
 
@@ -7,7 +7,7 @@ Verified mode connects exact preferred NASA filenames and checksums to local out
 - A complete search queries both relevant Version D catalogues and keeps every returned filename/version. Existing processing priority chooses one preferred product per observation; lower versions and catalogue aliases remain recorded, without counting as missing acquisitions.
 - Downloads require the NASA size and checksum. Extraction and mosaicking record source/output hashes, mask/georeferencing sidecar hashes, grid metadata, run settings, code fingerprints and effective workers. Reuse checks the current bytes and scientific settings. A changed source, output or sidecar cannot pass on a historical success flag.
 - Lowest eligible quality selects WSE and QA together. Both bands share a no-data value in the final standalone GeoTIFF. Native misalignment and excluded incompatible inputs stop verified mosaicking.
-- Upload refreshes the actual collection inventory. A missing asset is not skipped merely because an old task succeeded. An existing same-ID asset without full pixel evidence remains pending verification.
+- Upload refreshes the actual collection inventory. A missing asset is not skipped merely because an old task succeeded. An existing same-ID asset without matching ingestion provenance or full pixel evidence remains pending verification. Confirmed ingestion does not certify pixel correctness.
 - Verified Automation ends with exact preferred-input accounting. Missing or ambiguous inputs fail reconciliation; complete recorded membership with untested pixels is a warning, not a scientific pixel certificate.
 
 Full source replays and full EE reads are **optional maintenance operations**, not automatically repeated for every processed file. Checksums do add local disk reads. Catalogue searches, environment capture and EE inventory refreshes operate at run/batch level.
@@ -77,9 +77,9 @@ verification databases and adds operational path mappings without rewriting the
 original receipt payloads. Combined Cleanup deletes raw, extracted and mosaic
 files in that order, rechecking each dependency immediately before deletion.
 
-A download group can skip reacquisition after raw cleanup only when **every** preferred source has checksum-linked full-pixel evidence in a recent active EE inventory. A new member or changed preferred source forces reacquisition of the affected local date/cycle/pass/grid group. Partially overlapping uploads are blocked for explicit replacement, avoiding duplicate observation membership.
+A download group can skip reacquisition after raw cleanup only when **every** preferred source has checksum-linked full-pixel or confirmed-ingestion evidence in a recent active EE inventory. Confirmed ingestion is operational reuse evidence, not pixel certification. A new member or changed preferred source forces reacquisition of the affected local date/cycle/pass/grid group. Partially overlapping uploads are blocked for explicit replacement, avoiding duplicate observation membership.
 
-Verified cleanup is conservative: raw files require a matching current extraction proof; extracted files require a matching current mosaic proof; local mosaics require full-pixel evidence for their active cloud representation. Target/downstream hashes are rechecked immediately before deletion. Logs, history, proof databases and sidecars are retained. Original-source replay needs the originals, so leave cleanup disabled until the desired acceptance checks finish.
+Verified cleanup is conservative: raw files require a matching current extraction proof; extracted files require a matching current mosaic proof; local mosaics use the explicit [mosaic cleanup policy](MOSAIC_CLEANUP.md), either confirmed ingestion with matching provenance or full-pixel evidence. Target/downstream hashes are rechecked immediately before deletion. Logs, history and proof databases are retained; proven raster sidecars can be deleted with their parent. Original-source replay needs the originals, so leave cleanup disabled until the desired acceptance checks finish.
 
 Approved consolidation evidence is reused only when it can be connected to checksum-certified original assets and current replacement fingerprints. Filename-only legacy evidence and unresolved chains remain pending. Physical cloud retirement and publication of an active dataset still require a separately reviewed workflow; this release does not automatically delete superseded assets.
 

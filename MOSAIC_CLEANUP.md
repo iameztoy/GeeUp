@@ -1,0 +1,40 @@
+# Optional mosaic cleanup — v0.8.16
+
+In Automation, these controls are independent:
+
+- **Clean downloaded and extracted files** removes eligible raw files after extraction and extracted TIFFs after mosaicking, using the existing downstream proof checks.
+- **Remove uploaded mosaics** removes eligible local mosaics after EE synchronization. It is off by default and is also available in the Cleanup tab. The selected policy applies in both ordinary and tile/year Automation.
+
+For routine storage management, select **Confirmed EE ingestion + matching provenance**. An asset with the same name is not enough: the recent complete EE inventory must match the upload revision, local file checksum and source history, and the upload record must identify the same destination with a successful status. Pending, failed, uncertain, changed or ambiguously linked files stay local. A recorded pixel-check failure for the current EE revision also prevents removal.
+
+This policy checks upload identity and ingestion, not every cloud pixel. **Full pixel verification (strict)** instead requires the existing full comparison evidence. That comparison checks every elevation, quality and valid/missing cell against the local mosaic. It is slower and remains a separate optional scientific check; choosing ingestion-based cleanup never creates a pixel-verification certificate. Without retained mosaics, later full local-to-EE comparison requires recreating them from the recorded sources.
+
+## When files are removed
+
+Automation evaluates cleanup at its cleanup stages after EE synchronization, including a final sweep for eligible delayed ingestions. It does not wait for a whole tile to finish all years. In **Submit and continue**, unfinished EE ingestions remain local; a later sync and cleanup can remove them after confirmation. This is not a background file watcher, and it does not delete files immediately when a task changes state.
+
+To enable removal for a continuing project:
+
+1. Let the current run finish or reach a normal pause; update and reopen the app.
+2. Open the same project. Select **Remove uploaded mosaics**, keeping **Confirmed EE ingestion + matching provenance** selected. Enable downloaded/extracted cleanup separately if wanted.
+3. Choose **Resume Run**. Eligible cleanup in completed years is revisited without repeating verified scientific work. For manual review while Automation is idle, use **Cleanup → Sync EE Assets + Preview Cleanup**, inspect the candidates, then delete the chosen rows.
+
+Selecting a checkbox or installing a release alone deletes nothing. Changing a preference during execution affects the next Start/Resume; a running worker retains its captured settings. Old assets without sufficient receipts remain for review, even if visible in EE. Cleanup only removes local files and proven raster sidecars, never EE assets.
+
+## Resume and Statistics
+
+Keep the project database and `00_logs`: NASA catalogue observations, downloaded filenames, processing versions, original checksums, mosaic memberships and upload receipts remain recorded after raster deletion. Statistics decreases current files/bytes on disk while retaining historical download, processing and upload counts. It shows the mosaic cleanup policy separately from pixel-integrity results; run JSON/CSV records the policy and deletion totals.
+
+Resume reuses cleaned outputs only when current EE evidence still identifies the same uploaded revision and preferred sources. New inputs or revised source bytes rebuild the affected local grouping; missing/changed cloud revisions or changed scientific settings cannot be skipped merely because an earlier run succeeded. Deferred files remain available for recovery. Consolidation replacement chains keep their existing independent proof requirements.
+
+## Configuration and compatibility
+
+```yaml
+cleanup:
+  mosaics_enabled: false
+  mosaic_policy: confirmed_ingestion  # or full_pixels
+```
+
+The GUI writes the explicit choice. Older non-GUI configurations without this section retain the prior strict policy and master cleanup behavior; there is no automatic deletion-policy migration in a running process. Confirmed-ingestion cleanup requires the verification receipts even when the surrounding project uses legacy download mode.
+
+Validation uses isolated application regression fixtures, including real local deletions and SQLite histories, both scheduling modes, sidecars, changed evidence, Resume and Statistics. No production imagery is deleted during release testing.

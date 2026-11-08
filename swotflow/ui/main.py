@@ -38,6 +38,7 @@ DUPLICATE_SCRIPT = PROJECT_ROOT / "swotflow/processing/duplicates.py"
 PROGRESS_PREFIX = "GEEUP_PROGRESS\t"
 APP_NAME = "SWOTFlow"
 from swotflow.version import __version__
+from swotflow.verification.retention import POLICY_LABELS, mosaic_cleanup_policy
 APP_VERSION = "v" + __version__
 GITHUB_URL = "https://github.com/iameztoy/GeeUp"
 DEFAULT_PROCESSING_ROOT = "./SWOT_Processing"
@@ -273,6 +274,10 @@ class LauncherApp:
         self.download_product_filter_var = tk.StringVar(value=download_product_filter_label)
         self.catalog_history_enabled_var = tk.BooleanVar(value=bool(download_data.get("catalog_history_enabled", False)))
         self.verified_downloads_var = tk.BooleanVar(value=bool(download_data.get("verified_downloads", False)))
+        self.mosaic_cleanup_enabled_var = tk.BooleanVar(value=bool(self.data.get("cleanup", {}).get("mosaics_enabled", False)))
+        self.mosaic_cleanup_policy_var = tk.StringVar(value=next(
+            label for label, value in POLICY_LABELS.items()
+            if value == mosaic_cleanup_policy(self.data, default="confirmed_ingestion")))
         self.download_start_date_var = tk.StringVar(
             value=str(download_data.get("start_date", ""))
         )
@@ -1046,7 +1051,7 @@ class LauncherApp:
         ).grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Checkbutton(
             settings,
-            text="Cleanup after verified stages",
+            text="Clean downloaded and extracted files",
             variable=self.automation_cleanup_enabled_var,
             command=self.automation_cleanup_changed,
         ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(8, 0))
@@ -1078,6 +1083,12 @@ class LauncherApp:
             text="Also applies to yearly batches. Pending uploads stay retained.",
             foreground="#555555",
         ).grid(row=2, column=4, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(settings, text="Remove uploaded mosaics", variable=self.mosaic_cleanup_enabled_var,
+                        command=self.automation_cleanup_changed).grid(row=9, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(settings, textvariable=self.mosaic_cleanup_policy_var, values=list(POLICY_LABELS),
+                     state="readonly", width=43).grid(row=9, column=1, columnspan=4, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Label(settings, text="Independent of raw/extracted cleanup. Applies on Start/Resume; pending/failed files stay local.",
+                  wraplength=700, foreground="#555555").grid(row=10, column=0, columnspan=8, sticky="w", pady=(4, 0))
         ttk.Button(
             settings,
             text="Authenticate Earthdata",
@@ -1106,9 +1117,9 @@ class LauncherApp:
             settings,
             text=(
                 "Finish all requested years for one tile before moving to the next tile. "
-                "Uploads wait for Earth Engine confirmation in this mode. "
+                "The selected upload completion mode applies. "
                 "Space is released only when cleanup is enabled and its checks pass; "
-                "uncertified final mosaics remain local, and one tile-year can still exceed available storage. "
+                "pending or unverified mosaics remain local, and one tile-year can still exceed available storage. "
                 "For later local mosaics across UTM tiles, retain the source rasters by disabling cleanup."
             ),
             foreground="#555555",
@@ -2761,9 +2772,15 @@ class LauncherApp:
             command=self.delete_all_cleanup_files,
         ).grid(row=0, column=3, sticky="w", padx=(8, 0))
 
-        ttk.Button(parent, text="Diagnostic Cleanup...", command=self.show_diagnostic_cleanup).grid(
-            row=2, column=0, sticky="w", pady=(0, 8)
-        )
+        policy_bar = ttk.Frame(parent)
+        policy_bar.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(policy_bar, text="Diagnostic Cleanup...", command=self.show_diagnostic_cleanup).pack(side="left")
+        ttk.Checkbutton(policy_bar, text="Remove uploaded mosaics", variable=self.mosaic_cleanup_enabled_var,
+                        command=self.preview_cleanup_candidates).pack(side="left", padx=8)
+        policy_choice = ttk.Combobox(policy_bar, textvariable=self.mosaic_cleanup_policy_var,
+                                    values=list(POLICY_LABELS), state="readonly", width=43)
+        policy_choice.pack(side="left")
+        policy_choice.bind("<<ComboboxSelected>>", lambda _event: self.preview_cleanup_candidates())
 
         ttk.Label(
             parent,
@@ -3387,6 +3404,10 @@ class LauncherApp:
         self.download_product_filter_var.set(download_product_filter_label)
         self.catalog_history_enabled_var.set(bool(download_data.get("catalog_history_enabled", False)))
         self.verified_downloads_var.set(bool(download_data.get("verified_downloads", False)))
+        self.mosaic_cleanup_enabled_var.set(bool(self.data.get("cleanup", {}).get("mosaics_enabled", False)))
+        self.mosaic_cleanup_policy_var.set(next(
+            label for label, value in POLICY_LABELS.items()
+            if value == mosaic_cleanup_policy(self.data, default="confirmed_ingestion")))
         self.download_start_date_var.set(str(download_data.get("start_date", "")))
         self.download_end_date_var.set(str(download_data.get("end_date", "")))
         self.download_output_var.set(download_data.get("output_folder", raw_downloads))
@@ -5046,6 +5067,8 @@ class LauncherApp:
                     / "ee_asset_inventory.csv"
                 ),
             },
+            "cleanup": {"mosaic_policy": POLICY_LABELS[self.mosaic_cleanup_policy_var.get()],
+                        "mosaics_enabled": self.mosaic_cleanup_enabled_var.get()},
             "automation": {
                 "utm_tiles": sorted(self.automation_selected_tiles),
                 "start_date": self.automation_start_date_var.get().strip(),

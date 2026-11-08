@@ -76,6 +76,7 @@ AUTOMATION_RUN_COLUMNS = [
     "log_path",
     "deleted_files",
     "deleted_bytes",
+    "cleanup_policy",
     "period_start",
     "period_end",
 ]
@@ -180,6 +181,7 @@ class AutomationStageResult:
     deleted_bytes: int = 0
     period_start: str = ""
     period_end: str = ""
+    cleanup_policy: str = ""
 
 
 @dataclass
@@ -247,6 +249,9 @@ def ensure_run_state(config: AutomationConfig) -> AutomationRunState:
 
 def normalize_automation_config(config: AutomationConfig) -> AutomationConfig:
     """Return a validated copy of automation settings."""
+    from swotflow.verification.retention import mosaic_cleanup_policy, mosaic_cleanup_enabled
+    mosaic_cleanup_policy(config.base_config)
+    mosaic_cleanup_enabled(config.base_config, legacy_enabled=config.cleanup_enabled)
     normalized = AutomationConfig(
         project_root=Path(config.project_root),
         base_config=deepcopy(config.base_config),
@@ -789,10 +794,10 @@ def _preflight_automation(
         state.warnings.append(
             "Calendar-year mode finishes each tile year by year before moving to the next tile. "
             "One tile/year can still exceed available storage. Raw/extracted cleanup "
-            "keeps its existing proof checks; final mosaics remain until pixel-verification evidence permits deletion."
+            "keeps its proof checks; the selected mosaic policy controls when confirmed outputs can be deleted."
         )
         if not normalized.cleanup_enabled:
-            state.warnings.append("Cleanup is disabled: files will accumulate across years.")
+            state.warnings.append("Downloaded/extracted cleanup is disabled: intermediate files will accumulate across years.")
 
     try:
         usage = shutil.disk_usage(normalized.project_root)
@@ -1327,6 +1332,7 @@ def _stage_result_from_mapping(data: Mapping[str, Any]) -> AutomationStageResult
         log_path=str(data.get("log_path", "") or ""),
         deleted_files=_coerce_int(data.get("deleted_files")),
         deleted_bytes=_coerce_int(data.get("deleted_bytes")),
+        cleanup_policy=str(data.get("cleanup_policy", "") or ""),
         period_start=str(data.get("period_start", "") or ""),
         period_end=str(data.get("period_end", "") or ""),
     )
@@ -1413,9 +1419,14 @@ def completed_stage_keys(state: AutomationRunState) -> set[tuple[str, str]]:
 
 
 def cleanup_due_on_resume(state: AutomationRunState, result: AutomationStageResult) -> bool:
-    """Retry disabled or interrupted cleanup only when the user now enables it."""
-    return (state.config.cleanup_enabled and result.stage.endswith("_cleanup")
-            and (result.status in {"warning", "failed"}
+    """Retry disabled/interrupted cleanup or a newly selected mosaic policy."""
+    from swotflow.verification.retention import mosaic_cleanup_policy, mosaic_cleanup_enabled
+    enabled = (mosaic_cleanup_enabled(state.config.base_config, legacy_enabled=state.config.cleanup_enabled)
+               if result.stage == "mosaic_cleanup" else state.config.cleanup_enabled)
+    policy_changed = (result.stage == "mosaic_cleanup" and
+                      (result.cleanup_policy or "full_pixels") != mosaic_cleanup_policy(state.config.base_config))
+    return (enabled and result.stage.endswith("_cleanup")
+            and (policy_changed or result.status in {"warning", "failed"}
                  or (result.status == "skipped" and "Cleanup disabled" in result.message)))
 
 
@@ -1498,7 +1509,11 @@ def execute_cleanup_result(
     deleted, bytes_deleted, errors = cleanup_stage(tile_config, tile, cleanup_stage_name)
     status = "success" if not errors else "warning"
     scope = "global verified mosaic sweep" if stage == "mosaic_cleanup" else f"{tile} {cleanup_stage_name}"
+    from swotflow.verification.retention import mosaic_cleanup_policy
+    policy = mosaic_cleanup_policy(tile_config) if stage == "mosaic_cleanup" else ""
     message = f"{scope}: deleted {deleted} file(s), {format_bytes(bytes_deleted)}."
+    if policy:
+        message += f" Mosaic cleanup policy: {policy}."
     if errors:
         message = f"{message} {len(errors)} cleanup error(s): {'; '.join(errors[:3])}"
     return AutomationStageResult(
@@ -1511,6 +1526,7 @@ def execute_cleanup_result(
         message=message,
         deleted_files=deleted,
         deleted_bytes=bytes_deleted,
+        cleanup_policy=policy,
     )
 
 
@@ -1519,7 +1535,9 @@ def execute_final_verified_mosaic_cleanup_if_needed(
     normalized: AutomationConfig,
 ) -> AutomationStageResult | None:
     """Run one final global mosaic cleanup sweep for delayed EE verification."""
-    if not normalized.include_upload or not normalized.cleanup_enabled or state.stopped:
+    from swotflow.verification.retention import mosaic_cleanup_enabled
+    if (not normalized.include_upload or state.stopped or
+            not mosaic_cleanup_enabled(normalized.base_config, legacy_enabled=normalized.cleanup_enabled)):
         return None
     if not any(candidate.stage == "mosaic" for candidate in plan_cleanup_candidates(
         normalized.base_config, include_partial_downloads=False,
@@ -1699,7 +1717,10 @@ def _run_automation_normalized(
                         progress_callback(tile, stage, blocked.status, blocked.message)
                     return True
             if stage.endswith("_cleanup"):
-                if normalized.cleanup_enabled:
+                from swotflow.verification.retention import mosaic_cleanup_enabled
+                enabled = (mosaic_cleanup_enabled(tile_config, legacy_enabled=normalized.cleanup_enabled)
+                           if stage == "mosaic_cleanup" else normalized.cleanup_enabled)
+                if enabled:
                     result = execute_cleanup_result(state, tile_config, tile, stage)
                 else:
                     result = stage_skipped_result(state, tile, stage, "Cleanup disabled for this automation run.")

@@ -1539,7 +1539,7 @@ class EarthEngineUIUploader:
                         raise ValueError("Existing EE revision is unverified or differs from the local mosaic: " + item.asset_id +
                                          ". Run a full pixel check or prepare an explicit replacement; presence alone cannot skip upload.")
                 if not hasattr(self, "_verified_active_inputs"):
-                    self._verified_active_inputs = active_proofs(store, self.config.destination_parent)
+                    self._verified_active_inputs = active_proofs(store, self.config.destination_parent, include_ingestion=True)
                 active = self._verified_active_inputs
                 if proof["sources"] and all(active.get(n, {}).get("checksum") == value for n, value in proof["sources"].items()):
                     self.resume_skipped_assets.append(item.asset_id)

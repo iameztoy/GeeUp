@@ -65,13 +65,14 @@ def verified_resume_stages(config: dict[str, Any], saved: dict[str, Any],
         if artifact_current(proof):
             covered.update(proof["sources"])
         elif not Path(proof["path"]).exists() and config.get("destination_parent"):
-            # Cleanup can remove a fully verified mosaic while another upload
-            # in this year remains pending. Reuse the same exact-source/full-
-            # pixel evidence required for that cleanup, never asset presence.
+            # Cleanup may use full pixel proof or exact confirmed ingestion.
+            # Operational reuse must accept that same provenance after deletion,
+            # including if the user later chooses a stricter deletion policy.
             if active is None:
                 from swotflow.verification.pipeline import active_proofs
-                active = active_proofs(store, config["destination_parent"])
-            if all(active.get(n, {}).get("checksum") == checksum for n, checksum in proof["sources"].items()):
+                active = active_proofs(store, config["destination_parent"], include_ingestion=True)
+            from swotflow.verification.retention import source_proof_matches
+            if source_proof_matches(proof, active):
                 covered.update(proof["sources"])
     if covered == set(expected):
         return required | ({"raw_cleanup", "mosaic", "extracted_cleanup"} & completed), scan_id

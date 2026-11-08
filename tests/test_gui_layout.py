@@ -337,6 +337,28 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_mosaic_cleanup_is_an_independent_persisted_shared_control(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            self.assertFalse(app.mosaic_cleanup_enabled_var.get())
+            self.assertIn('Remove uploaded mosaics', collect_label_texts(app.tabs_by_name['Automation']))
+            self.assertIn('Remove uploaded mosaics', collect_label_texts(app.tabs_by_name['Cleanup']))
+            app.automation_cleanup_enabled_var.set(False)
+            app.mosaic_cleanup_enabled_var.set(True)
+            app.mosaic_cleanup_policy_var.set('Confirmed EE ingestion + matching provenance')
+            config = app.build_config()
+            self.assertFalse(config['automation']['cleanup_enabled'])
+            self.assertEqual(config['cleanup'], {'mosaics_enabled': True, 'mosaic_policy': 'confirmed_ingestion'})
+            with mock.patch.object(app, 'start_automation') as start:
+                app.automation_preflight_state = object()
+                app.resume_automation_run()
+                start.assert_called_once()
+            self.assertTrue(app.mosaic_cleanup_enabled_var.get())
+        finally:
+            root.destroy()
+
     def test_tab_order_and_gdal_field_placement(self) -> None:
         root = tk.Tk()
         root.withdraw()

@@ -47,3 +47,15 @@ sync can update cumulative upload/source totals before the earlier yearly
 checkpoint is revisited. Resume reconciles that checkpoint and skips currently
 active or verified assets. Cleanup never subtracts retained filename/source
 history; local disk counts and historical processing counts remain distinct.
+
+
+## Mosaic cleanup policy — v0.8.16
+
+Overview includes **Mosaic cleanup enabled**, **Mosaic cleanup policy**, and its
+verification scope. Confirmed-ingestion cleanup is not full pixel certification.
+Local mosaic/byte counts decrease when files are removed; historical filenames,
+source memberships, processing versions and uploaded counts remain. Pending and
+failed files stay local and remain in their existing backlog categories. Cleanup
+stage JSON/CSV records its policy, deleted-file count and bytes. Refresh Statistics
+after manual cleanup; selecting a policy alone does not change processing totals.
+See [mosaic cleanup and Resume](MOSAIC_CLEANUP.md).

@@ -92,7 +92,7 @@ The app detects browser validation/transfer errors, remote ingestion failures an
 
 Each run keeps the exception list in `automation_run.json` (`deferred_uploads`); verification reports retain the corresponding source filenames/checksums and EE completeness remains false. Statistics exports `00_logs/statistics/project_statistics_deferred_uploads.csv` with pending paths, asset IDs and last errors, alongside annual status/counts. Historical failures stay in upload events after a successful retry; current status and the next completed reconciliation remove recovered files from the pending list.
 
-Cleanup runs only when enabled and keeps its existing safeguards: intact downstream extraction/mosaic proofs for intermediates, and current full-pixel/source evidence for final mosaic deletion. Deferred local mosaics must be retained for recovery. This release does not loosen those requirements to save disk space.
+Cleanup runs only when enabled. Intermediates require intact downstream extraction/mosaic proofs. From v0.8.16, final mosaic removal is a separate option using confirmed ingestion plus matching provenance, or full-pixel/source evidence. Deferred local mosaics remain retained for recovery. See [mosaic cleanup](MOSAIC_CLEANUP.md); neither policy treats an active task as successful ingestion.
 
 To continue an existing run, close the idle older app, reopen v0.8.14, open the same project and choose Automation → Resume Run. Keep Fail fast off for per-file continuation; enable Cleanup if desired before Resume. Do not create a new project or delete pending mosaics. Resume checks retained evidence first, so uploads may not begin immediately. Authenticate when a later year's downloads require it.
 

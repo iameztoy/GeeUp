@@ -1,4 +1,4 @@
-# Resume, cleanup and processing versions — v0.8.8
+# Resume, cleanup and processing versions — v0.8.16
 
 ## Resume after a shutdown
 
@@ -10,16 +10,17 @@ Resume finishes the saved selection. Start a new preflight/update to discover ne
 
 ## GeoTIFF sidecars
 
-From v0.8.8, enable **Cleanup after verified stages** before **Resume Run** to
-apply cleanup to the continuing run and eligible files in completed years whose
+Select **Clean downloaded and extracted files** and/or **Remove uploaded mosaics**
+before **Resume Run** to apply cleanup to the continuing run and eligible files in completed years whose
 cleanup was previously disabled. Changing the checkbox while a worker runs only
 affects the next Start/Resume. Scientific and upload checkpoints are retained.
 Installing the release or selecting the checkbox alone deletes nothing.
 
 Raw files require current extracted-file proof; extracted TIFFs and their
-companions require current mosaic proof. Final mosaics remain local until the
-existing full EE pixel-verification requirement is satisfied. An asset listed in
-EE or a completed ingestion task is not sufficient for that last deletion.
+companions require current mosaic proof. Final mosaics use the separately selected
+policy: confirmed EE ingestion with matching checksum/source provenance, or full
+pixel verification. Asset name or task completion alone cannot authorize deletion.
+See [mosaic cleanup](MOSAIC_CLEANUP.md) for the controls and retained evidence.
 
 Cleanup changes files present and disk-space Statistics. Downloaded-file counts,
 all original filenames, version histories, mosaic membership and completion
@@ -50,6 +51,7 @@ Validation is automated local regression coverage, including interrupted-run che
 
 Resume revisits `upload_pending` years and reuses completed years. It checks local
 proofs before upload; pending mosaics remain on disk. If cleanup already removed
-a successful mosaic, the upstream checkpoint can be reused only with the current
-full-pixel/source proof required by cleanup, never filename/asset presence alone.
+a successful mosaic, the upstream checkpoint requires current full-pixel/source
+proof or confirmed ingestion of that exact local revision and source history,
+never filename/asset presence alone. The latter is operational reuse, not pixel certification.
 A changed local mosaic still invalidates reuse, even if a cloud copy exists.
