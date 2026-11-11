@@ -33,6 +33,72 @@ PROJECT_FOLDERS = {
 }
 
 
+# Applied only by New Project. Loading/saving/relocating an existing project
+# must not use this preset: explicit choices and legacy fallbacks stay intact.
+NEW_PROJECT_DEFAULTS = {
+    "download": {
+        "verified_downloads": True,
+        "catalog_history_enabled": True,
+        "product_version_filter": "best",
+        "max_granules": None,
+        "skip_existing": True,
+        "skip_manifest_existing": True,
+        "threads": 10,
+        "batch_size": 50,
+    },
+    "extract": {
+        "target_crs_mode": "original",
+        "year_selection": "all",
+        "limit_files": None,
+        "resampling_alg": "near",
+        "skip_existing": True,
+        "skip_manifest_existing": True,
+        "workers": 4,
+    },
+    "mosaic": {
+        "grouping_mode": "utm_zone",
+        "target_crs_label": "",
+        "overwrite": False,
+        "skip_manifest_existing": True,
+        "workers": 4,
+    },
+    "upload": {
+        "completion_mode": "submit_and_continue",
+        "max_pending_browser_uploads": 3,
+        "max_active_ingestions": 0,
+        "ee_sync_before_upload": True,
+        "retry_attempts": 1,
+        "retry_wait_seconds": 1.0,
+        "fail_fast": False,
+    },
+    "automation": {
+        "include_upload": True,
+        "process_by_year": True,
+        "cleanup_enabled": True,
+        "refresh_cmr": True,
+        "continue_on_tile_failure": True,
+        "auto_start_after_preflight": False,
+    },
+    "cleanup": {
+        "mosaics_enabled": True,
+        "mosaic_policy": "confirmed_ingestion",
+    },
+    "execution": {"resume": True},
+}
+
+
+def new_project_defaults(base_config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Copy settings and apply the editable starting preset for a new project.
+
+    Keep the user's destination, dates, tiles, runtime and browser configuration.
+    Never call this when loading or resuming a saved project.
+    """
+    config = deepcopy(dict(base_config))
+    for section, values in NEW_PROJECT_DEFAULTS.items():
+        config.setdefault(section, {}).update(deepcopy(values))
+    return config
+
+
 @dataclass
 class SWOTFlowProject:
     """A saved SWOTFlow project rooted at one local folder."""
@@ -184,21 +250,18 @@ def save_project(project: SWOTFlowProject) -> Path:
 
 
 def create_project(root: str | Path, name: str, base_config: Mapping[str, Any]) -> SWOTFlowProject:
-    """Create a project structure and initial project.yaml from a base config."""
+    """Create a new project with editable workflow defaults and local paths."""
     root_path = Path(root)
+    if (root_path / PROJECT_FILE_NAME).exists():
+        raise FileExistsError("This folder already contains a project. Use Open Project to preserve its settings.")
     ensure_project_structure(root_path)
     project = SWOTFlowProject(
         name=name.strip() or root_path.name or "SWOTFlow Project",
         root=root_path,
-        config=config_for_project(base_config, root_path),
+        config=config_for_project(new_project_defaults(base_config), root_path),
         download_history=[],
         created_at=now_iso(),
     )
-    # New projects start with verification; opening an existing project preserves
-    # its settings. Keep source files during the initial validation exercises.
-    project.config.setdefault("download", {})["verified_downloads"] = True
-    project.config["download"]["catalog_history_enabled"] = True
-    project.config.setdefault("automation", {})["cleanup_enabled"] = False
     ProjectDatabase(root_path / DATABASE_FILE_NAME)
     save_project(project)
     return project

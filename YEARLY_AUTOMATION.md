@@ -1,8 +1,9 @@
 # Calendar-year Automation
 
 The optional **Process each tile year by year** setting limits each pass
-through Automation to one tile and one calendar year. It is off by default. Leaving it off
-preserves the existing workflow.
+through Automation to one tile and one calendar year. New projects enable it from
+v0.8.20; existing projects keep their saved choice. Leaving it off processes each
+tile over the full requested range. See [new-project defaults](NEW_PROJECT_DEFAULTS.md).
 
 ## Enable the option
 

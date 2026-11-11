@@ -3126,7 +3126,7 @@ class LauncherApp:
             self.download_manifest_var.set(selected)
 
     def new_project(self) -> None:
-        """Create a new SWOTFlow project from the current GUI settings."""
+        """Create a new project with the editable recommended workflow defaults."""
         if self.automation_running or self.automation_preflight_running:
             messagebox.showwarning("Project busy", "Wait for automation or preflight before changing projects.")
             return
@@ -3154,7 +3154,7 @@ class LauncherApp:
             )
             return
         self.apply_project(project, write_config=True)
-        messagebox.showinfo("Project created", f"Created project:\n{project.project_file}")
+        messagebox.showinfo("Project created", f"Created project:\n{project.project_file}\n\nRecommended workflow defaults applied. Review settings before starting.")
 
     def open_project(self) -> None:
         """Open a SWOTFlow project.yaml file and populate the GUI."""

@@ -1,9 +1,9 @@
-# Optional mosaic cleanup — v0.8.17
+# Optional mosaic cleanup — v0.8.20
 
 In Automation, these controls are independent:
 
 - **Clean downloaded and extracted files** removes eligible raw files after extraction and extracted TIFFs after mosaicking, using the existing downstream proof checks.
-- **Remove uploaded mosaics** removes eligible local mosaics after EE synchronization. It is off by default and is also available in the Cleanup tab. The selected policy applies in both ordinary and tile/year Automation.
+- **Remove uploaded mosaics** removes eligible local mosaics after EE synchronization. It is enabled for new projects from v0.8.20, stays editable, and is also available in the Cleanup tab. Existing projects keep their saved choice. The selected policy applies in both ordinary and tile/year Automation.
 
 For routine storage management, select **Confirmed EE ingestion + matching provenance**. An asset with the same name is not enough: the recent complete EE inventory must match the upload revision, local file checksum and source history, and the upload record must identify the same destination with a successful status. Pending, failed, uncertain, changed or ambiguously linked files stay local. A recorded pixel-check failure for the current EE revision also prevents removal.
 
@@ -37,7 +37,7 @@ Resume reuses cleaned outputs only when current EE evidence still identifies the
 
 ```yaml
 cleanup:
-  mosaics_enabled: false
+  mosaics_enabled: true  # New projects; set false to retain local mosaics.
   mosaic_policy: confirmed_ingestion  # or full_pixels
 ```
 

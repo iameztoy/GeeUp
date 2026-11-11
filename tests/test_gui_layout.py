@@ -1124,14 +1124,25 @@ class GuiLayoutTests(unittest.TestCase):
             root.destroy()
 
     def test_open_project_loads_latest_automation_queue(self) -> None:
+        for yearly in (False, True):
+            with self.subTest(yearly=yearly):
+                self._assert_open_project_loads_saved_queue(yearly)
+
+    def _assert_open_project_loads_saved_queue(self, yearly: bool) -> None:
+        from swotflow.project.model import load_project, save_project
         with tempfile.TemporaryDirectory() as temp:
             project_root = Path(temp) / "Project"
             config_data = self.sample_config(project_root)
             config_data["automation"] = {"utm_tiles": ["UTM34M"], "start_date": "2026-01-01", "end_date": "2026-01-31"}
             project = create_project(project_root, "Project", config_data)
+            project.config["automation"]["process_by_year"] = yearly
+            save_project(project)
+            project = load_project(project_root)
             run_config = AutomationConfig(
                 project_root=project_root,
-                base_config=config_data,
+                base_config=project.config,
+                process_by_year=yearly,
+                include_upload=project.config["automation"]["include_upload"],
                 utm_tiles=["UTM34M"],
                 start_date="2026-01-01",
                 end_date="2026-01-31",
@@ -1613,6 +1624,54 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertIn("UTM34M", selected)
             self.assertGreater(len(selected), 50)
         finally:
+            root.destroy()
+
+    def test_new_project_defaults_round_trip_through_gui_and_automation(self) -> None:
+        from swotflow.project.model import NEW_PROJECT_DEFAULTS, load_project, save_project_config
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = LauncherApp(root)
+            with tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp) / "NewProject"
+                app.download_start_date_var.set("2024-01-01")
+                app.download_end_date_var.set("2025-12-31")
+                app.automation_start_date_var.set("2024-01-01")
+                app.automation_end_date_var.set("2025-12-31")
+                app.set_automation_tiles(["UTM36P"])
+                with mock.patch("swotflow.ui.main.filedialog.askdirectory", return_value=str(folder)), \
+                     mock.patch("swotflow.ui.main.simpledialog.askstring", return_value="New"), \
+                     mock.patch("swotflow.ui.main.messagebox.showinfo"):
+                    app.new_project()
+                actual = app.build_config()
+                for section, values in NEW_PROJECT_DEFAULTS.items():
+                    for key, value in values.items():
+                        self.assertEqual(actual[section][key], value, (section, key))
+                run = app.automation_config_from_ui()
+                self.assertTrue(run.process_by_year)
+                self.assertTrue(run.include_upload)
+                self.assertTrue(run.cleanup_enabled)
+                self.assertTrue(run.continue_on_tile_failure)
+                self.assertTrue(run.refresh_cmr)
+                self.assertEqual(run.base_config["upload"]["completion_mode"], "submit_and_continue")
+                self.assertEqual(run.utm_tiles, ["UTM36P"])
+                self.assertEqual(run.start_date, "2024-01-01")
+                self.assertEqual(run.end_date, "2025-12-31")
+                app.automation_process_by_year_var.set(False)
+                app.automation_cleanup_enabled_var.set(False)
+                app.mosaic_cleanup_enabled_var.set(False)
+                app.max_pending_browser_uploads_var.set("1")
+                app.upload_completion_mode_var.set("Wait for EE verification before next tile")
+                save_project_config(folder, "New", app.build_config())
+                app.apply_project(load_project(folder), write_config=False)
+                changed = app.automation_config_from_ui()
+                self.assertFalse(changed.process_by_year)
+                self.assertFalse(changed.cleanup_enabled)
+                self.assertFalse(changed.base_config["cleanup"]["mosaics_enabled"])
+                self.assertEqual(changed.base_config["upload"]["max_pending_browser_uploads"], 1)
+                self.assertEqual(changed.base_config["upload"]["completion_mode"], "wait_for_ee")
+        finally:
+            root.update_idletasks()
             root.destroy()
 
     def test_save_selected_tiles_as_project_preset(self) -> None:

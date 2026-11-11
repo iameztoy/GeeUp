@@ -79,11 +79,11 @@ download:
   skip_manifest_existing: true
 
   # earthaccess parallel workers per batch.
-  threads: 6
+  threads: 10
 
   # Number of granules submitted to earthaccess.download at once. Set to 1 for
-  # the old one-file-at-a-time behavior; 25 is a conservative large-run default.
-  batch_size: 25
+  # the old one-file-at-a-time behavior; new projects use 50 per batch.
+  batch_size: 50
 
   # Safety timeout for each CMR metadata page request. In Automation, a tile
   # whose remote search stalls can fail cleanly and be retried later instead of
@@ -131,7 +131,7 @@ extract:
   resampling_alg: "near"
 
   # Use 1 for the original one-by-one behavior. Increase cautiously for parallel extraction.
-  workers: 1
+  workers: 4
 
   # Optional automation-only UTM scope. Leave empty for normal manual runs.
   utm_tiles: []
@@ -175,7 +175,7 @@ mosaic:
   write_world_file: true
 
   # Use 1 for the original one-by-one behavior. Increase cautiously because mosaics are disk/RAM intensive.
-  workers: 1
+  workers: 4
 
   # Optional automation-only UTM scope. Leave empty for normal manual runs.
   utm_tiles: []
@@ -219,7 +219,7 @@ chrome:
 
 upload:
   batch_size: 50
-  max_active_ingestions: 2
+  max_active_ingestions: 0  # No additional app cap; browser transfers remain limited below.
   # Maximum clicked files that may remain in Chrome before an Earth Engine
   # ingestion operation appears. Keep this small on slow or unstable links.
   max_pending_browser_uploads: 3
@@ -269,8 +269,8 @@ upload:
     #   b2: "SAMPLE"
     per_band: {}
 
-  retry_attempts: 3
-  retry_wait_seconds: 3.0
+  retry_attempts: 1  # Automation retains two additional recovery rounds.
+  retry_wait_seconds: 1.0
   # Maximum time to wait for a matching Earth Engine task after clicking
   # UPLOAD when no browser transfer progress is visible.
   submission_confirmation_timeout_seconds: 30
@@ -278,7 +278,7 @@ upload:
   submission_transfer_timeout_minutes: 30
   # wait_for_ee waits for submitted Earth Engine tasks before continuing.
   # submit_and_continue moves on after browser submission and verifies/cleans later.
-  completion_mode: wait_for_ee
+  completion_mode: submit_and_continue
 
   # If true, stop the whole run after the first failed upload.
   fail_fast: false
@@ -355,12 +355,12 @@ automation:
   utm_tiles: []
   start_date: ""
   end_date: ""
-  include_upload: false
+  include_upload: true
   cleanup_enabled: true
-  # Optional: process each tile in clipped calendar years; finish its years
-  # before moving to the next tile. Existing full-range tile workflow stays
-  # the default. Cleanup must be enabled and verified to release disk space.
-  process_by_year: false
+  # New-project default: finish each tile in clipped calendar years before
+  # moving to the next tile. Disable to process its whole selected date range.
+  # Cleanup must be enabled and verified to release disk space.
+  process_by_year: true
   min_free_space_gb: 50
   continue_on_tile_failure: true
   # Retry CMR/download-search timeout failures after the first tile pass. This
@@ -378,10 +378,10 @@ automation:
   # expected matches where available and cannot discover newly published files.
   refresh_cmr: true
 
-# Mosaic removal is a separate opt-in. The selected policy applies once enabled.
+# Mosaic removal is a separate editable choice, enabled for new projects.
 # Legacy configs without this section retain their prior strict cleanup behavior.
 # confirmed_ingestion requires current EE revision + local hash/source provenance.
 # Both policies retain pending/failed files; ingestion proof does not certify pixels.
 cleanup:
-  mosaics_enabled: false  # Explicit opt-in, independent of raw/extracted cleanup.
+  mosaics_enabled: true  # Independent of raw/extracted cleanup; proof still required.
   mosaic_policy: confirmed_ingestion  # confirmed_ingestion | full_pixels

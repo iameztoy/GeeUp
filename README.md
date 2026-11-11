@@ -1,5 +1,7 @@
 # SWOTFlow
 
+New in v0.8.20: editable defaults for new projects enable verified NASA discovery/history, tile-by-tile yearly processing, Submit and continue, and proof-checked cleanup. Use 10 download threads, 4 extraction/mosaic workers and 3 browser transfers. Existing projects and active runs keep their choices. See [new-project defaults](NEW_PROJECT_DEFAULTS.md).
+
 Fixed in v0.8.19: verification writes tolerate temporary SQLite contention between workers; Resume can rebuild the exact mosaic whose receipt failed because the database was locked. Keep independent tiles moving with **Continue with next tile after failure**; failed years remain incomplete and retain their inputs. See [workflow validation](WORKFLOW_VALIDATION.md).
 
 Fixed in v0.8.18: faster proof-checked cleanup, lightweight Statistics refresh, per-output processing checkpoints and durable upload-attempt recovery after interruption. Resume preserves completed work and rejects changes to the saved scientific configuration. See [workflow validation](WORKFLOW_VALIDATION.md) and [mosaic cleanup](MOSAIC_CLEANUP.md).
@@ -26,7 +28,7 @@ New in v0.8.8: report **Stop after current step** as a resumable pause, with a r
 
 New in v0.8.7: fix Earth Engine uploads rejected by the 100-character asset-name limit. Oversized mosaic names omit the optional processing-range suffix in the cloud only; local filenames and full lineage remain intact. Reject invalid names before browser work, reduce redundant mosaic metadata rows, retain revision/checksum guards, and keep rejected naming attempts separate from current Statistics totals. See [upload naming and recovery](UPLOAD_RECOVERY.md).
 
-Current application version: **v0.8.17** (8 November 2026). The Home page and application window title display this version on the next normal launch.
+Current application version: **v0.8.20** (11 November 2026). The Home page and application window title display this version on the next normal launch.
 
 Fixed in v0.8.6: verified cleanup removes recorded raster sidecars; Automation Resume reuses checksum-verified intermediate files after raw cleanup; new mosaic names and upload metadata show the contributing processing-version range. Existing mosaic names remain usable. See [resume, cleanup and version ranges](RESUME_AND_LINEAGE.md). The existing EE Consolidation priority fix, yearly scheduling, NASA histories and Statistics remain in place.
 
@@ -34,13 +36,13 @@ New in v0.8.4: scroll the Automation tab vertically to reach the queue and resul
 
 Fixed in v0.8.3: show the yearly-processing and remote-catalogue-refresh checkboxes on separate rows in Automation. Catalogue refresh checks available NASA files; **Process each tile year by year** selects the processing order. Pipeline and tracking behavior are unchanged.
 
-New in v0.8.2: optional **Process each tile year by year** scheduling in Automation. Finish one tile's requested calendar years before moving to the next tile, with inclusive acquisition-start boundaries, independent tile/year checkpoints and cumulative project history. The option is off by default. Uploads wait for Earth Engine confirmation; failed batches block later years of the affected tile. Statistics retains the full requested period and counts unique tiles separately from tile/year batches. See [yearly Automation, storage limits and cleanup requirements](YEARLY_AUTOMATION.md).
+New in v0.8.2: optional **Process each tile year by year** scheduling in Automation. Finish one tile's requested calendar years before moving to the next tile, with inclusive acquisition-start boundaries, independent tile/year checkpoints and cumulative project history. Introduced as off by default; v0.8.20 new projects enable it and use Submit and continue. Existing saved choices remain unchanged; see the guide for current pending/failure behavior. Statistics retains the full requested period and counts unique tiles separately from tile/year batches. See [yearly Automation, storage limits and cleanup requirements](YEARLY_AUTOMATION.md).
 
 New in v0.8.0: organize implementation modules into the `swotflow/` package by function. The existing `python swotflow_gui.py` launcher remains; `python -m swotflow` also launches the GUI. Worker commands and resource paths use the new package layout. The v0.7.3 processing, version-selection, verification and cleanup rules are unchanged. See [development layout and command migration](DEVELOPMENT.md).
 
 New in v0.7.1: durable download-to-mosaic evidence, exact-input reconciliation and a repair queue in Statistics, guarded resume/cleanup, and manually launched original-source and EE pixel checks. Paired mosaics now preserve both no-data masks in a standalone GeoTIFF. See [the verification guide](WORKFLOW_VERIFICATION.md) and [rebuild gates](WORKFLOW_VALIDATION.md). A small acceptance pilot is required before choosing a large rebuild scope.
 
-Added in v0.7.0: verified dual-catalogue downloads with exact NASA checksums, mandatory history in verified mode, reset-project protection, and paired lowest-quality local mosaics. New projects retain source files during validation.
+Added in v0.7.0: verified dual-catalogue downloads with exact NASA checksums, mandatory history in verified mode, reset-project protection, and paired lowest-quality local mosaics. That release retained source files by default for validation; v0.8.20 enables guarded cleanup for new projects. Disable cleanup when retaining validation imagery is needed.
 
 Added in v0.6.1: application source and regression tests are separated from local investigations. New consolidation histories use the user data folder; existing histories remain discoverable. See [development and storage rules](DEVELOPMENT.md).
 

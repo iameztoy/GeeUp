@@ -1,5 +1,13 @@
 # Release history
 
+## 0.8.20 — 11 November 2026
+
+- Apply editable recommended settings only when creating a new project: verified NASA downloads and filename/version history, preferred source versions without test limits, original projection, yearly per-tile processing, and fresh catalogue checks.
+- Use 10 download threads, batches of 50, 4 extraction/mosaic workers, 3 browser transfers and Submit and continue. Keep existing bounded upload recovery and enable continuing with the next independent tile after failure.
+- Enable downloaded/extracted cleanup and the separate mosaic-removal choice using confirmed EE ingestion + matching provenance. Keep all proof, pending-file retention, Resume and Statistics rules unchanged.
+- Preserve saved settings on Open/Resume/Save As, including explicit disabled options and legacy configurations. Reject New Project over an existing project file. Keep first-run template and project preset aligned, with no automatic start or new scientific/pyramiding policy.
+- Add first-launch, new-project, settings persistence and GUI-to-Automation regression checks; show v0.8.20 on Home and the window title.
+
 ## 0.8.19 — 11 November 2026
 
 - Use WAL and short, explicit writer transactions for verification receipts, with FULL durability. Bound retries to temporary SQLite lock contention during setup, writer acquisition and commit; do not replay the transaction body or retry disk/permission/invalid-data errors as if they were contention.
