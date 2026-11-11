@@ -37,3 +37,26 @@ All investigation data, real-source pilot outputs and collection-reset journals 
 The maintained regressions exercise ordinary/yearly Automation, upload enabled/disabled, wait versus submit-and-continue, independent intermediate/mosaic cleanup controls, both explicit cleanup policies and verified/legacy modes. They also exercise failure-continuation policy, process exit and reopened checkpoints, changed scientific settings, altered files/sidecars and retry outcomes. Unsupported combinations are rejected rather than silently accepted: tile-by-tile yearly processing cannot make local cross-tile mosaics after its inputs have been removed.
 
 Scientific tests use small synthetic real-GDAL rasters and an independent source comparator, including a deliberately injected shift. Network/browser/task responses in the scheduling matrix are fixtures, not new production uploads. The isolated Chrome test exercises browser DOM handling, not an authenticated EE service. This coverage supports the reviewed application behavior; it cannot guarantee future NASA availability, network reliability, browser changes, disk capacity or every possible input.
+
+
+## Verification database contention — v0.8.19
+
+Parallel extraction/mosaic workers share verification history. WAL separates readers
+from the short writer transactions; FULL synchronous commits retain durable receipts.
+A writer takes its lock before schema/write work. SQLite lock contention has up to
+three bounded attempts (30-second SQLite busy timeout per attempt, with brief delays).
+Only setup, lock acquisition and commit are retried, never a partly executed body.
+Exhausted locks and non-lock errors remain failures, with the output retained.
+
+A saved `ERROR_VERIFICATION` caused by a database lock can be recovered on Resume
+for the same source signature: the affected mosaic is rebuilt through the normal
+processing function and its evidence is recorded again. Existing bytes alone are
+not promoted to verified. Completed mosaics keep their reuse checks, and changed
+source groups or unrelated stale outputs still require explicit resolution.
+
+For unattended runs, **Continue with next tile after failure** allows independent
+tiles to proceed after a failed tile/year. Later years of that failed tile remain
+pending; its local inputs and error history are kept. The option does not override
+an explicit stop, global resource constraints or the requirement for correct input
+accounting. Upload-only pending outputs retain the existing separate continuation
+and two-round recovery behavior. Resume and Statistics preserve these distinctions.

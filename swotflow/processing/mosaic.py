@@ -649,6 +649,15 @@ def preflight_mosaic_group(
             stale = not VerificationStore(config.manifest_csv.parent).reusable(
                 "mosaic", group.output_file, [s.path for s in group.sources], config
             )
+        # A written output without a receipt is not reusable. Rebuild only the
+        # exact recorded group whose verification write failed from contention;
+        # never bless existing bytes or enable blanket overwrite on Resume.
+        if (stale and config.verified_workflow and manifest_row
+                and manifest_row.get("status") == "ERROR_VERIFICATION"
+                and manifest_row.get("message", "").lower() in {
+                    "database is locked", "database table is locked", "database schema is locked"}
+                and previous_signature == signature):
+            return None, signature
         # Verified current bytes/source membership survive a crash before the
         # parent writes its manifest row. Legacy mode still requires that row.
         if config.require_all_inputs and not config.verified_workflow and not mosaic_manifest_completed(manifest_row):

@@ -1,5 +1,13 @@
 # Release history
 
+## 0.8.19 — 11 November 2026
+
+- Use WAL and short, explicit writer transactions for verification receipts, with FULL durability. Bound retries to temporary SQLite lock contention during setup, writer acquisition and commit; do not replay the transaction body or retry disk/permission/invalid-data errors as if they were contention.
+- On Resume, rebuild only an exact unchanged mosaic group whose previous verification failed with a recorded database-lock error. Recompute pixels and establish new source/checksum proof; do not approve an unverified existing TIFF or enable blanket overwrite. Other stale outputs remain protected.
+- Preserve source filenames, processing history, completed output checkpoints, upload recovery and cleanup guards. No change to raster selection, projections, quality pairing or mosaic values.
+- Verify actual parallel writer contention, bounded failure, rollback, legacy receipt migration, unchanged-group recovery and existing Resume/Statistics behavior. Home and the window title show v0.8.19.
+- Clarify **Continue with next tile after failure**: independent tiles may continue after a failed tile/year; that tile's later years remain pending. It does not mark bad outputs complete or bypass disk-space, authentication, provenance or user-stop safeguards.
+
 ## 0.8.18 — 8 November 2026
 
 - Avoid repeatedly hashing one large downstream mosaic for each input and companion during cleanup. Reuse hashes only within the current operation, with file identity/change metadata, sidecar membership and current proof checks; revalidate after a locked-file retry. Unsupported change metadata falls back to fresh hashing.

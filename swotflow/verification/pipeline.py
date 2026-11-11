@@ -10,18 +10,47 @@ from swotflow.verification.file_cache import CleanupHashCache
 
 import hashlib
 import json
+import logging
 import platform
 import sqlite3
 import sys
+import time
 import uuid
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, TypeVar
 
 ALGORITHM = "pipeline-proof-v1"
+SQLITE_TIMEOUT_SECONDS = 30
+SQLITE_LOCK_ATTEMPTS = 3
+SQLITE_LOCK_RETRY_SECONDS = 0.25
+_LOG = logging.getLogger(__name__)
+_T = TypeVar("_T")
+
+
+def _retry_database_lock(operation: Callable[[], _T], label: str) -> _T:
+    """Retry only SQLite contention; never replay a transaction's body.
+
+    Each attempt retains SQLite's bounded busy timeout. Other failures propagate
+    immediately, and exhausted contention never produces a success receipt.
+    """
+    for attempt in range(SQLITE_LOCK_ATTEMPTS):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            code = getattr(exc, "sqlite_errorcode", None)
+            locked = ((code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                      if code is not None else str(exc).lower() in {
+                          "database is locked", "database table is locked", "database schema is locked"})
+            if not locked or attempt + 1 == SQLITE_LOCK_ATTEMPTS:
+                raise
+            _LOG.warning("Verification database busy during %s; retry %s/%s.",
+                         label, attempt + 1, SQLITE_LOCK_ATTEMPTS - 1)
+            time.sleep(SQLITE_LOCK_RETRY_SECONDS * (attempt + 1))
+    raise AssertionError("SQLite retry attempts must be positive")
 
 
 def utc_now() -> str:
@@ -85,10 +114,18 @@ class VerificationStore:
         if write:
             self.logs.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.path if write else self.path.resolve().as_uri() + "?mode=ro",
-                             uri=not write, timeout=30)
+                             uri=not write, timeout=SQLITE_TIMEOUT_SECONDS)
         db.row_factory = sqlite3.Row
         try:
             if write:
+                # WAL lets metadata readers coexist with worker receipts. Take
+                # the writer lock before schema/read work to avoid lock upgrades.
+                mode = _retry_database_lock(
+                    lambda: db.execute("PRAGMA journal_mode=WAL").fetchone(), "WAL setup")
+                if str(mode[0]).lower() != "wal":
+                    raise sqlite3.OperationalError("Verification database could not enable WAL")
+                db.execute("PRAGMA synchronous=FULL")
+                _retry_database_lock(lambda: db.execute("BEGIN IMMEDIATE"), "writer acquisition")
                 db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, utc TEXT, stage TEXT, payload TEXT)")
                 db.execute("CREATE TABLE IF NOT EXISTS artifacts (seq INTEGER PRIMARY KEY, path TEXT, stage TEXT, utc TEXT, payload TEXT)")
                 db.execute("CREATE INDEX IF NOT EXISTS artifact_path ON artifacts(path,seq)")
@@ -98,8 +135,10 @@ class VerificationStore:
                 db.execute("CREATE INDEX IF NOT EXISTS ingestion_asset ON ingestions(asset,seq)")
             yield db
             if write:
-                db.commit()
+                _retry_database_lock(db.commit, "commit")
         finally:
+            if db.in_transaction:
+                db.rollback()
             db.close()
 
     def begin_run(self, stage: str, config: Any) -> str:

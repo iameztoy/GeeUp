@@ -1,5 +1,7 @@
 # SWOTFlow
 
+Fixed in v0.8.19: verification writes tolerate temporary SQLite contention between workers; Resume can rebuild the exact mosaic whose receipt failed because the database was locked. Keep independent tiles moving with **Continue with next tile after failure**; failed years remain incomplete and retain their inputs. See [workflow validation](WORKFLOW_VALIDATION.md).
+
 Fixed in v0.8.18: faster proof-checked cleanup, lightweight Statistics refresh, per-output processing checkpoints and durable upload-attempt recovery after interruption. Resume preserves completed work and rejects changes to the saved scientific configuration. See [workflow validation](WORKFLOW_VALIDATION.md) and [mosaic cleanup](MOSAIC_CLEANUP.md).
 
 Fixed in v0.8.17: uploaded mosaics with archived rejected-name attempts are eligible for confirmed-ingestion cleanup again. Resume rechecks older cleanup attempts once while preserving completed processing/uploads, filename history and Statistics. See [mosaic cleanup](MOSAIC_CLEANUP.md).

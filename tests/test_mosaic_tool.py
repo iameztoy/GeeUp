@@ -57,6 +57,30 @@ class MosaicPlanningTests(unittest.TestCase):
         scratch = self.enterContext(tempfile.TemporaryDirectory())
         self.enterContext(chdir(scratch))
 
+    def test_resume_rebuilds_only_recorded_lock_failure_for_same_group(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / swot_name()).write_bytes(b"source")
+            config = MosaicConfig(input_folder=root, output_folder=root / "out", verified_workflow=True,
+                                  report_csv=root / "report.csv", manifest_csv=root / "manifest.csv")
+            group = build_mosaic_plan(config).groups[0]
+            group.output_file.parent.mkdir()
+            group.output_file.write_bytes(b"unverified output")
+            signature = ee_mosaic_tool.group_source_signature(group)
+            key = ee_mosaic_tool.mosaic_record_id(group)
+            row = {"status": "ERROR_VERIFICATION", "message": "database is locked", "source_signature": signature}
+            with mock.patch("swotflow.verification.pipeline.VerificationStore.reusable", return_value=False):
+                result, _ = ee_mosaic_tool.preflight_mosaic_group(group, config, {key: row}, False)
+                self.assertIsNone(result)  # Recompute pixels; do not mark existing output complete.
+                for changes in ({"status": "MOSAIC_CREATED"}, {"message": "invalid raster"},
+                                {"source_signature": "changed"}):
+                    with self.subTest(changes=changes):
+                        result, _ = ee_mosaic_tool.preflight_mosaic_group(group, config, {key: {**row, **changes}}, False)
+                        self.assertEqual(result["status"], "STALE_EXISTS")
+                result, _ = ee_mosaic_tool.preflight_mosaic_group(group, config, {}, False)
+                self.assertEqual(result["status"], "STALE_EXISTS")
+            self.assertEqual(group.output_file.read_bytes(), b"unverified output")
+
     def test_verified_workflow_refuses_to_drop_incompatible_input(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
