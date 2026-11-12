@@ -1,5 +1,7 @@
 # SWOTFlow
 
+Fixed in v0.8.21: a retained uncertain upload from a previous worker no longer blocks later recovery batches with repeated browser-transfer waits. Existing transfers must settle first; uncertain files, provenance and pending Statistics remain intact, and confirmed assets are not uploaded again. See [upload recovery](UPLOAD_RECOVERY.md).
+
 New in v0.8.20: editable defaults for new projects enable verified NASA discovery/history, tile-by-tile yearly processing, Submit and continue, and proof-checked cleanup. Use 10 download threads, 4 extraction/mosaic workers and 3 browser transfers. Existing projects and active runs keep their choices. See [new-project defaults](NEW_PROJECT_DEFAULTS.md).
 
 Fixed in v0.8.19: verification writes tolerate temporary SQLite contention between workers; Resume can rebuild the exact mosaic whose receipt failed because the database was locked. Keep independent tiles moving with **Continue with next tile after failure**; failed years remain incomplete and retain their inputs. See [workflow validation](WORKFLOW_VALIDATION.md).
@@ -28,7 +30,7 @@ New in v0.8.8: report **Stop after current step** as a resumable pause, with a r
 
 New in v0.8.7: fix Earth Engine uploads rejected by the 100-character asset-name limit. Oversized mosaic names omit the optional processing-range suffix in the cloud only; local filenames and full lineage remain intact. Reject invalid names before browser work, reduce redundant mosaic metadata rows, retain revision/checksum guards, and keep rejected naming attempts separate from current Statistics totals. See [upload naming and recovery](UPLOAD_RECOVERY.md).
 
-Current application version: **v0.8.20** (11 November 2026). The Home page and application window title display this version on the next normal launch.
+Current application version: **v0.8.21** (12 November 2026). The Home page and application window title display this version on the next normal launch.
 
 Fixed in v0.8.6: verified cleanup removes recorded raster sidecars; Automation Resume reuses checksum-verified intermediate files after raw cleanup; new mosaic names and upload metadata show the contributing processing-version range. Existing mosaic names remain usable. See [resume, cleanup and version ranges](RESUME_AND_LINEAGE.md). The existing EE Consolidation priority fix, yearly scheduling, NASA histories and Statistics remain in place.
 

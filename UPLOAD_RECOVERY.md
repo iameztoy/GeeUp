@@ -1,4 +1,27 @@
-# Earth Engine upload naming and recovery — v0.8.7
+# Earth Engine upload naming and recovery — v0.8.21
+
+## Historical uncertainty and transfer capacity — v0.8.21
+
+A retained `UNKNOWN_AFTER_CLICK` is an unresolved past outcome, not necessarily
+an active local transfer. Previously, it could occupy the browser-transfer queue
+through each subsequent recovery batch, causing repeated 30-minute waits.
+
+Before making this distinction, the uploader checks every open Earth Engine
+editor for active or unreadable browser transfers and refreshes EE inventory and
+operations. If a past attempt is still uncertain after that gate, it stays in the
+report and is excluded only from this worker's transfer-capacity count. Other
+pending files can proceed. A current-worker uncertain transfer still counts and
+uses the existing bounded wait; the uploader does not close its browser or
+blindly submit another copy.
+
+Uncertain files retain their submission time, source/revision history and local
+mosaic. They remain unresolved in Statistics and ineligible for cleanup. Late
+task/asset evidence is still reconciled normally. Absence from inventory alone
+does not authorize retry or prove corruption. Confirmed assets keep the existing
+revision/provenance checks and are skipped on Resume.
+
+After a normal stop, update, open the same project and use **Resume Run**.
+Existing settings and completed scientific checkpoints remain in effect.
 
 ## Asset-name rejection
 

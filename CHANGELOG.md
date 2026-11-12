@@ -1,5 +1,12 @@
 # Release history
 
+## 0.8.21 — 12 November 2026
+
+- Keep a retained uncertain upload from an earlier worker out of the current browser-transfer capacity count, after all existing browser transfers have settled and EE inventory/operations have been reconciled. This prevents an old `UNKNOWN_AFTER_CLICK` from imposing repeated transfer timeouts on later recovery batches.
+- Preserve the uncertain report row, submission time, provenance and local mosaic. Do not resubmit it merely because an asset or task is absent; late EE acknowledgement remains eligible for normal reconciliation.
+- Keep current-worker uncertainty, active/unreadable browser transfers, revision checks and duplicate-upload protection unchanged. Statistics still reports the unresolved outcome; cleanup retains the file until the existing proof requirements are met.
+- Add regression checks for multiple recovery batches, current versus historical uncertainty, the startup transfer gate and late cloud acknowledgement. Include the v0.8.20 new-project defaults while preserving existing project choices; show v0.8.21 on Home and in the window title.
+
 ## 0.8.20 — 11 November 2026
 
 - Apply editable recommended settings only when creating a new project: verified NASA downloads and filename/version history, preferred source versions without test limits, original projection, yearly per-tile processing, and fresh catalogue checks.

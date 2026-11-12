@@ -110,6 +110,114 @@ class BrowserUploadRecoveryTests(unittest.TestCase):
                 uploader.process_batches([first, second])
             self.assertEqual([c.args[0].asset_id for c in submit.call_args_list], [first.asset_id, second.asset_id])
 
+    def test_recovery_retains_old_uncertainty_but_submits_all_later_batches(self):
+        """A settled prior attempt must not drain-block each new recovery batch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploader, prior = self.make_uploader(Path(tmp))
+            uploader.config.execution.dry_run = False
+            uploader.config.upload.completion_mode = "submit_and_continue"
+            uploader.config.upload.batch_size = 1
+            uploader.report.rows[prior.asset_id]["final_status"] = "UNKNOWN_AFTER_CLICK"
+            original_time = uploader.report.rows[prior.asset_id]["submit_time"]
+            # New workers have no DOM baseline for the old attempt.
+            uploader.browser_upload_baselines.clear()
+            new_items = [UploadItem(prior.local_file, name, "projects/p/assets/" + name)
+                         for name in ("second", "third")]
+            for item in new_items:
+                uploader.tracked_items[item.asset_id] = item
+
+            def submit(item):
+                uploader.report.upsert(uploader.make_report_row(
+                    item=item, submit_time="2026-11-12T08:00:00Z", detected_task_name="",
+                    final_status="SUBMITTED_PENDING_VERIFICATION", error_message=""))
+
+            def acknowledge():
+                for item in new_items:
+                    if uploader.report.get_status(item.asset_id) == "SUBMITTED_PENDING_VERIFICATION":
+                        uploader.ee_operations_by_asset[item.asset_id] = EarthEngineOperation(
+                            item.asset_id, "op/" + item.asset_name, "RUNNING", False)
+
+            with (
+                mock.patch.object(uploader, "build_upload_plan", return_value=[prior, *new_items]),
+                mock.patch.object(uploader, "confirm_before_real_upload"),
+                mock.patch.object(uploader, "create_driver", return_value=mock.Mock()),
+                mock.patch.object(uploader, "open_earth_engine"),
+                mock.patch.object(uploader, "ensure_logged_in"),
+                mock.patch.object(uploader, "wait_for_existing_browser_transfers", return_value=True),
+                mock.patch.object(uploader, "sync_earth_engine_inventory"),
+                mock.patch.object(uploader, "refresh_earth_engine_operations", side_effect=acknowledge),
+                mock.patch.object(uploader, "read_browser_upload_rows", return_value=[]),
+                mock.patch.object(uploader, "submit_with_retries", side_effect=submit) as submitted,
+                mock.patch.object(uploader, "reconcile_batch_without_waiting"),
+                mock.patch.object(uploader, "reconcile_submit_and_continue_uploads"),
+                mock.patch("swotflow.earthengine.uploader.time.sleep") as sleep,
+                mock.patch("swotflow.earthengine.uploader.time.monotonic",
+                           side_effect=[0, 1, 2000, 2001, 4000, 4001]),
+            ):
+                self.assertEqual(uploader._run(), 2)  # Uncertainty remains a warning.
+            self.assertEqual([call.args[0] for call in submitted.call_args_list], new_items)
+            self.assertEqual(sleep.call_count, 2)  # Only real new transfers were polled.
+            self.assertEqual(uploader.pending_browser_upload_asset_ids(), set())
+            self.assertFalse(uploader.browser_transfer_backlog_stalled)
+            self.assertEqual(uploader.report.get_status(prior.asset_id), "UNKNOWN_AFTER_CLICK")
+            self.assertEqual(uploader.report.rows[prior.asset_id]["submit_time"], original_time)
+            self.assertTrue(prior.local_file.exists())
+            uploader.report.write()
+            rows = fixtures.read_project_rows(uploader.config.artifacts.report_csv, "upload_report")
+            self.assertEqual(next(row for row in rows if row["asset_id"] == prior.asset_id)
+                             ["final_status"], "UNKNOWN_AFTER_CLICK")
+
+    def test_current_uncertain_transfer_still_blocks_and_preserves_browser(self):
+        """No timeout exemption for an attempt made by the current worker."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploader, item = self.make_uploader(Path(tmp))
+            uploader.report.rows[item.asset_id]["final_status"] = "UNKNOWN_AFTER_CLICK"
+            with mock.patch("swotflow.earthengine.uploader.time.monotonic", side_effect=[0, 2000]), \
+                 mock.patch.object(uploader, "submit_with_retries") as submit:
+                self.assertFalse(uploader.wait_for_browser_upload_capacity(target_pending=0))
+            self.assertEqual(uploader.pending_browser_upload_asset_ids(), {item.asset_id})
+            self.assertTrue(uploader.browser_transfer_backlog_stalled)
+            self.assertTrue(item.local_file.exists())
+            submit.assert_not_called()
+
+    def test_deferred_prior_attempt_still_accepts_late_cloud_acknowledgement(self):
+        """Transfer-capacity exclusion must not remove the item from tracking."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploader, item = self.make_uploader(Path(tmp))
+            uploader.report.rows[item.asset_id]["final_status"] = "UNKNOWN_AFTER_CLICK"
+            uploader.deferred_prior_upload_asset_ids.add(item.asset_id)
+            original_time = uploader.report.rows[item.asset_id]["submit_time"]
+            uploader.ee_operations_by_asset[item.asset_id] = EarthEngineOperation(
+                item.asset_id, "op/late", "RUNNING", False)
+            uploader.reconcile_tracked_operations()
+            row = uploader.report.rows[item.asset_id]
+            self.assertEqual(row["final_status"], "RUNNING")
+            self.assertEqual(row["detected_task_name"], "op/late")
+            self.assertEqual(row["submit_time"], original_time)
+            self.assertTrue(item.local_file.exists())
+            self.assertIn(item.asset_id, uploader.tracked_items)
+            self.assertEqual(uploader.pending_browser_upload_asset_ids(), set())
+
+    def test_unsettled_existing_transfer_cannot_be_deferred_or_retried(self):
+        """The startup browser gate must succeed before excluding old uncertainty."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploader, item = self.make_uploader(Path(tmp))
+            uploader.config.execution.dry_run = False
+            uploader.report.rows[item.asset_id]["final_status"] = "UNKNOWN_AFTER_CLICK"
+            with (
+                mock.patch.object(uploader, "build_upload_plan", return_value=[item]),
+                mock.patch.object(uploader, "confirm_before_real_upload"),
+                mock.patch.object(uploader, "create_driver", return_value=mock.Mock()),
+                mock.patch.object(uploader, "open_earth_engine"),
+                mock.patch.object(uploader, "ensure_logged_in"),
+                mock.patch.object(uploader, "wait_for_existing_browser_transfers", return_value=False),
+                mock.patch.object(uploader, "process_batches") as process,
+            ):
+                self.assertEqual(uploader._run(), 2)
+            process.assert_not_called()
+            self.assertEqual(uploader.deferred_prior_upload_asset_ids, set())
+            self.assertEqual(uploader.report.get_status(item.asset_id), "UNKNOWN_AFTER_CLICK")
+
 
 @unittest.skipUnless(os.environ.get("SWOTFLOW_BROWSER_TESTS") == "1", "Opt-in isolated Chrome DOM test")
 class BrowserUploadDOMTests(unittest.TestCase):

@@ -1296,6 +1296,7 @@ class EarthEngineUIUploader:
         self.browser_transfer_backlog_stalled = False
         self._current_dialog_asset_trailer = ""
         self.browser_upload_baselines: Dict[str, set[str] | None] = {}
+        self.deferred_prior_upload_asset_ids: set[str] = set()
 
         self.config.artifacts.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.config.artifacts.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -1357,6 +1358,15 @@ class EarthEngineUIUploader:
                                and prior.get("detected_task_name") == operation.operation_name)):
                     self.report.upsert({**prior, "final_status": UNKNOWN_AFTER_CLICK_STATUS,
                         "error_message": "Prior submission remains uncertain after EE/browser reconciliation; retained for review, not blindly resubmitted."})
+                    # The startup gate has confirmed that existing browser
+                    # transfers are settled. This retained historical attempt
+                    # must stay unresolved, but is not a transfer made by this
+                    # worker and must not hold every later batch at its drain.
+                    self.deferred_prior_upload_asset_ids.add(item.asset_id)
+                    self.logger.warning(
+                        "Retaining uncertain prior upload for review without blocking new transfers: %s",
+                        item.asset_id,
+                    )
                     continue
                 else:
                     remaining.append(item)
@@ -1805,7 +1815,11 @@ class EarthEngineUIUploader:
         self.report.upsert_many(changed_rows)
 
     def pending_browser_upload_asset_ids(self) -> set[str]:
-        """Return clicked uploads that have not reached an EE ingestion operation."""
+        """Return unsettled transfers, excluding reviewed historical uncertainty.
+
+        Exclusion affects only this worker's transfer capacity. The retained
+        report row, provenance and later EE reconciliation remain unchanged.
+        """
         provisional_statuses = {
             "SUBMITTED",
             SUBMITTED_PENDING_VERIFICATION_STATUS,
@@ -1815,6 +1829,7 @@ class EarthEngineUIUploader:
             asset_id
             for asset_id in self.tracked_items
             if self.report.get_status(asset_id) in provisional_statuses
+            and asset_id not in self.deferred_prior_upload_asset_ids
             and asset_id not in self.ee_operations_by_asset
             and asset_id not in self.ee_existing_asset_ids
         }
@@ -1934,8 +1949,8 @@ class EarthEngineUIUploader:
         """Resolve provisional browser submissions using EE assets and operations.
 
         A closed browser dialog is only provisional evidence. If no asset or
-        ingestion operation appears after a short grace period, the row becomes
-        retryable instead of remaining pending indefinitely.
+        ingestion operation appears after a short grace period, retain an
+        uncertain outcome. Age alone does not authorize another upload click.
         """
         pending_statuses = {
             "SUBMITTED",
@@ -1994,7 +2009,8 @@ class EarthEngineUIUploader:
                 row["final_status"] = UNKNOWN_AFTER_CLICK_STATUS
                 row["error_message"] = (
                     "Upload dialog closed, but no Earth Engine asset or ingestion operation "
-                    "was found after the confirmation grace period. The local mosaic is retryable."
+                    "was found after the confirmation grace period. The local mosaic is retained "
+                    "for reconciliation; uncertainty alone does not authorize another upload."
                 )
                 changed_rows.append(row)
 
