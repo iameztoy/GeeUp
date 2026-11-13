@@ -60,3 +60,29 @@ pending; its local inputs and error history are kept. The option does not overri
 an explicit stop, global resource constraints or the requirement for correct input
 accounting. Upload-only pending outputs retain the existing separate continuation
 and two-round recovery behavior. Resume and Statistics preserve these distinctions.
+
+
+## Verification writer admission — v0.8.22
+
+The v0.8.19 SQLite retries alone could still expire when parallel processing workers
+competed to record verification. An OS lock now admits one verification writer
+before it opens SQLite. Workers waiting for that lock hold no database connection.
+Raster processing, checksums and receipt serialization stay outside this gate;
+readers keep using WAL. The database schema and scientific reuse signatures are
+unchanged. Runtime provenance also records the writer helper's code hash.
+
+The gate waits up to five minutes, logging progress every 30 seconds. After
+admission, the existing bounded SQLite retries and FULL synchronous commits still
+apply; transaction bodies are not replayed. A crashed process automatically loses
+its OS lock and SQLite rolls back an uncommitted transaction. The small
+`00_logs/.verification-writer.lock` file persists intentionally: its presence does
+not mean the database is locked. Do not remove it while the application is running.
+
+Tests use real competing processes and a deliberately slow transaction, including
+an abrupt process exit without Python cleanup. They check that all successful
+records survive, readers remain available, separate projects are independent,
+and a timed-out waiter never enters its database transaction. Existing Resume,
+cleanup and Statistics regressions retain their proof requirements. A persistent
+external lock or storage failure can still fail safely; it never certifies an
+unrecorded output or permits its cleanup. Use Resume after correcting the cause.
+This patch does not constitute a new production NASA-to-EE acceptance run.

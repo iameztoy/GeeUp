@@ -1,5 +1,12 @@
 # Release history
 
+## 0.8.22 — 13 November 2026
+
+- Coordinate verification writes across worker processes before opening SQLite, preventing parallel extraction/mosaic workers from exhausting each other's SQLite writer retries. Readers and raster processing remain parallel; hashes and receipt serialization run outside the writer transaction.
+- Use an OS lock that is released automatically after a worker crash. A waiting writer reports prolonged contention, waits at most five minutes for admission, and never opens a database connection while waiting. Keep existing WAL/FULL durability, bounded SQLite retries and transaction rollback.
+- Preserve all filenames, source/checksum histories, proof requirements, cleanup eligibility, Statistics and Resume checkpoints. A failed record is still incomplete; Resume keeps the existing narrow repair for a mosaic whose verification record failed because of a database lock. No project migration, scientific-policy change or automatic deletion/re-upload.
+- Test simultaneous slow writers with real processes, abrupt writer exit, rollback, reader access, independent projects, bounded waits and unchanged provenance. Show v0.8.22 on Home and in the window title. Persistent disk/database errors remain explicit failures rather than false success.
+
 ## 0.8.21 — 12 November 2026
 
 - Keep a retained uncertain upload from an earlier worker out of the current browser-transfer capacity count, after all existing browser transfers have settled and EE inventory/operations have been reconciled. This prevents an old `UNKNOWN_AFTER_CLICK` from imposing repeated transfer timeouts on later recovery batches.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from swotflow.paths import APP_ROOT
 from swotflow.verification.file_cache import CleanupHashCache
+from swotflow.verification.writer import verification_writer
 
 import hashlib
 import json
@@ -17,7 +18,7 @@ import sys
 import time
 import uuid
 from collections import Counter, defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -113,33 +114,36 @@ class VerificationStore:
         """Open read-only unless an explicit operation creates evidence."""
         if write:
             self.logs.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(self.path if write else self.path.resolve().as_uri() + "?mode=ro",
-                             uri=not write, timeout=SQLITE_TIMEOUT_SECONDS)
-        db.row_factory = sqlite3.Row
-        try:
-            if write:
-                # WAL lets metadata readers coexist with worker receipts. Take
-                # the writer lock before schema/read work to avoid lock upgrades.
-                mode = _retry_database_lock(
-                    lambda: db.execute("PRAGMA journal_mode=WAL").fetchone(), "WAL setup")
-                if str(mode[0]).lower() != "wal":
-                    raise sqlite3.OperationalError("Verification database could not enable WAL")
-                db.execute("PRAGMA synchronous=FULL")
-                _retry_database_lock(lambda: db.execute("BEGIN IMMEDIATE"), "writer acquisition")
-                db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, utc TEXT, stage TEXT, payload TEXT)")
-                db.execute("CREATE TABLE IF NOT EXISTS artifacts (seq INTEGER PRIMARY KEY, path TEXT, stage TEXT, utc TEXT, payload TEXT)")
-                db.execute("CREATE INDEX IF NOT EXISTS artifact_path ON artifacts(path,seq)")
-                db.execute("CREATE TABLE IF NOT EXISTS cloud (seq INTEGER PRIMARY KEY, asset TEXT, utc TEXT, payload TEXT)")
-                db.execute("CREATE INDEX IF NOT EXISTS cloud_asset ON cloud(asset,seq)")
-                db.execute("CREATE TABLE IF NOT EXISTS ingestions (seq INTEGER PRIMARY KEY, asset TEXT, payload TEXT)")
-                db.execute("CREATE INDEX IF NOT EXISTS ingestion_asset ON ingestions(asset,seq)")
-            yield db
-            if write:
-                _retry_database_lock(db.commit, "commit")
-        finally:
-            if db.in_transaction:
-                db.rollback()
-            db.close()
+        # Serialize metadata commits, not raster work. Waiting workers hold no
+        # SQLite connection/transaction; readers remain independent under WAL.
+        with verification_writer(self.path) if write else nullcontext():
+            db = sqlite3.connect(self.path if write else self.path.resolve().as_uri() + "?mode=ro",
+                                 uri=not write, timeout=SQLITE_TIMEOUT_SECONDS)
+            db.row_factory = sqlite3.Row
+            try:
+                if write:
+                    # WAL lets metadata readers coexist with worker receipts. Take
+                    # the writer lock before schema/read work to avoid lock upgrades.
+                    mode = _retry_database_lock(
+                        lambda: db.execute("PRAGMA journal_mode=WAL").fetchone(), "WAL setup")
+                    if str(mode[0]).lower() != "wal":
+                        raise sqlite3.OperationalError("Verification database could not enable WAL")
+                    db.execute("PRAGMA synchronous=FULL")
+                    _retry_database_lock(lambda: db.execute("BEGIN IMMEDIATE"), "writer acquisition")
+                    db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, utc TEXT, stage TEXT, payload TEXT)")
+                    db.execute("CREATE TABLE IF NOT EXISTS artifacts (seq INTEGER PRIMARY KEY, path TEXT, stage TEXT, utc TEXT, payload TEXT)")
+                    db.execute("CREATE INDEX IF NOT EXISTS artifact_path ON artifacts(path,seq)")
+                    db.execute("CREATE TABLE IF NOT EXISTS cloud (seq INTEGER PRIMARY KEY, asset TEXT, utc TEXT, payload TEXT)")
+                    db.execute("CREATE INDEX IF NOT EXISTS cloud_asset ON cloud(asset,seq)")
+                    db.execute("CREATE TABLE IF NOT EXISTS ingestions (seq INTEGER PRIMARY KEY, asset TEXT, payload TEXT)")
+                    db.execute("CREATE INDEX IF NOT EXISTS ingestion_asset ON ingestions(asset,seq)")
+                yield db
+                if write:
+                    _retry_database_lock(db.commit, "commit")
+            finally:
+                if db.in_transaction:
+                    db.rollback()
+                db.close()
 
     def begin_run(self, stage: str, config: Any) -> str:
         """Record actual runtime/settings once per stage, never credentials."""
@@ -152,14 +156,16 @@ class VerificationStore:
         code = APP_ROOT
         source_names = ("swotflow/verification/pipeline.py", "swotflow/core/metadata.py", "swotflow/processing/extract.py",
                         "swotflow/processing/mosaic.py", "swotflow/processing/download.py", "swotflow/verification/download.py",
-                        "swotflow/verification/native.py", "swotflow/verification/source.py")
+                        "swotflow/verification/native.py", "swotflow/verification/source.py",
+                        "swotflow/verification/writer.py")
         runtime = {"python": sys.version, "executable": sys.executable, "platform": platform.platform(),
                    "settings": safe_metadata(allowed), "code_sha256": {n: file_hash(code / n) for n in source_names}}
         if "osgeo.gdal" in sys.modules:
             runtime["gdal"] = sys.modules["osgeo.gdal"].VersionInfo("RELEASE_NAME")
         run_id = uuid.uuid4().hex
+        payload = json.dumps(runtime)
         with self.connection(True) as db:
-            db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, utc_now(), stage, json.dumps(runtime)))
+            db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, utc_now(), stage, payload))
         return run_id
 
     def artifacts(self) -> dict[str, dict]:
@@ -209,9 +215,10 @@ class VerificationStore:
                  "run_id": run_id, "grid": grid, "utc": utc_now(), "verification": "structural_and_file_identity"}
         if stage == "mosaic":
             proof["selection_scan_id"] = getattr(config, "selection_scan_id", "")
+        payload = json.dumps(proof)
         with self.connection(True) as db:
             db.execute("INSERT INTO artifacts(path,stage,utc,payload) VALUES (?,?,?,?)",
-                       (proof["path"], stage, proof["utc"], json.dumps(proof)))
+                       (proof["path"], stage, proof["utc"], payload))
         return proof
 
     def reusable(self, stage: str, output: Path, inputs: list[Path], config: Any) -> bool:
@@ -252,9 +259,10 @@ class VerificationStore:
         required = {"asset_id", "asset_fingerprint", "local_sha256", "sources", "mode", "passed", "utc"}
         if not required <= receipt.keys() or receipt["mode"] not in {"sampled", "full"}:
             raise ValueError("Invalid native-pixel receipt")
+        payload = json.dumps(receipt)
         with self.connection(True) as db:
             db.execute("INSERT INTO cloud(asset,utc,payload) VALUES (?,?,?)",
-                       (receipt["asset_id"], receipt["utc"], json.dumps(receipt)))
+                       (receipt["asset_id"], receipt["utc"], payload))
 
     def ingestions(self) -> dict[str, dict]:
         """Read immutable submission/revision events without inventing legacy evidence."""
@@ -268,8 +276,9 @@ class VerificationStore:
 
     def record_ingestion(self, receipt: dict) -> None:
         """Append submission/binding evidence; never overwrite an earlier revision."""
+        payload = json.dumps(receipt)
         with self.connection(True) as db:
-            db.execute("INSERT INTO ingestions(asset,payload) VALUES (?,?)", (receipt["asset_id"], json.dumps(receipt)))
+            db.execute("INSERT INTO ingestions(asset,payload) VALUES (?,?)", (receipt["asset_id"], payload))
 
     def latest_asset_event(self, table: str, asset_id: str) -> dict:
         """Indexed per-asset lookup; bulk history reads belong only in reconciliation."""

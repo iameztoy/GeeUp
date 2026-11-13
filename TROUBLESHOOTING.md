@@ -1,5 +1,25 @@
 # Troubleshooting
 
+## Processing Reports `ERROR_VERIFICATION: database is locked`
+
+From v0.8.22, parallel workers take turns saving verification records before opening
+SQLite. Extraction and mosaicking remain parallel. A waiting writer logs progress;
+a crashed writer releases its OS lock automatically. The persistent
+`00_logs/.verification-writer.lock` file is normal and must not be deleted while
+the application runs. Do not delete any verification database or its WAL files.
+
+Let an active run finish or pause normally before installing the patch, then reopen
+the project and use **Resume Run**. Resume retains completed proof-checked work and
+can rebuild the exact mosaic whose verification record failed because of a lock.
+It does not accept an existing unverified raster as successful just because the
+file exists. Unresolved outputs and their inputs remain available for recovery;
+Statistics only advances when the required records are saved.
+
+If the bounded wait still fails, check for another application using that project,
+a database editor holding a transaction, or a storage error. A persistent failure
+remains explicit rather than allowing an untracked output to be uploaded or cleaned.
+See [verification and recovery](WORKFLOW_VALIDATION.md#verification-writer-admission--v0822).
+
 ## Upload Run Exhausts Memory Or The Desktop Turns Black
 
 Current projects use `<project_root>\swotflow.sqlite3` for per-asset status updates. This replaces the former behavior that repeatedly loaded and rewrote large cumulative CSV manifests and could exhaust Windows committed memory during long uploads.
