@@ -73,3 +73,14 @@ Statistics to update a previously saved snapshot after cleanup.
 Routine Statistics refresh reads saved records and filesystem metadata without hashing cleanup candidates. **Cleanup candidates** and **Cleanup candidate size** show **Not evaluated**; use Cleanup's explicit preview for eligibility. This is not a zero-candidate result. Local file counts still refresh normally, while cleanup does not remove historical filename, processing-version or upload records.
 
 Completed local outputs are checkpointed individually, so their records remain available after an interrupted stage even if its final CSV export was not written. Unknown upload outcomes remain separate from confirmed uploads. An explicitly selected strict cleanup policy cannot be reported as satisfied merely because legacy download mode is in use.
+
+
+## Full-range map completion — v0.8.23
+
+The Pipeline Status map and Automation selector use the full requested period, not just the latest completed year. Green requires verified mosaics with no outstanding outputs and, where a catalogue window exists, all preferred acquisition identities accounted for in those verified mosaics. Submission alone does not count. Input counts are not compared directly with mosaic counts.
+
+For yearly Automation the full parent catalogue window supplies coverage. A completed annual preview cannot substitute for it; absent parent evidence is displayed as incomplete/unknown. Amber **Date range incomplete / awaiting verification** includes later years still downloading/processing, pending verification and deferred failures. Hover/click details retain the actual counts and explain the outstanding scope. Cleanup is not an extra scientific verification requirement for map completion; the live overlay can remain pending until the current run's final reconciliation refreshes the map.
+
+Selecting a historical **Update Coverage** window changes only that window's map. Its green means that explicitly labelled window is complete, not the full parent request. Consolidation Coverage keeps its separate registered-lineage meaning.
+
+During Automation, visible Statistics or selector maps refresh in the background at most once per minute. A lightweight pending overlay prevents an older snapshot from claiming completion while work continues. These display changes do not modify source histories, processing receipts, Resume, cleanup eligibility or upload counts. They do not certify spatial nodata or pixel integrity.

@@ -5,7 +5,7 @@ from __future__ import annotations
 from swotflow.paths import APP_ROOT
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -213,6 +213,11 @@ PIPELINE_STATUS_STYLES = {
         "fill": "#e89b33",
         "outline": "#a46212",
     },
+    "pending_range": {
+        "label": "Date range incomplete / awaiting verification",
+        "fill": "#d6b13f",
+        "outline": "#8d7014",
+    },
     "uploaded": {
         "label": "Uploaded/EE verified",
         "fill": "#4f9f50",
@@ -282,6 +287,7 @@ class TilePipelineStatus:
     uploaded: int = 0
     missing_upload: int = 0
     status: str = "none"
+    completion_note: str = ""
 
     @property
     def label(self) -> str:
@@ -332,7 +338,7 @@ def pipeline_status_key(
     ]
     if not any((downloaded, extracted, mosaic_sources, uploaded, missing_upload)):
         return "none"
-    if uploaded > 0 and missing_upload > 0:
+    if uploaded > 0 and (missing_upload > 0 or uploaded < mosaic_sources):
         return "attention"
     if uploaded > 0:
         return "uploaded"
@@ -406,6 +412,46 @@ def update_coverage_status_from_row(row: Sequence[object]) -> TileUpdateCoverage
     )
 
 
+def pipeline_completion_notes(
+    coverage_rows: Sequence[Sequence[object]],
+    yearly: Mapping[str, object] | None = None,
+) -> Dict[str, str]:
+    """Explain incomplete *full-range* coverage, independently of viewed update windows.
+
+    Coverage counts preferred acquisition identities traced into verified outputs,
+    not input counts compared with mosaic counts. Execution/cleanup completion
+    alone is never evidence of ingestion. Missing parent coverage is unknown.
+    """
+    coverage = {}
+    for row in coverage_rows:
+        try:
+            status = update_coverage_status_from_row(row)
+        except (TypeError, ValueError):
+            continue
+        coverage[status.token] = status
+    yearly = yearly or {}
+    tiles = set(coverage) | set(yearly.get("tiles", []))
+    period = ""
+    if yearly:
+        period = f"{yearly.get('start_date', '')} to {yearly.get('end_date', '')}: "
+    notes = {}
+    for tile in tiles:
+        status = coverage.get(tile)
+        if status and status.expected > 0 and status.status == "complete" and status.uploaded_sources == status.expected:
+            continue
+        if status and status.expected > 0:
+            detail = f"{status.uploaded_sources}/{status.expected} preferred inputs accounted for in verified EE mosaics"
+        else:
+            detail = "full-range catalogue/verified-source coverage not established"
+        notes[tile] = period + detail + ". Completed individual years do not complete the tile."
+    return notes
+
+
+def apply_pipeline_completion(status: TilePipelineStatus, note: str = "") -> TilePipelineStatus:
+    """Keep QA counts intact while withholding green for unfinished scope."""
+    return replace(status, status="pending_range", completion_note=note) if note else status
+
+
 class UTMPipelineStatusMap(ttk.Frame):
     """Read-only UTM status map for project pipeline QA/QC."""
 
@@ -420,6 +466,8 @@ class UTMPipelineStatusMap(ttk.Frame):
         super().__init__(master)
         self.geometry_data = geometry
         self.tile_statuses: Dict[str, TilePipelineStatus] = {}
+        self.completion_notes: Dict[str, str] = {}
+        self.live_pending_tiles: set[str] = set()
         self.consolidation_rows: dict[str, dict] = {}
         self.consolidation_caption = "No consolidation register loaded."
         self.update_coverage_statuses: Dict[str, TileUpdateCoverageStatus] = {}
@@ -590,11 +638,11 @@ class UTMPipelineStatusMap(ttk.Frame):
             )
         else:
             styles = PIPELINE_STATUS_STYLES
-            keys = ("downloaded", "extracted", "mosaicked", "uploaded", "attention", "none")
+            keys = ("downloaded", "extracted", "mosaicked", "pending_range", "uploaded", "attention", "none")
         for index, key in enumerate(keys):
             style = styles[key]
             item = ttk.Frame(self.legend_frame)
-            item.grid(row=0, column=index, sticky="w", padx=(0, 12))
+            item.grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 12), pady=2)
             swatch = tk.Canvas(item, width=16, height=12, highlightthickness=0)
             swatch.grid(row=0, column=0, sticky="w")
             swatch.create_rectangle(
@@ -625,6 +673,21 @@ class UTMPipelineStatusMap(ttk.Frame):
             status = pipeline_status_from_qa_row(row)
             statuses[status.token] = status
         self.tile_statuses = statuses
+        self.draw_map()
+        self.update_summary_status()
+
+    def set_completion_notes(self, notes: Mapping[str, str]) -> None:
+        """Apply full-request evidence without changing the selected historical window."""
+        self.completion_notes = dict(notes)
+        self.draw_map()
+        self.update_summary_status()
+
+    def set_live_pending_tiles(self, tiles: Iterable[str]) -> None:
+        """Prevent an older snapshot from painting active/pending work green."""
+        pending = set(tiles)
+        if pending == self.live_pending_tiles:
+            return
+        self.live_pending_tiles = pending
         self.draw_map()
         self.update_summary_status()
 
@@ -725,6 +788,8 @@ class UTMPipelineStatusMap(ttk.Frame):
     def clear_statuses(self) -> None:
         """Clear all project status data from the map."""
         self.tile_statuses = {}
+        self.completion_notes = {}
+        self.live_pending_tiles = set()
         self.consolidation_rows = {}
         self.consolidation_caption = "No consolidation register loaded."
         self.update_coverage_statuses = {}
@@ -742,7 +807,10 @@ class UTMPipelineStatusMap(ttk.Frame):
 
     def tile_status(self, token: str) -> TilePipelineStatus:
         """Return current status for a tile, defaulting to no project records."""
-        return self.tile_statuses.get(token, TilePipelineStatus(token=token))
+        note = self.completion_notes.get(token, "")
+        if token in self.live_pending_tiles:
+            note = note or "Automation is still processing/verifying the selected date range; saved counts may lag."
+        return apply_pipeline_completion(self.tile_statuses.get(token, TilePipelineStatus(token=token)), note)
 
     def tile_update_coverage_status(self, token: str) -> TileUpdateCoverageStatus:
         """Return current update coverage for a tile, defaulting to no expected rows."""
@@ -926,9 +994,9 @@ class UTMPipelineStatusMap(ttk.Frame):
         self.status_var.set(
             f"{token}: {status.label}. "
             f"Downloaded {status.downloaded}; extracted {status.extracted}; "
-            f"mosaic sources {status.mosaic_sources}; sent to upload {status.submitted}; "
+            f"mosaics {status.mosaic_sources}; sent to upload {status.submitted}; "
             f"uploaded/verified {status.uploaded}; "
-            f"missing upload {status.missing_upload}."
+            f"missing upload {status.missing_upload}. {status.completion_note}"
         )
         missing_rows = self.missing_upload_rows_by_tile.get(token, [])
         if missing_rows:
@@ -972,17 +1040,18 @@ class UTMPipelineStatusMap(ttk.Frame):
             self.update_coverage_summary_status()
             return
         counts: Dict[str, int] = {}
-        for status in self.tile_statuses.values():
+        for token in set(self.tile_statuses) | set(self.completion_notes) | self.live_pending_tiles:
+            status = self.tile_status(token)
             counts[status.status] = counts.get(status.status, 0) + 1
         if not counts:
             self.status_var.set("No per-tile project records are available yet.")
             return
         ordered = [
             f"{PIPELINE_STATUS_STYLES[key]['label']}: {counts[key]}"
-            for key in ("downloaded", "extracted", "mosaicked", "uploaded", "attention")
+            for key in ("downloaded", "extracted", "mosaicked", "pending_range", "uploaded", "attention")
             if counts.get(key)
         ]
-        self.status_var.set("Project tile status. " + "; ".join(ordered) + ".")
+        self.status_var.set("Project tile status (full requested range, not individual years). " + "; ".join(ordered) + ".")
 
     def update_coverage_summary_status(self) -> None:
         """Show a compact update coverage summary."""
@@ -1033,6 +1102,7 @@ class UTMMapSelectorDialog(tk.Toplevel):
         preset_choices: Mapping[str, TilePreset] | None = None,
         coverage_tiles: Sequence[str] | None = None,
         status_rows: Sequence[Sequence[object]] | None = None,
+        completion_notes: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(master)
         self.title("UTM Tile Map Selector")
@@ -1050,6 +1120,9 @@ class UTMMapSelectorDialog(tk.Toplevel):
             except (TypeError, ValueError):
                 continue
             self.tile_statuses[status.token] = status
+        for token, note in (completion_notes or {}).items():
+            self.tile_statuses[token] = apply_pipeline_completion(
+                self.tile_statuses.get(token, TilePipelineStatus(token=token)), note)
         self.transform = CanvasTransform(
             self.geometry_data.bounds,
             self.canvas_width,
@@ -1066,6 +1139,18 @@ class UTMMapSelectorDialog(tk.Toplevel):
         self.update_status()
         self.transient(master)
         self.grab_set()
+
+    def set_pipeline_statuses(self, rows: Sequence[Sequence[object]], notes: Mapping[str, str]) -> None:
+        """Refresh an open selector without altering the selected tiles."""
+        self.tile_statuses = {}
+        for row in rows:
+            status = pipeline_status_from_qa_row(row)
+            self.tile_statuses[status.token] = status
+        for token, note in notes.items():
+            self.tile_statuses[token] = apply_pipeline_completion(
+                self.tile_statuses.get(token, TilePipelineStatus(token=token)), note)
+        self.draw_map()
+        self.update_status()
 
     def build_layout(self) -> None:
         """Build selector controls and canvas."""
@@ -1151,7 +1236,7 @@ class UTMMapSelectorDialog(tk.Toplevel):
                 outline = "#184a8b" if is_selected else style["outline"]
                 width = 2.0 if is_selected else 0.9
             elif is_selected and is_covered:
-                fill = "#2f9e7e"
+                fill = PIPELINE_STATUS_STYLES["downloaded"]["fill"]
                 outline = "#12614c"
                 width = 1.3
             elif is_selected:
@@ -1159,7 +1244,7 @@ class UTMMapSelectorDialog(tk.Toplevel):
                 outline = "#1d5f9f"
                 width = 1.2
             elif is_covered:
-                fill = "#77b66e"
+                fill = PIPELINE_STATUS_STYLES["downloaded"]["fill"]
                 outline = "#3f7b38"
                 width = 0.9
             else:
@@ -1247,11 +1332,14 @@ class UTMMapSelectorDialog(tk.Toplevel):
 
     def update_status(self, last_tile: str = "") -> None:
         """Refresh the selected-count status line."""
-        suffix = f" Last tile: {last_tile}." if last_tile else ""
+        status = self.tile_statuses.get(last_tile)
+        suffix = (f" {last_tile}: {status.label}. {status.completion_note}" if status
+                  else f" Last tile: {last_tile}." if last_tile else "")
         self.status_var.set(
             "Selected UTM tiles: "
             f"{len(self.selected_tiles)}. Project coverage tiles: {len(self.coverage_tiles)}. "
-            f"Blue = active, green = covered, teal = both. Click tiles to select or unselect.{suffix}"
+            f"Blue outline = selected; fill = pipeline status. Amber = incomplete date range; green = EE verified. "
+            f"Downloaded coverage alone is not completion. Click tiles to select or unselect.{suffix}"
         )
 
     def on_canvas_configure(self, event: tk.Event) -> None:

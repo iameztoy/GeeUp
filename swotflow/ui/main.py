@@ -191,7 +191,9 @@ from swotflow.processing.automation import (
     run_automation,
 )
 from swotflow.core.metadata import parse_swot_l2_hr_raster_metadata
-from swotflow.ui.utm_map import UTMMapSelectorDialog, UTMPipelineStatusMap, load_display_geometry
+from swotflow.ui.utm_map import (
+    UTMMapSelectorDialog, UTMPipelineStatusMap, load_display_geometry, pipeline_completion_notes,
+)
 
 
 def load_config() -> Dict[str, Any]:
@@ -335,6 +337,9 @@ class LauncherApp:
         self.latest_project_statistics_generated_at = ""
         self.statistics_refresh_running = False
         self.statistics_refresh_pending = False
+        self.automation_statistics_timer = None
+        self.automation_map_dialog = None
+        self.automation_map_progress_key = None
         self.upload_statistics_pending_revision: int | None = None
         self.upload_statistics_last_change_at = 0.0
         self.project_created_at = ""
@@ -4395,7 +4400,7 @@ class LauncherApp:
             return
         self.refresh_tile_presets()
         status_rows = self.automation_status_rows()
-        UTMMapSelectorDialog(
+        self.automation_map_dialog = UTMMapSelectorDialog(
             self.root,
             geometry,
             selected_tiles,
@@ -4403,6 +4408,7 @@ class LauncherApp:
             preset_choices=self.tile_preset_choices,
             coverage_tiles=self.automation_coverage_tiles_from_status_rows(status_rows),
             status_rows=status_rows,
+            completion_notes=self.status_map_completion_notes(self.latest_project_insights, live=True),
         )
 
     def apply_automation_map_selection(self, tiles: list[str]) -> None:
@@ -5578,6 +5584,9 @@ class LauncherApp:
         )
         self.automation_stop_event = threading.Event()
         self.initialize_automation_progress_tracker(self.automation_preflight_state)
+        self.automation_map_progress_key = None
+        self.update_live_map_pending_tiles()
+        self.schedule_automation_statistics_refresh()
         self.set_automation_progress_text("automation running")
         self.automation_status_var.set("Automation started. Do not run manual workflow actions until it finishes.")
         thread = threading.Thread(
@@ -5633,6 +5642,60 @@ class LauncherApp:
         else:
             self.automation_progress_text_var.set(f"Progress: {tile} / {stage} / {status}")
         self.automation_status_var.set(self.compact_live_status_message(message))
+        key = (tile, stage, status)
+        if key != self.automation_map_progress_key:
+            self.automation_map_progress_key = key
+            self.update_live_map_pending_tiles()
+
+    def live_map_pending_tiles(self) -> set[str]:
+        """Cheap UI overlay; stage success for one year is not tile completion."""
+        if not self.automation_running:
+            return set()
+        return {
+            tile for tile in self.automation_progress_tiles
+            if not self.automation_progress_stages or not all(
+                (tile, stage) in self.automation_progress_completed_keys
+                for stage in self.automation_progress_stages)
+        }
+
+    def update_live_map_pending_tiles(self) -> None:
+        """Retain the pending overlay until final Statistics reconciliation arrives."""
+        if self.automation_running:
+            self.stats_status_map.set_live_pending_tiles(self.live_map_pending_tiles())
+
+    def schedule_automation_statistics_refresh(self) -> None:
+        """One bounded timer, not a manifest scan per uploaded file/log line."""
+        if self.automation_statistics_timer is not None:
+            self.root.after_cancel(self.automation_statistics_timer)
+        self.automation_statistics_timer = self.root.after(60_000, self.poll_automation_statistics)
+
+    def poll_automation_statistics(self) -> None:
+        """Refresh visible maps at most once per minute while Automation runs."""
+        self.automation_statistics_timer = None
+        if not self.automation_running:
+            return
+        self.update_live_map_pending_tiles()
+        visible = self.notebook.tab(self.notebook.select(), "text") == "Statistics"
+        dialog = self.automation_map_dialog
+        visible = visible or bool(dialog is not None and dialog.winfo_exists())
+        if visible and not self.statistics_refresh_running:
+            self.refresh_project_statistics_if_active("live Automation coverage")
+        self.schedule_automation_statistics_refresh()
+
+    def status_map_completion_notes(self, insights: Any, *, live: bool = False) -> dict[str, str]:
+        """Use the full parent window, never the year/window being viewed on the map."""
+        yearly = getattr(insights, "yearly_automation", {}) or {}
+        rows = getattr(insights, "update_coverage_tile_rows", [])
+        parent_id = yearly.get("parent_campaign_id", "")
+        if parent_id:
+            # Missing parent evidence is unknown; a completed annual preview
+            # must never stand in for the full selected date range.
+            rows = getattr(insights, "update_coverage_campaign_rows", {}).get(parent_id, [])
+        notes = pipeline_completion_notes(rows, yearly)
+        if live:
+            for tile in self.live_map_pending_tiles():
+                notes.setdefault(tile, "Automation is still processing/verifying the entire selected date range.")
+        return notes
 
     def compact_live_status_message(self, message: str, limit: int = 120) -> str:
         """Return a one-line status message so long filenames do not resize the GUI."""
@@ -6589,7 +6652,13 @@ class LauncherApp:
                     f"Could not load UTM status map geometry: {exc}"
                 )
                 return
+        self.stats_status_map.set_completion_notes(self.status_map_completion_notes(insights))
         self.stats_status_map.set_tile_statuses(insights.upload_qa_tile_rows)
+        self.update_live_map_pending_tiles()
+        dialog = self.automation_map_dialog
+        if dialog is not None and dialog.winfo_exists():
+            dialog.set_pipeline_statuses(insights.upload_qa_tile_rows,
+                                         self.status_map_completion_notes(insights, live=True))
         self.stats_status_map.set_update_coverage_statuses(
             getattr(insights, "update_coverage_tile_rows", [])
         )
@@ -6978,6 +7047,8 @@ class LauncherApp:
     ) -> None:
         """Render a completed background statistics refresh."""
         self.statistics_refresh_running = False
+        if not self.automation_running:
+            self.stats_status_map.set_live_pending_tiles([])
         suffix = f" after {source}" if source else ""
         if snapshot_text.startswith(" Saved to "):
             self.latest_project_statistics_generated_at = ""

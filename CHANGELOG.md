@@ -1,5 +1,13 @@
 # Release history
 
+## 0.8.23 — 15 November 2026
+
+- Require full-request catalogue/source coverage for green pipeline-map completion. A completed annual batch cannot substitute for the entire selected date range; submitted, pending, missing and unverified acquisitions remain incomplete.
+- Keep full-range completion separate from the historical Update Coverage window being viewed. Missing parent-range evidence remains unknown rather than borrowing a completed child's evidence.
+- Apply the same completion context to the Statistics map and Automation tile selector. Show pending-range labels and keep an active-work overlay when cached statistics predate current uploads.
+- Refresh visible Automation/Statistics maps in the background at most once per minute, plus the existing final reconciliation. Do not scan histories on every upload/log message or change processing, Resume, cleanup, source histories or verified counts.
+- Add regression checks for multi-year progress, deferred uploads, missing full-range evidence, historical-window selection, live refresh and completed coverage. Show v0.8.23 on Home and in the window title.
+
 ## 0.8.22 — 13 November 2026
 
 - Coordinate verification writes across worker processes before opening SQLite, preventing parallel extraction/mosaic workers from exhausting each other's SQLite writer retries. Readers and raster processing remain parallel; hashes and receipt serialization run outside the writer transaction.
