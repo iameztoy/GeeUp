@@ -52,3 +52,28 @@ Each cleanup operation hashes an unchanged downstream file once and reuses that 
 An explicitly selected full-pixel policy is enforced even with verified downloads disabled. Both explicit policies bind the exact local mosaic hash/sidecars to its current cloud owner and terminal upload record. Genuine conflicting, pending or failed records retain the file. Legacy non-GUI configurations without an explicit policy preserve their earlier behavior and Statistics labels it as legacy.
 
 Statistics refresh no longer calculates deletion eligibility. Use Cleanup's preview/synchronization controls for proof-checked candidate counts; this avoids reading large TIFFs during routine Statistics refreshes.
+
+
+## Stable cleanup evidence — v0.8.24
+
+Previously, reading a verification receipt could change SQLite's shared-memory
+coordination file (`-shm`). Cleanup mistook that for a changed project and rebuilt
+all source/upload evidence for the next TIFF or TFW. The cache now tracks the
+actual database and nonempty write-ahead log (`-wal`), plus the existing inventory,
+manifest, settings and replacement-history files. SHM contains no database content;
+see [SQLite's WAL format](https://www.sqlite.org/walformat.html).
+
+Each lookup still checks file identity and true change timestamps, including
+Windows ChangeTime. Real commits, replacements, provenance/status changes and
+expired inventory invalidate reuse. Unsupported change metadata disables caching.
+Evidence changing during assembly is read again once; if it keeps changing, files
+stay local for a later cleanup pass. Every deletion target still has its bytes
+checked, and companions are removed only after their verified parent is gone.
+Large TIFF hash checks can still take time; this correction removes repeated
+history reconstruction, not the safety checks.
+
+The cache exists only within one cleanup operation. Ordinary and year-by-year
+Automation, manual cleanup and resumed cleanup use the same rule. Project records
+are retained; current disk counts fall while historical processing/upload counts
+remain. Installing this patch does not itself start cleanup or invalidate scientific
+checkpoints. Resume the same project with the desired cleanup options enabled.

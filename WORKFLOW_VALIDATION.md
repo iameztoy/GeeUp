@@ -86,3 +86,21 @@ cleanup and Statistics regressions retain their proof requirements. A persistent
 external lock or storage failure can still fail safely; it never certifies an
 unrecorded output or permits its cleanup. Use Resume after correcting the cause.
 This patch does not constitute a new production NASA-to-EE acceptance run.
+
+
+## Cleanup evidence reuse - v0.8.24
+
+Offline regressions cover actual temporary TIFF/sidecar deletion in ordinary and
+yearly modes, a simulated interruption after the parent TIFF is deleted, resumed
+companion cleanup, retained upload counts and reuse of cleaned scientific outputs.
+Both cleanup policies still enforce their existing proof requirements. Additional
+cases cover a real WAL-only committed failure, restored timestamps, atomic file
+replacement, unsupported change metadata, expired inventory, modified target bytes,
+changed evidence during assembly and failure after parent deletion. Application
+option-matrix tests continue to cover both schedulers and independent cleanup flags.
+
+Tests use isolated local fixtures; no production assets or project rasters are
+modified and this patch does not add a new NASA-to-EE scientific acceptance run.
+The cache changes no database schema or scientific checkpoint. Rollback, if needed,
+consists of installing the prior application release while the app is closed;
+retain project histories and settings.

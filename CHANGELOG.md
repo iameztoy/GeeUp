@@ -1,5 +1,12 @@
 # Release history
 
+## 0.8.24 — 15 November 2026
+
+- Fix repeated cleanup-evidence rebuilds caused by SQLite reader coordination files. Reuse unchanged evidence during a deletion batch; exclude SHM and empty WAL files, while tracking real database/WAL commits, file identity and true change timestamps.
+- Keep both cleanup policies, current upload ownership, inventory freshness, provenance, target/sidecar hashes and parent-before-companion ordering. Changed, failed, pending or ambiguous evidence still retains files. Retry evidence assembly once if it changes during reading; persistent concurrent changes retain targets for a later pass.
+- Apply the same correction to ordinary and year-by-year Automation and manual Cleanup. Preserve source histories, Resume checkpoints and Statistics; no project migration, reprocessing, re-upload or automatic policy change.
+- Add regression coverage for WAL-only commits, read-only receipt access, same-size rewrites, replaced evidence, interrupted TIFF/TFW cleanup, both scheduling modes and retained Statistics. Show v0.8.24 on Home and in the application title.
+
 ## 0.8.23 — 15 November 2026
 
 - Require full-request catalogue/source coverage for green pipeline-map completion. A completed annual batch cannot substitute for the entire selected date range; submitted, pending, missing and unverified acquisitions remain incomplete.
