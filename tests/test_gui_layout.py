@@ -359,6 +359,36 @@ class GuiLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_cloud_settings_round_trip_and_automation_share_one_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with mock.patch("swotflow.ui.main.load_config", return_value=self.sample_config(Path(temp))):
+                    app = LauncherApp(root)
+                self.assertEqual(app.selected_upload_backend(), "browser")
+                original_catalog_setting = app.build_config()["download"]["catalog_history_enabled"]
+                app.cloud_tab.load({"cloud_upload": {"chunk_mib": 8}})
+                app.upload_backend_var.set("Google Cloud Storage")
+                app.cloud_tab.project.set("my-cloud-project")
+                app.cloud_tab.bucket.set("my-cloud-staging")
+                app.cloud_tab.limit.set("15")
+                built = app.build_config()
+                self.assertEqual(built["upload"]["backend"], "gcs")
+                self.assertEqual(built["cloud_upload"]["staging_limit_gib"], 15)
+                self.assertEqual(built["cloud_upload"]["chunk_mib"], 8)
+                self.assertEqual(built["download"]["catalog_history_enabled"], original_catalog_setting)
+                app.cloud_tab.project.set("discard-me")
+                app.upload_backend_var.set("Browser (existing uploader)")
+                app.data = built
+                app.apply_config_to_ui(built)
+                self.assertEqual(app.cloud_tab.project.get(), "my-cloud-project")
+                self.assertEqual(app.selected_upload_backend(), "gcs")
+                controls = collect_widgets(app.tabs_by_name["Automation"], ttk.Combobox)
+                self.assertTrue(any(str(c.cget("textvariable")) == str(app.upload_backend_var) for c in controls))
+            finally:
+                root.destroy()
+
     def test_tab_order_and_gdal_field_placement(self) -> None:
         root = tk.Tk()
         root.withdraw()
@@ -378,6 +408,7 @@ class GuiLayoutTests(unittest.TestCase):
                     "Extraction",
                     "Mosaic",
                     "Upload",
+                    "Cloud Upload",
                     "EE Consolidation",
                     "Statistics",
                     "Cleanup",
@@ -403,6 +434,7 @@ class GuiLayoutTests(unittest.TestCase):
                 extract_tab,
                 mosaic_tab,
                 upload_tab,
+                cloud_tab,
                 consolidation_tab,
                 statistics_tab,
                 cleanup_tab,

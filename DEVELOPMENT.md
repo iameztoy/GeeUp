@@ -10,7 +10,7 @@ swotflow/
   catalog/        NASA catalogue history and its interface
   consolidation/ EE mosaic planning, updates, replacement register and panels
   core/           filename metadata, storage, GDAL runtime and power helpers
-  earthengine/    browser uploader and selectors
+  earthengine/    shared uploader planning, browser transport and cloud/ backend
   processing/     download, duplicate removal, extraction, mosaicking, Automation
   project/        project state, database, updates, statistics, relocation, cleanup
   tools/          optional maintenance and preset/asset builders
@@ -126,3 +126,17 @@ components. **Every GitHub release title and release description must explicitly
 contain its version**, for example `SWOTFlow v0.6.1`. Release notes describe the
 application changes, validation and limitations; they do not attach investigation
 datasets or reports. Do not restart a running update to display a new version.
+
+
+## Cloud upload architecture (v0.9.0)
+
+`earthengine/cloud/` contains isolated configuration, protected session storage,
+JSON transport, manifest construction, durable queue and UI. The CLI selects one
+backend under the project upload lock; Cloud reuses the existing planner/metadata
+and report contract without calling Selenium. Automation stage commands remain
+the same, so both scheduling modes use the persisted backend selection.
+
+The journal lives beside `upload_report.csv`, not in application source. Its
+owner/revision object keys and generation preconditions are part of cleanup
+safety. Never log resumable URLs or replace task intent with a filename-only
+success. Tests mock external APIs; the small live pilot is separately required.

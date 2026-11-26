@@ -1,5 +1,17 @@
 # Release history
 
+## 0.9.0 - 26 November 2026 (Cloud Upload candidate)
+
+- Add an optional Cloud Upload tab and shared `browser`/`gcs` upload-method selection in Automation, including ordinary and year-by-year runs. Existing/new project defaults remain Browser. Download, extraction, mosaic science, NASA filename histories and date-range completeness rules remain shared.
+- Stage verified mosaics through authenticated, checksum-checked resumable transfers. Overlap transfers with bounded EE ingestion, retain stable request IDs across uncertain responses, and enforce a staging-byte budget. No Cloud resources are provisioned automatically.
+- Preserve acquisition intervals, processing summaries, band names/pyramiding settings and provenance in ordinary EE ingestion manifests. Verify resulting asset metadata before marking completion; no scientific pixel-equivalence claim is implied.
+- Track transfers, tasks and owned object generations in a durable project journal. Resume preserves pending/failed mosaics. Remove only exact owned staging generations after verification; local mosaic cleanup remains independently selected. Protect resumable URLs outside project history.
+- Reuse the existing upload reports for Statistics and full-date-range status. Add Cloud queue/staging metrics and a shared cross-backend process lock. Never count bucket transfer as EE completion.
+- Include a beginner setup guide for billing/payment, private Standard buckets, soft delete, permissions, ADC login, pilot validation and subsequent Automation updates.
+- Break equal-timestamp NASA scan ordering ties by durable insertion order, so an older successful scan cannot mask a newer failed refresh. Add a deterministic clock-tie regression.
+- Offline regression coverage is available; live Cloud ingestion, regional billing and native-scale image checks remain pilot acceptance requirements before broad use.
+
+
 ## 0.8.24 — 15 November 2026
 
 - Fix repeated cleanup-evidence rebuilds caused by SQLite reader coordination files. Reuse unchanged evidence during a deletion batch; exclude SHM and empty WAL files, while tracking real database/WAL commits, file identity and true change timestamps.

@@ -1,0 +1,98 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>SWOTFlow v0.9.0 - Cloud Upload setup</title><style>body{font:17px/1.65 system-ui,sans-serif;max-width:960px;margin:45px auto;padding:0 24px;color:#172b3a;background:#fbfcfe}h1,h2{line-height:1.25;color:#164859}h2{margin-top:2.1em;border-top:1px solid #dce4e9;padding-top:1em}a{color:#096988}code{background:#edf2f6;padding:2px 5px;border-radius:4px;font-size:.9em}pre{background:#edf2f6;padding:18px;overflow:auto}pre code{padding:0}li{margin:.5em 0}@media print{body{font-size:11pt;margin:0}h2{break-after:avoid}pre{white-space:pre-wrap}}</style><body><h1>SWOTFlow v0.9.0 - Google Cloud Upload setup</h1>
+<p>This guide is for the first-time setup of the optional Cloud Upload route. You prepare mosaics locally as before. SWOTFlow stages each TIFF in your private Cloud Storage bucket, starts an ordinary Earth Engine image ingestion, verifies the resulting asset and its metadata, then optionally removes the staging copy. It does not create a cloud-backed external image or change the mosaic projection.</p>
+<p><strong>Validation status:</strong> the new route has automated offline tests. A small live pilot in your own bucket and a separate EE collection is required before a continental upload. No paid resources or account changes are made simply by opening this tab.</p>
+<h2>1. Understand the three names</h2>
+<ul>
+<li><strong>Cloud project ID:</strong> the Google Cloud project used for API calls and billing, for example <code>my-swot-project</code>. It is not the project&#x27;s display name or number. Normally use the same project that owns your EE collection.</li>
+<li><strong>Bucket name:</strong> a globally unique storage container, for example <code>my-swot-project-staging-2026</code>. A bucket name contains no <code>gs://</code> prefix or folder path in the SWOTFlow form.</li>
+<li><strong>EE collection:</strong> the destination for completed images, such as <code>projects/my-swot-project/assets/SWOTFlow_cloud_pilot</code>. Bucket storage and EE assets are separate copies with separate quotas.</li>
+</ul>
+<p>A &quot;prefix&quot; is a folder-like part of an object name inside a bucket. Keep the suggested <code>swotflow-staging</code> prefix. SWOTFlow adds its own project owner and revision identifiers below it.</p>
+<h2>2. Select a project and set up billing</h2>
+<ul>
+<li>Open <a href="https://console.cloud.google.com/">Google Cloud Console</a> with the Google account you use for Earth Engine.</li>
+<li>Use the project selector at the top. Select your existing EE project, or create a new project if your institution requires separation. Write down the <strong>project ID</strong>.</li>
+<li>Open <strong>Billing</strong>. If there is no account, choose the option to create a billing account, enter the requested country/business and payment details, and link it to the selected project. A personal self-service account normally needs a supported payment method, often a credit/debit card; available methods depend on your country. Your organisation may provide an existing billing account instead.</li>
+<li>Enter payment information only on Google&#x27;s website. SWOTFlow does not need, store or request your card details.</li>
+</ul>
+<p><a href="https://docs.cloud.google.com/billing/docs/how-to/manage-billing-account">Billing account documentation</a> and <a href="https://docs.cloud.google.com/billing/docs/how-to/payment-methods">payment methods</a>.</p>
+<h2>3. Set a budget alert before testing</h2>
+<p>Open <strong>Billing &gt; Budgets &amp; alerts</strong>, create a small budget scoped to this project, and enable email notifications at thresholds such as 50%, 90% and 100%. Choose an amount you are comfortable monitoring. <strong>A budget alert is not a hard spending limit</strong>, and billing information can arrive later than usage. SWOTFlow&#x27;s staging limit controls its own queued bytes, not your total Google bill or other applications.</p>
+<p><a href="https://docs.cloud.google.com/billing/docs/how-to/budgets">Google&#x27;s budget instructions</a>.</p>
+<h2>4. Enable APIs and confirm Earth Engine access</h2>
+<p>In <strong>APIs &amp; Services &gt; Library</strong>, enable <strong>Cloud Storage API</strong> and <strong>Earth Engine API</strong> for your selected project if they are not already enabled. Confirm that the project is registered for Earth Engine and that the account can write to the intended collection. Retain your legitimate noncommercial registration if applicable; paying for Cloud Storage does not by itself require buying an EE commercial plan. Noncommercial eligibility and quotas still apply.</p>
+<p><a href="https://developers.google.com/earth-engine/guides/access">EE project registration</a> and <a href="https://developers.google.com/earth-engine/guides/noncommercial_tiers">noncommercial use</a>.</p>
+<h2>5. Create a dedicated temporary bucket</h2>
+<p>In the Console, open <strong>Cloud Storage &gt; Buckets &gt; Create</strong>. This bucket should contain only SWOTFlow staging copies.</p>
+<ul>
+<li>Choose a globally unique, non-sensitive name and note it.</li>
+<li>Choose <strong>Region</strong>, initially <code>us-central1</code> (Iowa) if your institution permits US storage. Confirm regional transfer pricing before large uploads; the app does not assume that every bucket-to-EE transfer is free.</li>
+<li>Select <strong>Standard</strong> storage. Do not use Nearline, Coldline, Archive or Autoclass for short-lived staging.</li>
+<li>Keep <strong>Public access prevention</strong> enabled and choose <strong>Uniform</strong> access. Do not grant access to <code>allUsers</code>.</li>
+<li>Keep object versioning <strong>off</strong>. Do not configure a retention lock, default object holds or automatic age-based deletion rules. Such rules could remove inputs before a queued ingestion finishes, or prevent prompt removal.</li>
+<li>Review <strong>soft delete</strong> explicitly. Google commonly enables a seven-day retention policy for deleted objects. For this dedicated disposable staging bucket, you can disable it to avoid paying for retained deleted copies. Only do this if you accept that deleted staging objects cannot be recovered from the bucket. Local pending/failed TIFFs remain protected by SWOTFlow.</li>
+</ul>
+<p>The Cloud check rejects incompatible storage/retention/lifecycle settings and warns about soft delete/versioning. It does not change these bucket settings for you.</p>
+<p><a href="https://docs.cloud.google.com/storage/docs/creating-buckets">Bucket creation</a>, <a href="https://docs.cloud.google.com/storage/docs/soft-delete">soft delete</a>, <a href="https://cloud.google.com/storage/pricing">storage pricing</a>.</p>
+<h2>6. Check permissions</h2>
+<p>For a personally owned project, your account may already have the required permissions. For an institutional project, ask its administrator for scoped access:</p>
+<ul>
+<li>On the staging bucket: create, read and delete objects, plus <code>storage.buckets.get</code> so SWOTFlow can inspect bucket settings. One possible combination is <strong>Storage Object User</strong> plus <strong>Storage Legacy Bucket Reader</strong>, limited to this bucket. An administrator can instead use a custom role with only the required permissions.</li>
+<li>On the EE project: <strong>Earth Engine Resource Writer</strong> (<code>roles/earthengine.writer</code>) and <strong>Service Usage Consumer</strong> (<code>roles/serviceusage.serviceUsageConsumer</code>), or equivalent existing permissions. The target collection must allow this account to create images.</li>
+<li>Billing setup/API enablement may require separate administrator permissions; ordinary daily uploads do not need project-wide Owner access.</li>
+</ul>
+<p>Use the same account for Cloud and EE. Do not create or download a service-account key for this initial desktop setup. ChromeDriver is not used by the Cloud backend; your organisation&#x27;s proxy/network policies still apply.</p>
+<p><a href="https://developers.google.com/earth-engine/guides/access_control">EE access roles</a> and <a href="https://docs.cloud.google.com/storage/docs/access-control/iam-roles">Cloud Storage roles</a>.</p>
+<h2>7. Sign in on the computer that runs SWOTFlow</h2>
+<p>Install the official <a href="https://docs.cloud.google.com/sdk/docs/install">Google Cloud CLI</a> for your operating system. Open a <strong>new PowerShell window</strong> after installation. These commands can run from any folder; replace <code>YOUR_PROJECT_ID</code>:</p>
+<pre><code>
+gcloud init
+
+gcloud config set project YOUR_PROJECT_ID
+
+gcloud auth application-default login
+
+gcloud auth application-default set-quota-project YOUR_PROJECT_ID
+
+</code></pre>
+<p>A browser sign-in opens. Choose the authorised account. <code>application-default login</code> is essential: signing in to the website or only running <code>gcloud auth login</code> is not the same thing. Google stores a refresh credential locally for applications; it is not an Earthdata username/password. Never copy this credential into a project folder, report, GitHub repository or chat. To revoke it later, use <code>gcloud auth application-default revoke</code>.</p>
+<p>If your organisation uses a proxy, have IT configure the Google Cloud CLI/Python environment using its approved instructions. Do not disable TLS checks or paste proxy passwords into project YAML.</p>
+<p><a href="https://docs.cloud.google.com/docs/authentication/set-up-adc-local-dev-environment">Application Default Credentials (ADC)</a>.</p>
+<h2>8. Prepare a small EE destination and configure SWOTFlow</h2>
+<p>For the first live pilot, create an empty <strong>ImageCollection</strong> in the EE Assets panel, for example <code>SWOTFlow_cloud_pilot</code>. Copy its complete asset ID. Use a separate small pilot project with a few verified mosaics; keep your production destination unchanged.</p>
+<p>In SWOTFlow:</p>
+<ul>
+<li>Open the project containing your prepared mosaics and their saved source/verification history. Loose TIFFs with no matching provenance are not sufficient for this Cloud backend.</li>
+<li>In <strong>Upload</strong>, check the origin mosaic folder, destination collection, UTM selection, metadata and pyramiding settings. These settings are shared with Cloud Upload. Keep your existing scientific choices.</li>
+<li>Open <strong>Cloud Upload</strong> and select <strong>Google Cloud Storage</strong> as the upload method. Enter the project ID and bucket name. Keep the dedicated prefix, choose a staged-storage limit, and choose whether verified staging copies should be removed.</li>
+<li>For a small pilot, use <strong>Wait for EE verification before next tile</strong>. Start with one or two active ingestions. If the shared active-ingestion limit is zero, Cloud uses a bounded limit of two. It transfers one TIFF at a time while EE processes earlier TIFFs.</li>
+<li>Click <strong>Check / preview (no uploads)</strong>. This checks authentication, bucket permissions/settings, current EE inventory and eligible local files. It does not upload, submit or delete Cloud objects. It may refresh the project&#x27;s ordinary inventory/report records.</li>
+<li>If the preview is correct, click <strong>Upload / resume mosaics</strong>. This starts transfers and can incur Cloud charges. Do not delete pending bucket objects manually.</li>
+</ul>
+<p>SWOTFlow builds the ingestion metadata automatically: acquisition start/end times, configured SWOT properties, processing summaries and the existing revision/source digests. All original filenames and full processing history remain in the project. It uses bands <code>b1</code> and <code>b2</code> and the configured pyramid policy; it does not resample or reproject during upload.</p>
+<p><a href="https://developers.google.com/earth-engine/guides/image_manifest">Ordinary manifest ingestion</a>.</p>
+<h2>9. Review the pilot before scaling</h2>
+<p>Check the Cloud queue and Statistics. &quot;In bucket&quot; or &quot;INGESTING&quot; is not EE completion. An image becomes verified only after EE returns the expected asset, bands, times, metadata and provenance. Confirm a few images in the Code Editor/GIS at their native analysis scale, including elevation/quality masks. Metadata/byte provenance verification is not a full scientific source-to-asset pixel audit.</p>
+<p>Review <strong>Billing &gt; Reports</strong> for actual storage, operations and any regional data-transfer charges after they appear. Check whether deleted objects are soft-deleted or retained by versioning. Only then expand to a larger batch.</p>
+<h2>10. Run new tiles and date updates through Automation</h2>
+<p>Select the same <strong>Upload method</strong> in <strong>Automation</strong>, leave <strong>Include upload</strong> enabled, and use your existing preflight/Start/Resume procedure. Both ordinary and tile-by-tile yearly runs use this choice. NASA catalogue tracking, extraction, mosaicking, duplicate checks, history and date-window completeness remain shared.</p>
+<p>Choose <strong>Submit and continue</strong> if you want later workflow stages to continue after confirmed task submission. Pending local mosaics remain retained. Later EE sync/reconciliation promotes successful ingestions and cleans verified Cloud copies. For a final batch, use <strong>Sync EE / clean staging</strong> after EE completes; otherwise its final pending staging copies can remain billable while the app is closed.</p>
+<p>Local TIFF removal is independent: select <strong>Remove uploaded mosaics</strong> under the existing cleanup options if desired. Cloud copy removal does not imply local removal. Failed or unverified local mosaics remain available for recovery. A tile does not become complete merely because a file reached the bucket.</p>
+<h2>11. Resume after an interruption</h2>
+<p>Keep the project folder, especially <code>00_logs</code>, and reopen the same project. Select the same backend/bucket and Resume. The app retains resumable transfer information, object checksums/generations, exact ingestion request IDs, task names and provenance. A lost response is reconciled rather than treated as a successful upload or an excuse to overwrite an asset. An expired Cloud upload session may require retransferring that unfinished TIFF; completed matching objects are reused.</p>
+<p>Do not run Browser and Cloud workers simultaneously for this project. Unresolved submissions must be reconciled with their original backend before switching. A file lock prevents concurrent workers, including workers launched in separate app windows.</p>
+<p>On Windows, resumable session secrets are encrypted for your OS user under <code>%LOCALAPPDATA%/SWOTFlow/cloud-sessions/</code>, outside the project. On other supported systems they use a private user directory/file. Moving a project to another computer preserves its history but can require fresh authentication and retransmission of an unfinished object. Do not share session secrets.</p>
+<h2>12. What stays on disk and how charges are reduced</h2>
+<p>The project keeps <code>cloud_uploads.sqlite3</code> next to the existing upload report. It records transfer, ingestion and cleanup events without storing credentials. The existing project upload report/database and verification receipts remain the source for Resume, Statistics and local cleanup. Back up the project&#x27;s logs and databases after processing.</p>
+<p>The app deletes only the exact staged object generation it recorded and owns, after a fresh EE metadata/provenance check. It never deletes the EE asset. It does not list and purge unrelated bucket contents. Failed copies are retained and reported, and may consume storage until the problem is resolved. The staged-byte limit counts this project&#x27;s tracked copies/reservations, not unrelated projects, soft-deleted generations, taxes or data transfer.</p>
+<p>Storage cost is approximately the sum of each file&#x27;s GiB multiplied by its hours in storage and the regional hourly rate. Continuous per-file ingestion lowers residence time compared with staging the entire continent first. Standard storage has no minimum storage duration, but requests, retention features and location-dependent transfers can add costs. Use <a href="https://cloud.google.com/storage/pricing">current Google pricing</a> and the pilot bill rather than treating an estimate as a cap.</p>
+<h2>Troubleshooting</h2>
+<ul>
+<li><strong>Credentials not found / unauthorised:</strong> run ADC login on this computer using the correct account; confirm EE project registration.</li>
+<li><strong>403 / permission denied:</strong> check the roles in step 6, billing, APIs, collection access and institutional policies. Repeated retries cannot repair missing permissions.</li>
+<li><strong>Staging cap reached:</strong> first reconcile completed EE tasks and clean their owned staging copies. Review failures, or increase the cap deliberately if the cost/storage tradeoff is acceptable. The app retains files rather than deleting pending inputs to make space.</li>
+<li><strong>EE task failed:</strong> the file is not automatically assumed corrupted. Inspect the task error. Resume can reuse the staged object and create a new ingestion request only after a definitive failed operation.</li>
+<li><strong>Metadata/checksum/generation mismatch (BLOCKED):</strong> retain both copies and review the discrepancy. Automatic overwrite is deliberately disabled. Do not repeatedly retry an unexplained mismatch.</li>
+<li><strong>Verified but staging retained:</strong> check Cloud cleanup selection, object permissions, holds/retention and the cleanup detail. EE completion remains recorded even if bucket deletion fails.</li>
+</ul>
+<p>For a first-time setup, complete steps 1-8 before requesting the live pilot. No Cloud billing account, bucket or production migration has been created by the development work.</p></body></html>

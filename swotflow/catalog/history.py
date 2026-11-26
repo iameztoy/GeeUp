@@ -162,7 +162,7 @@ class CatalogHistory:
             return [dict(r) for r in db.execute(
                 "SELECT s.*, c.finished, COALESCE(c.status,'interrupted/running') AS status, c.detail, "
                 "(SELECT COUNT(*) FROM candidates WHERE scan=s.id) AS candidates "
-                "FROM scans s LEFT JOIN completions c ON c.scan=s.id ORDER BY s.started DESC")]
+                "FROM scans s LEFT JOIN completions c ON c.scan=s.id ORDER BY s.started DESC, s.rowid DESC")]
 
     def snapshot(self, scan: str) -> dict:
         """Return a search's candidates and immutable selection decisions."""

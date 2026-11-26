@@ -218,6 +218,7 @@ chrome:
   start_maximized: true
 
 upload:
+  backend: "browser"  # browser or gcs; Cloud Upload uses the same metadata and history.
   batch_size: 50
   max_active_ingestions: 0  # No additional app cap; browser transfers remain limited below.
   # Maximum clicked files that may remain in Chrome before an Earth Engine
@@ -385,3 +386,13 @@ automation:
 cleanup:
   mosaics_enabled: true  # Independent of raw/extracted cleanup; proof still required.
   mosaic_policy: confirmed_ingestion  # confirmed_ingestion | full_pixels
+
+# Optional Cloud Upload. Create your private Standard bucket and configure ADC
+# first; see docs/cloud-upload-setup.md. No bucket/resource is created by the app.
+cloud_upload:
+  project: ""
+  bucket: ""
+  prefix: "swotflow-staging"
+  staging_limit_gib: 50
+  delete_after_verification: true
+  chunk_mib: 16

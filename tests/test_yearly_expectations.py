@@ -90,8 +90,10 @@ class YearlyExpectationTests(unittest.TestCase):
             before = expected_rows(parent)
             with self.assertRaisesRegex(ValueError, "No complete"):
                 synchronize_yearly_expectations(parent, child)
-            self.snapshot(child, [])
-            self.snapshot(child, [], status="failed")
+            # Windows clock resolution can give consecutive scans the same instant.
+            with mock.patch("swotflow.catalog.history.utc_now", return_value="2026-11-26T10:00:00+00:00"):
+                self.snapshot(child, [])
+                self.snapshot(child, [], status="failed")
             with self.assertRaisesRegex(ValueError, "No complete"):
                 synchronize_yearly_expectations(parent, child)
             self.assertEqual(expected_rows(parent), before)
