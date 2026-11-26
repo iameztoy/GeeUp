@@ -3166,15 +3166,16 @@ class LauncherApp:
         if name is None:
             return
         try:
-            project = create_project(root, name, self.build_config())
-        except OSError as exc:
+            from swotflow.project.upload_defaults import load_upload_defaults
+            project = create_project(root, name, self.build_config(), upload_defaults=load_upload_defaults())
+        except (OSError, ValueError, TypeError) as exc:
             messagebox.showerror(
                 "Could not create project",
-                f"Failed to create the SWOTFlow project folders:\n{exc}",
+                f"Failed to create the SWOTFlow project:\n{exc}",
             )
             return
         self.apply_project(project, write_config=True)
-        messagebox.showinfo("Project created", f"Created project:\n{project.project_file}\n\nRecommended workflow defaults applied. Review settings before starting.")
+        messagebox.showinfo("Project created", f"Created project:\n{project.project_file}\n\nWorkflow defaults and any personal upload preset applied. Review tiles and dates before starting.")
 
     def open_project(self) -> None:
         """Open a SWOTFlow project.yaml file and populate the GUI."""

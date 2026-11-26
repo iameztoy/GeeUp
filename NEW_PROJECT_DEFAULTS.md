@@ -1,4 +1,4 @@
-# New-project defaults — v0.8.20
+# New-project defaults — v0.9.1
 
 **New Project** starts with the following editable settings. A fresh installation
 uses the same defaults from `config.example.yaml`. **Open Project**, **Resume**,
@@ -32,7 +32,33 @@ mosaics; retain those inputs or use EE Consolidation for that workflow.
 
 Nothing starts when a project is created. Preflight and Start are still required;
 automatic start after preflight is off. Existing upload confirmation and dry-run
-controls remain available. No pyramiding-policy change is made by the preset.
+controls remain available. The standard workflow defaults do not change the
+pyramiding policy.
+
+## Personal upload defaults
+
+In **Cloud Upload**, use **Use these upload settings for new projects** to save
+an editable per-user preset. It replaces only the standard upload choices when
+you next use **New Project**: upload method, destination, Cloud settings,
+completion mode, EE ingestion limit, pyramid policy and dry-run choice. Existing
+projects and Resume retain their saved settings. Browser remains the default
+when no personal preset exists.
+
+On Windows the preset is stored in
+`%LOCALAPPDATA%\SWOTFlow\new_project_upload_defaults.json`, outside the application
+and its Git repository. It contains no credentials, dates, tiles, local paths
+or processing history. New-project paths still follow the chosen root folder.
+To return to standard upload defaults, remove this optional preset; to change
+it, edit the upload controls and save the preset again. A malformed preset is
+reported instead of silently choosing another destination.
+
+**Concurrent Cloud file transfers (1–8)** is independent of the shared **Maximum
+active EE ingestions** limit. Cloud uses two ingestions when the latter is zero.
+Existing Cloud projects without the new field retain one file transfer at a
+time. Try two transfers first, then compare measured throughput before raising
+it. Each transfer reserves its full size within the staging cap. Downloads keep
+their separate worker count and batch size, and extraction/mosaicking keep their
+existing worker settings in both ordinary and yearly Automation.
 
 Cleanup still checks downstream proof. Pending, failed, changed and unproven
 mosaics remain local until a later EE sync and cleanup confirms eligibility.

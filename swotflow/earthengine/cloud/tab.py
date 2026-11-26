@@ -7,6 +7,7 @@ import webbrowser
 from swotflow.earthengine.cloud.config import BACKENDS, CloudConfig
 from swotflow.earthengine.cloud.journal import read_rows, cloud_metrics
 from swotflow.paths import APP_ROOT
+from swotflow.version import __version__
 
 
 class CloudUploadTab:
@@ -19,25 +20,31 @@ class CloudUploadTab:
         parent = self.scroller.content
         parent.columnconfigure(1, weight=1)
         parent.rowconfigure(11, weight=1)
-        ttk.Label(parent, text="Cloud Upload - v0.9.0", font=("Segoe UI", 12, "bold")).grid(
+        ttk.Label(parent, text=f"Cloud Upload - v{__version__}", font=("Segoe UI", 12, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
         ttk.Label(parent, text="Start with a small test collection. Transfer a mosaic, start its EE ingestion, and upload the next while EE works. "
-                  "Verified staging copies can be removed automatically. Browser is the default; select one upload method for the run.",
+                  "Verified staging copies can be removed automatically. Select one upload method for the run; personal defaults apply to new projects only.",
                   wraplength=900).grid(row=1, column=0, columnspan=3, sticky="w")
         ttk.Label(parent, text="Upload method (also used by Automation)").grid(row=2, column=0, sticky="w", pady=8)
         ttk.Combobox(parent, textvariable=app.upload_backend_var, values=list(BACKENDS), state="readonly", width=35).grid(
             row=2, column=1, sticky="w")
         self.project = tk.StringVar(); self.bucket = tk.StringVar(); self.prefix = tk.StringVar()
         self.limit = tk.StringVar(); self.remove = tk.BooleanVar()
+        self.concurrent = tk.StringVar()
         for row, label, variable in ((3, "Cloud project ID", self.project), (4, "Bucket name (without gs://)", self.bucket),
                                       (5, "Dedicated staging prefix", self.prefix), (6, "Staging storage limit (GiB)", self.limit)):
             ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
             ttk.Entry(parent, textvariable=variable, width=48).grid(row=row, column=1, sticky="ew", padx=8)
-        ttk.Checkbutton(parent, text="Remove Cloud staging copies after verified EE ingestion and matching provenance",
-                        variable=self.remove).grid(row=7, column=0, columnspan=3, sticky="w", pady=8)
+        controls = ttk.Frame(parent); controls.grid(row=7, column=0, columnspan=3, sticky="ew", pady=8)
+        ttk.Checkbutton(controls, text="Remove Cloud staging copies after verified EE ingestion and matching provenance",
+                        variable=self.remove).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(controls, text="Concurrent Cloud file transfers (1-8)").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Spinbox(controls, from_=1, to=8, textvariable=self.concurrent, width=8).grid(row=1, column=1, sticky="w")
+        ttk.Label(controls, text="Maximum active EE ingestions (shared with Upload; 0 means 2 for Cloud)").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(controls, textvariable=app.max_active_var, width=8).grid(row=2, column=1, sticky="w")
         ttk.Label(parent, text="Origin folder, destination collection, UTM selection, acquisition metadata, pyramid policy and "
                   "completion mode are shared with Upload. Local mosaic cleanup remains a separate option. "
-                  "One local transfer overlaps the configured maximum active EE ingestions. Keep the app/computer running "
+                  "Cloud file transfers and EE ingestions have separate limits. More transfers share your bandwidth. Keep the app/computer running "
                   "for transfers and cleanup; EE tasks already submitted can continue in the cloud.", wraplength=900).grid(
                   row=8, column=0, columnspan=3, sticky="w", pady=4)
         actions = ttk.Frame(parent); actions.grid(row=9, column=0, columnspan=3, sticky="w", pady=8)
@@ -45,6 +52,8 @@ class CloudUploadTab:
                                ("Upload / resume mosaics", lambda: self.run("upload")), ("Sync EE / clean staging", lambda: self.run("sync")),
                                ("Refresh queue", self.refresh)):
             ttk.Button(actions, text=label, command=command).pack(side="left", padx=(0, 6))
+        ttk.Button(parent, text="Use these upload settings for new projects", command=self.save_defaults).grid(
+            row=12, column=0, columnspan=3, sticky="w", pady=8)
         self.summary = tk.StringVar(value="No Cloud upload history yet.")
         ttk.Label(parent, textvariable=self.summary, wraplength=900).grid(row=10, column=0, columnspan=3, sticky="w", pady=4)
         frame = ttk.Frame(parent); frame.grid(row=11, column=0, columnspan=3, sticky="nsew")
@@ -67,16 +76,28 @@ class CloudUploadTab:
         self.project.set(c.project); self.bucket.set(c.bucket); self.prefix.set(c.prefix)
         self.limit.set(str(c.staging_limit_gib)); self.remove.set(c.delete_after_verification)
         self._chunk_mib = c.chunk_mib
+        self.concurrent.set(str(c.concurrent_uploads))
 
     def values(self):
         return asdict(CloudConfig(self.project.get().strip(), self.bucket.get().strip(), self.prefix.get().strip(),
-                                 float(self.limit.get() or "50"), self.remove.get(), self._chunk_mib))
+                                 float(self.limit.get() or "50"), self.remove.get(), self._chunk_mib, int(self.concurrent.get() or "1")))
 
     def validate(self):
         CloudConfig.from_dict(self.values()).validate()
 
     def guide(self):
         webbrowser.open((APP_ROOT / "docs" / "cloud-upload-setup.html").as_uri())
+
+    def save_defaults(self):
+        """Save a per-user preset without saving or modifying any project history."""
+        from swotflow.project.upload_defaults import save_upload_defaults
+        try:
+            path = save_upload_defaults(self.app.build_config())
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror("New-project upload defaults", str(exc)); return
+        messagebox.showinfo("New-project upload defaults", "Saved the upload method, destination, Cloud settings, "
+                            "completion mode, ingestion limit, pyramid policy and dry-run choice.\n\n"
+                            "Existing projects are unchanged. Choose tiles and dates when creating a new project.\n\n" + str(path))
 
     def run(self, action):
         if self.app.automation_running or self.app.automation_preflight_running:

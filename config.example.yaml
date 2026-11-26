@@ -396,3 +396,6 @@ cloud_upload:
   staging_limit_gib: 50
   delete_after_verification: true
   chunk_mib: 16
+  # Independent of upload.max_active_ingestions; existing projects default to 1.
+  # Increase gradually up to 8 if upload bandwidth and the staging cap allow it.
+  concurrent_uploads: 1
