@@ -379,7 +379,7 @@ class CloudConfigurationTests(unittest.TestCase):
         from swotflow.processing.automation import build_tile_config_dict
         with tempfile.TemporaryDirectory() as temp:
             base={'processing':{'project_root':temp},'upload':{'backend':'gcs','completion_mode':'submit_and_continue'},
-                  'cloud_upload':{'project':'project-id','bucket':'bucket-id'},'metadata':{'enabled':True},
+                  'cloud_upload':{'project':'project-id','bucket':'bucket-id','concurrent_uploads':8},'metadata':{'enabled':True},
                   'download':{'verified_downloads':True}}
             for start,end in [('2023-01-01','2023-12-31'),('2023-01-01','2026-11-26')]:
                 config=build_tile_config_dict(base,'UTM36P',Path(temp)/'runs',start_date=start,end_date=end,include_upload=True)

@@ -142,6 +142,8 @@ class CloudUploader(EarthEngineUIUploader):
         """Read current assets/operations, including rows whose local TIFF was cleaned."""
         self.connect()
         for row in self.rows(pending_only=self._initial_reconcile_done):
+            if row["asset_id"] in getattr(self, "_transfers_in_flight", set()):
+                continue  # Only the owning scheduler may settle an active local transfer.
             if row["state"] == "BLOCKED":
                 continue
             if row["state"] == "VERIFIED" and row.get("deleted_at"):
@@ -194,23 +196,25 @@ class CloudUploader(EarthEngineUIUploader):
             self.save(row)
             self.logger.warning("%s: %s", row["asset_id"], row["cleanup_error"])
 
+    def prepare_transfer(self, row):
+        """Validate and persist ownership on the main writer before sending bytes."""
+        if not Path(row["local_file"]).is_file():
+            root = self.config.input_folder
+            matches = list(root.rglob(Path(row["local_file"]).name)) if self.config.upload.recursive else [root / Path(row["local_file"]).name]
+            candidates = [path for path in matches if path.is_file() and
+                          (self.store.artifact(path) or {}).get("sha256") == row["sha256"]]
+            if len(candidates) == 1:
+                row["local_file"] = str(candidates[0])
+                row["report"]["local_file"] = row["local_file"]
+                self.save(row)
+        proof = self.store.artifact(Path(row["local_file"]))
+        if not proof or proof["sha256"] != row["sha256"] or not artifact_current(proof):
+            raise ValueError("Retained local mosaic changed; transfer cannot resume.")
+        row["state"] = "TRANSFERRING"; self.save(row)
+
     def advance(self, row):
         if row["state"] in {"PREPARED", "TRANSFERRING"}:
-            if not Path(row["local_file"]).is_file():
-                # A relocated project can recover from a matching current mosaic, never
-                # from a filename alone. Immutable journal events retain the former path.
-                root = self.config.input_folder
-                matches = list(root.rglob(Path(row["local_file"]).name)) if self.config.upload.recursive else [root / Path(row["local_file"]).name]
-                candidates = [path for path in matches if path.is_file() and
-                              (self.store.artifact(path) or {}).get("sha256") == row["sha256"]]
-                if len(candidates) == 1:
-                    row["local_file"] = str(candidates[0])
-                    row["report"]["local_file"] = row["local_file"]
-                    self.save(row)
-            proof = self.store.artifact(Path(row["local_file"]))
-            if not proof or proof["sha256"] != row["sha256"] or not artifact_current(proof):
-                raise ValueError("Retained local mosaic changed; transfer cannot resume.")
-            row["state"] = "TRANSFERRING"; self.save(row)
+            self.prepare_transfer(row)
             last_monitor = time.monotonic()
             def progress(offset):
                 nonlocal last_monitor
@@ -277,6 +281,10 @@ class CloudUploader(EarthEngineUIUploader):
             if input(f"Upload {len(items)} mosaic(s) through paid Cloud Storage? Type yes: ").strip().lower() != "yes":
                 return 0
         deadline = time.monotonic() + self.config.execution.wait_timeout_minutes * 60
+        if self.cloud.concurrent_uploads > 1:
+            from swotflow.earthengine.cloud.parallel import run_parallel
+            remaining = run_parallel(self, items, deadline)
+            return self.finish_queue(remaining)
         attempts = {}
         remaining = list(items)
         max_tasks = self.config.upload.max_active_ingestions or 2
@@ -332,6 +340,10 @@ class CloudUploader(EarthEngineUIUploader):
                 self.logger.warning("Cloud queue retained for Resume; pending tasks are not resubmitted or cleaned.")
                 break
             time.sleep(self.config.execution.task_poll_seconds)
+        return self.finish_queue(remaining)
+
+    def finish_queue(self, remaining):
+        """Use the same terminal accounting for serial and concurrent transfers."""
         self.reconcile()
         self.sync_earth_engine_inventory()
         rows = self.rows()
@@ -340,4 +352,6 @@ class CloudUploader(EarthEngineUIUploader):
         self.logger.info("Cloud queue: %s verified, %s pending, %s failed/blocked. Local cleanup remains a separate option.",
             sum(r["state"] == "VERIFIED" for r in rows), sum(r["state"] in PENDING for r in rows),
             sum(r["state"] in {"FAILED", "BLOCKED"} for r in rows))
-        return 1 if failed or remaining or (pending and self.config.upload.completion_mode != "submit_and_continue") else 0
+        allowed_pending = self.config.upload.completion_mode == "submit_and_continue" and all(
+            r["state"] == "INGESTING" for r in rows if r["state"] in PENDING)
+        return 1 if failed or remaining or (pending and not allowed_pending) else 0

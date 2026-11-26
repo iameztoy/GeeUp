@@ -78,6 +78,17 @@ class GoogleTransport:
     def object_url(self, row):
         return f"https://storage.googleapis.com/storage/v1/b/{quote(row['bucket'], safe='')}/o/{quote(row['object'], safe='')}"
 
+    def upload_isolated(self, row, path, secrets, progress):
+        """Transfer in a worker-owned HTTP/auth session; never write project state."""
+        import google.auth
+        from google.auth.transport.requests import AuthorizedSession
+        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        worker = GoogleTransport.__new__(GoogleTransport)
+        worker.config = self.config
+        with AuthorizedSession(credentials) as session:
+            worker.http = session
+            return worker.upload(row, path, secrets, progress)
+
     def object(self, row):
         r = self.request("GET", self.object_url(row), action="Read staged object")
         if r.status_code == 404:

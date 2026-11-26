@@ -88,7 +88,7 @@ NEW_PROJECT_DEFAULTS = {
 }
 
 
-def new_project_defaults(base_config: Mapping[str, Any]) -> Dict[str, Any]:
+def new_project_defaults(base_config: Mapping[str, Any], upload_defaults: Mapping[str, Any] | None = None) -> Dict[str, Any]:
     """Copy settings and apply the editable starting preset for a new project.
 
     Keep the user's destination, dates, tiles, runtime and browser configuration.
@@ -97,6 +97,13 @@ def new_project_defaults(base_config: Mapping[str, Any]) -> Dict[str, Any]:
     config = deepcopy(dict(base_config))
     for section, values in NEW_PROJECT_DEFAULTS.items():
         config.setdefault(section, {}).update(deepcopy(values))
+    if upload_defaults is not None:
+        from swotflow.project.upload_defaults import upload_defaults_from_config
+        for section, values in upload_defaults_from_config(upload_defaults).items():
+            if isinstance(values, dict):
+                config.setdefault(section, {}).update(deepcopy(values))
+            else:
+                config[section] = values
     return config
 
 
@@ -250,16 +257,18 @@ def save_project(project: SWOTFlowProject) -> Path:
     return path
 
 
-def create_project(root: str | Path, name: str, base_config: Mapping[str, Any]) -> SWOTFlowProject:
+def create_project(root: str | Path, name: str, base_config: Mapping[str, Any], *,
+                   upload_defaults: Mapping[str, Any] | None = None) -> SWOTFlowProject:
     """Create a new project with editable workflow defaults and local paths."""
     root_path = Path(root)
     if (root_path / PROJECT_FILE_NAME).exists():
         raise FileExistsError("This folder already contains a project. Use Open Project to preserve its settings.")
+    initial_config = new_project_defaults(base_config, upload_defaults)
     ensure_project_structure(root_path)
     project = SWOTFlowProject(
         name=name.strip() or root_path.name or "SWOTFlow Project",
         root=root_path,
-        config=config_for_project(new_project_defaults(base_config), root_path),
+        config=config_for_project(initial_config, root_path),
         download_history=[],
         created_at=now_iso(),
     )

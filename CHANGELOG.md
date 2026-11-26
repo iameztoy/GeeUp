@@ -1,5 +1,13 @@
 # Release history
 
+## 0.9.1 - 26 November 2026 (Cloud concurrency and personal defaults)
+
+- Add editable concurrent Cloud file transfers (1–8), independently limited from EE ingestions. Reserve in-flight bytes within the staging cap; use isolated transfer sessions and a single writer for history, reports and EE operations. Existing projects retain one transfer unless changed.
+- Drain active transfers on a monitoring deadline or fail-fast response, retain pending/failed copies and reuse durable request IDs on Resume. Metadata/provenance verification, generation-checked staging cleanup and Statistics remain shared with serial uploads.
+- Add a per-user upload preset saved from Cloud Upload and applied only to New Project. Keep personal destinations outside Git; preserve existing project settings/history and derive new local paths from the chosen folder. Invalid presets produce an explicit error.
+- Retain existing NASA download batches/workers and extraction/mosaic parallelism in both Automation schedules. Update setup/default documentation and the visible application version to v0.9.1.
+- Validate concurrency, staging caps, interruption/recovery, single-writer accounting and GUI/config round-trips with offline regression tests. The earlier two-mosaic live pilot validated serial Cloud transfer; eight-worker throughput is not a measured speed claim.
+
 ## 0.9.0 - 26 November 2026 (Cloud Upload)
 
 - Add an optional Cloud Upload tab and shared `browser`/`gcs` upload-method selection in Automation, including ordinary and year-by-year runs. Existing/new project defaults remain Browser. Download, extraction, mosaic science, NASA filename histories and date-range completeness rules remain shared.

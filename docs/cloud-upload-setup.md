@@ -1,8 +1,8 @@
-# SWOTFlow v0.9.0 - Google Cloud Upload setup
+# SWOTFlow v0.9.1 - Google Cloud Upload setup
 
 This guide is for the first-time setup of the optional Cloud Upload route. You prepare mosaics locally as before. SWOTFlow stages each TIFF in your private Cloud Storage bucket, starts an ordinary Earth Engine image ingestion, verifies the resulting asset and its metadata, then optionally removes the staging copy. It does not create a cloud-backed external image or change the mosaic projection.
 
-**Validation status:** the new route has automated offline tests. A small live pilot in your own bucket and a separate EE collection is required before a continental upload. No paid resources or account changes are made simply by opening this tab.
+**Validation status:** the route has automated offline tests and a completed two-mosaic live pilot with serial file transfer. Concurrent file transfers have offline recovery/accounting tests; higher concurrency is not a measured throughput guarantee. Run a small pilot with your own settings before a continental upload. No paid resources or account changes are made simply by opening this tab.
 
 ## 1. Understand the three names
 
@@ -86,9 +86,11 @@ In SWOTFlow:
 1. Open the project containing your prepared mosaics and their saved source/verification history. Loose TIFFs with no matching provenance are not sufficient for this Cloud backend.
 2. In **Upload**, check the origin mosaic folder, destination collection, UTM selection, metadata and pyramiding settings. These settings are shared with Cloud Upload. Keep your existing scientific choices.
 3. Open **Cloud Upload** and select **Google Cloud Storage** as the upload method. Enter the project ID and bucket name. Keep the dedicated prefix, choose a staged-storage limit, and choose whether verified staging copies should be removed.
-4. For a small pilot, use **Wait for EE verification before next tile**. Start with one or two active ingestions. If the shared active-ingestion limit is zero, Cloud uses a bounded limit of two. It transfers one TIFF at a time while EE processes earlier TIFFs.
+4. For a small pilot, use **Wait for EE verification before next tile**. Start with **Concurrent Cloud file transfers** at one or two and **Maximum active EE ingestions** at two. The transfer setting accepts 1–8; existing projects without it retain one. These limits are separate: transfers send local bytes while EE processes completed objects. If the shared ingestion limit is zero, Cloud uses two. The staged-storage cap includes the full reserved size of in-flight uploads, so it may limit concurrency. Increase gradually only if throughput improves; more workers share the same network connection.
 5. Click **Check / preview (no uploads)**. This checks authentication, bucket permissions/settings, current EE inventory and eligible local files. It does not upload, submit or delete Cloud objects. It may refresh the project's ordinary inventory/report records.
 6. If the preview is correct, click **Upload / resume mosaics**. This starts transfers and can incur Cloud charges. Do not delete pending bucket objects manually.
+
+To reuse this setup, click **Use these upload settings for new projects**. It saves your upload method, destination, Cloud settings, completion mode, ingestion limit, pyramid policy and dry-run choice in a personal file outside the application. **New Project** applies these choices and creates local paths beneath its chosen folder. Dates/tiles and credentials are not part of the preset; review your scope. Existing projects, histories and Resume do not change. No upload starts simply because defaults were saved.
 
 SWOTFlow builds the ingestion metadata automatically: acquisition start/end times, configured SWOT properties, processing summaries and the existing revision/source digests. All original filenames and full processing history remain in the project. It uses bands `b1` and `b2` and the configured pyramid policy; it does not resample or reproject during upload.
 
@@ -100,9 +102,13 @@ Check the Cloud queue and Statistics. "In bucket" or "INGESTING" is not EE compl
 
 Review **Billing > Reports** for actual storage, operations and any regional data-transfer charges after they appear. Check whether deleted objects are soft-deleted or retained by versioning. Only then expand to a larger batch.
 
+Filter the report to your project and **Cloud Storage**, and group by **SKU** to distinguish storage, operations, replication and transfer. Usage costs are typically available within one day but can take longer than 24 hours; an empty report immediately after a test does not prove zero charges. Disabling soft delete affects future deletions only: already soft-deleted objects retain their original expiry. US multi-region replication charges are separate from storage duration. See [billing reporting delays](https://docs.cloud.google.com/billing/docs/how-to/resolve-issues) and [Storage pricing](https://cloud.google.com/storage/pricing).
+
 ## 10. Run new tiles and date updates through Automation
 
 Select the same **Upload method** in **Automation**, leave **Include upload** enabled, and use your existing preflight/Start/Resume procedure. Both ordinary and tile-by-tile yearly runs use this choice. NASA catalogue tracking, extraction, mosaicking, duplicate checks, history and date-window completeness remain shared.
+
+Download concurrency and batch size remain in the existing download controls; extraction and mosaic workers remain in their own tabs. The standard new-project workflow uses 10 download workers, batches of 50, four extraction workers and four mosaic workers. A batch of 50 is not 50 simultaneous downloads. Cloud transfer concurrency is used by both manual Cloud Upload and Automation, independently of those local controls.
 
 Choose **Submit and continue** if you want later workflow stages to continue after confirmed task submission. Pending local mosaics remain retained. Later EE sync/reconciliation promotes successful ingestions and cleans verified Cloud copies. For a final batch, use **Sync EE / clean staging** after EE completes; otherwise its final pending staging copies can remain billable while the app is closed.
 
