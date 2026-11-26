@@ -1,6 +1,6 @@
 # SWOTFlow
 
-**v0.9.0 Cloud Upload development candidate:** optional Google Cloud Storage staging
+**v0.9.0 Cloud Upload:** optional Google Cloud Storage staging
 and ordinary Earth Engine ingestion, with a shared Automation backend selector.
 Browser uploads remain the default. See the beginner [Google Cloud setup guide](docs/cloud-upload-setup.md)
 ([printable HTML](docs/cloud-upload-setup.html)). Offline regression tests cover recovery,
@@ -44,7 +44,7 @@ New in v0.8.8: report **Stop after current step** as a resumable pause, with a r
 
 New in v0.8.7: fix Earth Engine uploads rejected by the 100-character asset-name limit. Oversized mosaic names omit the optional processing-range suffix in the cloud only; local filenames and full lineage remain intact. Reject invalid names before browser work, reduce redundant mosaic metadata rows, retain revision/checksum guards, and keep rejected naming attempts separate from current Statistics totals. See [upload naming and recovery](UPLOAD_RECOVERY.md).
 
-Current development candidate: **v0.9.0** (26 November 2026). The Home page and application window title display this version on the next normal launch.
+Current release: **v0.9.0** (26 November 2026). The Home page and application window title display this version on the next normal launch.
 
 Fixed in v0.8.6: verified cleanup removes recorded raster sidecars; Automation Resume reuses checksum-verified intermediate files after raw cleanup; new mosaic names and upload metadata show the contributing processing-version range. Existing mosaic names remain usable. See [resume, cleanup and version ranges](RESUME_AND_LINEAGE.md). The existing EE Consolidation priority fix, yearly scheduling, NASA histories and Statistics remain in place.
 

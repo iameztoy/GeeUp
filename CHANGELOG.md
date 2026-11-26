@@ -1,6 +1,6 @@
 # Release history
 
-## 0.9.0 - 26 November 2026 (Cloud Upload candidate)
+## 0.9.0 - 26 November 2026 (Cloud Upload)
 
 - Add an optional Cloud Upload tab and shared `browser`/`gcs` upload-method selection in Automation, including ordinary and year-by-year runs. Existing/new project defaults remain Browser. Download, extraction, mosaic science, NASA filename histories and date-range completeness rules remain shared.
 - Stage verified mosaics through authenticated, checksum-checked resumable transfers. Overlap transfers with bounded EE ingestion, retain stable request IDs across uncertain responses, and enforce a staging-byte budget. No Cloud resources are provisioned automatically.

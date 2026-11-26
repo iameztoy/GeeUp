@@ -19,7 +19,7 @@ class CloudUploadTab:
         parent = self.scroller.content
         parent.columnconfigure(1, weight=1)
         parent.rowconfigure(11, weight=1)
-        ttk.Label(parent, text="Cloud Upload - pilot candidate", font=("Segoe UI", 12, "bold")).grid(
+        ttk.Label(parent, text="Cloud Upload - v0.9.0", font=("Segoe UI", 12, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
         ttk.Label(parent, text="Start with a small test collection. Transfer a mosaic, start its EE ingestion, and upload the next while EE works. "
                   "Verified staging copies can be removed automatically. Browser is the default; select one upload method for the run.",
