@@ -11,6 +11,7 @@ Or run without a config file for interactive prompts:
 """
 
 from __future__ import annotations
+from swotflow.earthengine.cloud.config import CloudConfig
 from swotflow.core.temporal import acquisition_window, validate_acquisition_window, within_acquisition_window
 
 import argparse
@@ -436,6 +437,7 @@ class UploadConfig:
     submission_transfer_timeout_minutes: int = 30
     completion_mode: str = UPLOAD_COMPLETION_WAIT_FOR_EE
     fail_fast: bool = False
+    backend: str = "browser"
 
 
 @dataclass
@@ -479,6 +481,7 @@ class AppConfig:
     verified_workflow: bool = False
     acquisition_start_date: str = ""
     acquisition_end_date: str = ""
+    cloud: CloudConfig = field(default_factory=CloudConfig)
 
 
 @dataclass
@@ -1038,6 +1041,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
             ),
             completion_mode=completion_mode,
             fail_fast=bool(upload_data.get("fail_fast", False)),
+            backend=str(upload_data.get("backend", "browser")),
         ),
         metadata=MetadataConfig(
             enabled=bool(metadata_data.get("enabled", True)),
@@ -1075,6 +1079,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> AppConfig:
         verified_workflow=bool(data.get("download", {}).get("verified_downloads", False)),
         acquisition_start_date=acquisition_start,
         acquisition_end_date=acquisition_end,
+        cloud=CloudConfig.from_dict(data.get("cloud_upload", {})),
     )
     validate_config(config)
     return config
@@ -1089,6 +1094,10 @@ def validate_config(config: AppConfig) -> None:
     if not config.destination_parent:
         raise ValueError("destination_parent is required.")
     validate_ee_asset_path(config.destination_parent)
+    if config.upload.backend not in {"browser", "gcs"}:
+        raise ValueError("upload.backend must be browser or gcs")
+    if config.upload.backend == "gcs":
+        config.cloud.validate()
     if config.upload.batch_size < 1:
         raise ValueError("batch_size must be 1 or greater.")
     if config.upload.max_active_ingestions < 0:
@@ -1103,11 +1112,11 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError(
             f"upload.completion_mode must be one of: {', '.join(sorted(VALID_UPLOAD_COMPLETION_MODES))}."
         )
-    if config.chrome.connection_mode not in {"attach", "webdriver"}:
+    if config.upload.backend == "browser" and config.chrome.connection_mode not in {"attach", "webdriver"}:
         raise ValueError("chrome.connection_mode must be either 'attach' or 'webdriver'.")
-    if config.chrome.remote_debugging_port < 1:
+    if config.upload.backend == "browser" and config.chrome.remote_debugging_port < 1:
         raise ValueError("chrome.remote_debugging_port must be 1 or greater.")
-    if config.chrome.connection_mode == "attach" and config.chrome.headless:
+    if config.upload.backend == "browser" and config.chrome.connection_mode == "attach" and config.chrome.headless:
         raise ValueError(
             "chrome.headless cannot be true when chrome.connection_mode is 'attach'."
         )
@@ -4464,19 +4473,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logger.info("Project database: %s", database_path_for(config.artifacts.report_csv))
     logger.info("Artifacts directory: %s", config.artifacts.artifacts_dir)
 
-    uploader = EarthEngineUIUploader(
-        config=config,
-        logger=logger,
-        assume_yes=args.yes,
-    )
-    if args.sync_only:
-        try:
-            count = uploader.sync_existing_assets_to_report()
-            logger.info("Sync-only finished. Verified %s local file(s) against Earth Engine.", count)
-            return 0
-        finally:
-            uploader.report.write()
-    return uploader.run()
+    from swotflow.project.lock import _operation_lock
+    from swotflow.earthengine.cloud.journal import read_rows
+    lock = config.artifacts.report_csv.parent / ".upload.lock"
+    with _operation_lock(lock, "Another upload/sync worker is using this project. Wait for it to finish."):
+        if config.upload.backend == "gcs":
+            from swotflow.earthengine.cloud.worker import CloudUploader
+            uploader_type = CloudUploader
+        else:
+            unfinished = [r for r in read_rows(config.artifacts.report_csv.parent / "cloud_uploads.sqlite3")
+                          if r.get("collection") == config.destination_parent and r["state"] != "VERIFIED"]
+            if unfinished and not args.sync_only:
+                raise ValueError("This collection has unresolved Cloud uploads. Select Google Cloud Storage and reconcile/resume them before using Browser.")
+            uploader_type = EarthEngineUIUploader
+        uploader = uploader_type(config=config, logger=logger, assume_yes=args.yes)
+        if args.sync_only:
+            try:
+                count = uploader.sync_existing_assets_to_report()
+                logger.info("Sync-only finished. Verified %s local file(s) against Earth Engine.", count)
+                return 0
+            finally:
+                uploader.report.write()
+        return uploader.run()
+
 
 
 if __name__ == "__main__":

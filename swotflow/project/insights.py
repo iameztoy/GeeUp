@@ -2240,6 +2240,10 @@ def _collect_project_insights(config: Mapping[str, Any], *, include_cleanup: boo
     )
 
     metrics: "OrderedDict[str, str]" = OrderedDict()
+    from swotflow.earthengine.cloud.journal import cloud_metrics
+    cloud_report = config.get("artifacts", {}).get("report_csv", "")
+    if cloud_report:
+        metrics.update(cloud_metrics(cloud_report, config.get("destination_parent", "")))
     metrics["Total project files on disk"] = str(total_project_files)
     metrics["Total project folder size"] = format_bytes(total_project_size)
     metrics["Raw NetCDF files on disk"] = str(raw_count)

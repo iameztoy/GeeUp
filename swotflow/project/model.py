@@ -63,6 +63,7 @@ NEW_PROJECT_DEFAULTS = {
         "workers": 4,
     },
     "upload": {
+        "backend": "browser",
         "completion_mode": "submit_and_continue",
         "max_pending_browser_uploads": 3,
         "max_active_ingestions": 0,

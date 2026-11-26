@@ -452,6 +452,10 @@ class LauncherApp:
             value=extract_data.get("errors_csv", f"{processing_logs}/extract_errors.csv")
         )
 
+        from swotflow.earthengine.cloud.config import BACKENDS
+        self.upload_backend_var = tk.StringVar(value=next(
+            (label for label, value in BACKENDS.items() if value == self.data.get("upload", {}).get("backend", "browser")),
+            "Browser (existing uploader)"))
         self.folder_var = tk.StringVar(
             value=self.data.get("input_folder", mosaic_outputs)
         )
@@ -682,6 +686,7 @@ class LauncherApp:
         extract_tab = ttk.Frame(self.notebook, padding=12)
         mosaic_tab = ttk.Frame(self.notebook, padding=12)
         upload_tab = ttk.Frame(self.notebook, padding=12)
+        cloud_tab = ttk.Frame(self.notebook, padding=12)
         consolidation_tab = ttk.Frame(self.notebook, padding=12)
         statistics_tab = ttk.Frame(self.notebook, padding=12)
         cleanup_tab = ttk.Frame(self.notebook, padding=12)
@@ -693,6 +698,7 @@ class LauncherApp:
             "Extraction": extract_tab,
             "Mosaic": mosaic_tab,
             "Upload": upload_tab,
+            "Cloud Upload": cloud_tab,
             "EE Consolidation": consolidation_tab,
             "Statistics": statistics_tab,
             "Cleanup": cleanup_tab,
@@ -704,6 +710,7 @@ class LauncherApp:
         self.notebook.add(extract_tab, text="Extraction")
         self.notebook.add(mosaic_tab, text="Mosaic")
         self.notebook.add(upload_tab, text="Upload")
+        self.notebook.add(cloud_tab, text="Cloud Upload")
         self.notebook.add(consolidation_tab, text="EE Consolidation")
         self.notebook.add(statistics_tab, text="Statistics")
         self.notebook.add(cleanup_tab, text="Cleanup")
@@ -715,6 +722,8 @@ class LauncherApp:
         self.build_extract_tab(extract_tab)
         self.build_mosaic_tab(mosaic_tab)
         self.build_upload_tab(upload_tab)
+        from swotflow.earthengine.cloud.tab import CloudUploadTab
+        self.cloud_tab = CloudUploadTab(cloud_tab, self)
         self.build_statistics_tab(statistics_tab)
         self.consolidation_tab = ConsolidationTab(consolidation_tab, self)
         self.build_cleanup_tab(cleanup_tab)
@@ -1088,6 +1097,12 @@ class LauncherApp:
             text="Also applies to yearly batches. Pending uploads stay retained.",
             foreground="#555555",
         ).grid(row=2, column=4, columnspan=3, sticky="w", pady=(8, 0))
+        from swotflow.earthengine.cloud.config import BACKENDS
+        ttk.Label(settings, text="Upload method").grid(row=11, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(settings, textvariable=self.upload_backend_var, values=list(BACKENDS), state="readonly", width=35).grid(
+            row=11, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Label(settings, text="Cloud settings are in Cloud Upload. Applies to yearly and ordinary runs.").grid(
+            row=12, column=0, columnspan=8, sticky="w", pady=(4, 0))
         ttk.Checkbutton(settings, text="Remove uploaded mosaics", variable=self.mosaic_cleanup_enabled_var,
                         command=self.automation_cleanup_changed).grid(row=9, column=0, sticky="w", pady=(8, 0))
         ttk.Combobox(settings, textvariable=self.mosaic_cleanup_policy_var, values=list(POLICY_LABELS),
@@ -3500,6 +3515,12 @@ class LauncherApp:
             bool(extract_data.get("skip_manifest_existing", True))
         )
 
+        from swotflow.earthengine.cloud.config import BACKENDS
+        if hasattr(self, "upload_backend_var"):
+            self.upload_backend_var.set(next((k for k, v in BACKENDS.items()
+                if v == self.data.get("upload", {}).get("backend", "browser")), "Browser (existing uploader)"))
+        if hasattr(self, "cloud_tab"):
+            self.cloud_tab.load(self.data)
         self.folder_var.set(self.data.get("input_folder", mosaic_outputs))
         self.destination_var.set(self.data.get("destination_parent", ""))
         self.upload_scope_var.set(
@@ -3741,6 +3762,15 @@ class LauncherApp:
     def selected_upload_scope(self) -> str:
         """Return the config value for the selected Upload scope."""
         return UPLOAD_SCOPE_LABELS.get(self.upload_scope_var.get(), "all")
+
+    def selected_upload_backend(self) -> str:
+        from swotflow.earthengine.cloud.config import BACKENDS
+        variable = getattr(self, "upload_backend_var", None)
+        return BACKENDS.get(variable.get(), "browser") if variable else "browser"
+
+    def cloud_config_values(self) -> dict:
+        panel = getattr(self, "cloud_tab", None)
+        return panel.values() if panel else dict(self.data.get("cloud_upload", {}))
 
     def selected_upload_completion_mode(self) -> str:
         """Return the config value for the selected Upload completion mode."""
@@ -4696,6 +4726,13 @@ class LauncherApp:
 
     def validate_upload(self) -> bool:
         """Check upload form values before saving or running."""
+        if self.selected_upload_backend() == "gcs":
+            try:
+                from swotflow.earthengine.cloud.config import CloudConfig
+                CloudConfig.from_dict(self.cloud_config_values()).validate()
+            except (ValueError, TypeError) as exc:
+                messagebox.showerror("Cloud Upload settings", str(exc))
+                return False
         folder = self.folder_var.get().strip()
         destination = self.destination_var.get().strip()
         if not folder:
@@ -4994,7 +5031,9 @@ class LauncherApp:
                 "headless": self.headless_var.get(),
                 "start_maximized": True,
             },
+            "cloud_upload": self.cloud_config_values(),
             "upload": {
+                "backend": self.selected_upload_backend(),
                 "batch_size": batch_size,
                 "max_active_ingestions": max_active,
                 "max_pending_browser_uploads": max_pending_browser_uploads,
@@ -7519,6 +7558,7 @@ class LauncherApp:
             (
                 "Start submitting the selected local mosaics to Earth Engine?\n\n"
                 f"Destination:\n{self.destination_var.get().strip()}\n\n"
+                f"Upload method: {self.selected_upload_backend()} (Cloud Storage charges apply for gcs).\n\n"
                 "SWOTFlow will synchronize existing assets first and preserve any "
                 "unverified local mosaics for retry."
             ),

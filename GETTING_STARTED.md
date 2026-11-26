@@ -1,5 +1,9 @@
 # SWOTFlow Getting Started
 
+For optional Cloud Storage uploads in v0.9.0, follow [Google Cloud Upload setup](docs/cloud-upload-setup.md).
+Use a small isolated live pilot before scaling; the browser route is unchanged.
+
+
 This guide covers installation, first launch, project setup, and the normal GUI workflow. Detailed processing rules are kept in [SWOT_PROCESSING_GUIDE.md](./SWOT_PROCESSING_GUIDE.md).
 
 The **v0.8.2 development candidate** adds optional yearly Automation scheduling.
