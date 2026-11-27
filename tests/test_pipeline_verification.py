@@ -20,6 +20,15 @@ from tests.test_download_tool import FakeGranule, granule_name
 
 
 class ProofTests(unittest.TestCase):
+    def test_compression_is_recorded_without_invalidating_previous_verified_bytes(self):
+        self.assertEqual(self.mosaic_proof['encoding'], {'compression': 'none'})
+        self.config.compression = 'zstd'
+        self.assertTrue(self.store.reusable('mosaic', self.mosaic, [self.extract], self.config))
+        proof = self.store.record_artifact('mosaic', self.mosaic, [self.extract], self.config, 'encoding-test', {})
+        self.assertEqual(proof['encoding'], {'compression': 'zstd'})
+        self.assertEqual(proof['sources'], self.mosaic_proof['sources'])
+        self.assertEqual(proof['settings'], self.mosaic_proof['settings'])
+
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

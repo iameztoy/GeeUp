@@ -18,6 +18,18 @@ from tests.test_automation import base_config
 class ResumeCleanupTests(TestCase):
     setUp = fixtures.ProofTests.setUp
 
+    def test_compression_change_reuses_cleaned_inputs_and_existing_mosaic(self):
+        config = self.config_and_selection()
+        saved = deepcopy(config)
+        before = self.mosaic.read_bytes()
+        self.raw.unlink(); self.extract.unlink()
+        completed = {'download', 'duplicates', 'extract', 'raw_cleanup', 'mosaic', 'extracted_cleanup'}
+        config['mosaic']['compression'] = 'zstd'
+        stages, scan = verified_resume_stages(config, saved, completed, self.root)
+        self.assertEqual(stages, completed)
+        self.assertEqual(scan, 'frozen-scan')
+        self.assertEqual(self.mosaic.read_bytes(), before)
+
     def config_and_selection(self):
         """Bind tiny real receipts to normal Automation settings; no NASA transport."""
         config = base_config(self.root)

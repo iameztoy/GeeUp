@@ -214,6 +214,15 @@ class CloudWorkflowTests(unittest.TestCase):
         self.assertEqual(self.worker.report.get_status(row['asset_id']),'ERROR')
         self.assertTrue(self.transport.objects)
 
+    def test_oversized_mosaic_message_identifies_file_and_does_not_raise_cap(self):
+        self.worker.cloud=CloudConfig('example-project','swotflow-test-bucket',staging_limit_gib=1e-9)
+        text=self.worker.staging_cap_message(self.item)
+        self.assertIn(self.path.name,text)
+        self.assertIn('larger than',text)
+        self.assertIn('No new transfer',text)
+        self.assertEqual(self.worker.cloud.staging_limit_gib,1e-9)
+        self.assertTrue(self.path.exists())
+
     def test_cap_blocks_transfer_without_deleting_unverified_files(self):
         self.config.cloud=CloudConfig('example-project','swotflow-test-bucket',staging_limit_gib=0.000000001)
         self.worker.cloud=self.config.cloud

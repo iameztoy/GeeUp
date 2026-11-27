@@ -215,6 +215,9 @@ class VerificationStore:
                  "run_id": run_id, "grid": grid, "utc": utc_now(), "verification": "structural_and_file_identity"}
         if stage == "mosaic":
             proof["selection_scan_id"] = getattr(config, "selection_scan_id", "")
+            # File encoding is recorded, but is not a scientific reuse key.
+            # Existing verified mosaics must not be rebuilt merely to compress.
+            proof["encoding"] = {"compression": getattr(config, "compression", "none")}
         payload = json.dumps(proof)
         with self.connection(True) as db:
             db.execute("INSERT INTO artifacts(path,stage,utc,payload) VALUES (?,?,?,?)",

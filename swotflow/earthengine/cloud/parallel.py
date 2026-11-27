@@ -121,6 +121,8 @@ def run_parallel(worker, items, deadline):
                     item = remaining[0]
                     old = worker.journal.get(item.asset_id)
                     if old is None and worker.journal.live_bytes(worker.cloud.bucket) + item.local_file.stat().st_size > worker.cloud.staging_limit_gib * 2**30:
+                        if not futures and not active:
+                            worker.logger.warning(worker.staging_cap_message(item))
                         break
                     remaining.pop(0)
                     row = worker.prepare(item)

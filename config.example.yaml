@@ -173,6 +173,9 @@ mosaic:
   # Write a .tfw world file beside each mosaic GeoTIFF. The GeoTIFF itself also
   # keeps embedded georeferencing.
   write_world_file: true
+  # Lossless output encoding: none (existing behavior), zstd (recommended), deflate.
+  # Applies only when creating a mosaic; Resume reuses verified existing bytes.
+  compression: none
 
   # Use 1 for the original one-by-one behavior. Increase cautiously because mosaics are disk/RAM intensive.
   workers: 4

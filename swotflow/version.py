@@ -1,2 +1,2 @@
 """Application version, shared by the launcher and documentation checks."""
-__version__ = "0.9.1"
+__version__ = "0.9.2"

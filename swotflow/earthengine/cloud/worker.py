@@ -309,7 +309,7 @@ class CloudUploader(EarthEngineUIUploader):
                     if row["state"] in {"VERIFIED", "BLOCKED", "INGESTING"}:
                         continue
                 elif not active:
-                    self.logger.error("Cloud staging cap reached. Pending/failed copies stay retained; reconcile or raise the cap before Resume.")
+                    self.logger.error(self.staging_cap_message(item))
                     break
             if row:
                 remaining = [item for item in remaining if item.asset_id != row["asset_id"]]
@@ -341,6 +341,18 @@ class CloudUploader(EarthEngineUIUploader):
                 break
             time.sleep(self.config.execution.task_poll_seconds)
         return self.finish_queue(remaining)
+
+    def staging_cap_message(self, item):
+        """Explain a blocked new transfer without changing a user-selected limit."""
+        size=item.local_file.stat().st_size
+        cap=self.cloud.staging_limit_gib
+        if size > cap * 2**30:
+            return (f"Mosaic {item.local_file.name} is {size/2**30:.3f} GiB, larger than the "
+                    f"{cap:g} GiB staging cap. No new transfer started for this file. "
+                    "Retain it and explicitly raise the cap after review, or prepare a losslessly compressed replacement. "
+                    "Resume does not recompress existing verified mosaics.")
+        return (f"Cloud staging cap {cap:g} GiB reached; the next mosaic needs {size/2**30:.3f} GiB. "
+                "Reconcile pending/failed staging copies or review the cap. Files remain available for Resume.")
 
     def finish_queue(self, remaining):
         """Use the same terminal accounting for serial and concurrent transfers."""

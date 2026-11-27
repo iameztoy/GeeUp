@@ -20,6 +20,7 @@ from swotflow.core.temporal import acquisition_scope, acquisition_window, valida
 from swotflow.core.gdal import REQUIRED_GDAL_DRIVERS, current_process_gdal_check
 from swotflow.project.database import dataset_for_path, read_project_rows, upsert_project_rows
 from swotflow.processing.download import normalize_utm_tiles
+from swotflow.processing.encoding import normalize_compression, lossless_creation_options
 from swotflow.core.metadata import processing_version_summary
 from swotflow.core.metadata import ParsedMetadata, parse_swot_l2_hr_raster_metadata, swot_product_rank, product_identity_key, processing_level_rank
 from swotflow.project.manifest import (
@@ -60,6 +61,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "recursive": False,
         "overwrite": False,
         "write_world_file": True,
+        "compression": "none",
         "extensions": [".tif", ".tiff"],
         "report_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/mosaic_report.csv",
         "manifest_csv": f"{DEFAULT_PROCESSING_PATHS['logs']}/mosaic_manifest.csv",
@@ -152,6 +154,7 @@ class MosaicConfig:
     base_dir: Path = Path.cwd()
     acquisition_start_date: str = ""
     acquisition_end_date: str = ""
+    compression: str = "none"
 
 
 @dataclass
@@ -236,6 +239,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> MosaicConfig:
         recursive=bool(mosaic_data.get("recursive", False)),
         overwrite=bool(mosaic_data.get("overwrite", False)),
         write_world_file=bool(mosaic_data.get("write_world_file", True)),
+        compression=normalize_compression(mosaic_data.get("compression")),
         extensions=[
             str(value).lower()
             for value in mosaic_data.get("extensions", [".tif", ".tiff"])
@@ -273,6 +277,7 @@ def parse_config(data: Dict[str, Any], base_dir: Path) -> MosaicConfig:
 
 def validate_config(config: MosaicConfig) -> None:
     """Raise ValueError when the mosaic configuration is invalid."""
+    config.compression = normalize_compression(config.compression)
     if config.grouping_mode not in VALID_GROUPING_MODES:
         raise ValueError(
             "mosaic.grouping_mode must be one of: "
@@ -1128,9 +1133,11 @@ def validate_raster_group(sources: Sequence[MosaicSource]) -> None:
             )
 
 
-def geotiff_creation_options(config: MosaicConfig) -> List[str]:
+def geotiff_creation_options(config: MosaicConfig, data_type: int | None = None) -> List[str]:
     """Return GDAL GeoTIFF creation options for mosaic outputs."""
     options = ["BIGTIFF=IF_SAFER"]
+    if normalize_compression(config.compression) != "none":
+        options.extend(lossless_creation_options(config.compression, require_gdal(), data_type))
     if config.write_world_file:
         options.append("TFW=YES")
     return options
@@ -1208,7 +1215,7 @@ def copy_singleton(group: MosaicGroup, config: MosaicConfig) -> None:
     try:
         translate_options = gdal.TranslateOptions(
             format="GTiff",
-            creationOptions=geotiff_creation_options(config),
+            creationOptions=geotiff_creation_options(config, source_ds.GetRasterBand(1).DataType),
         )
         out_ds = gdal.Translate(str(temp_output), source_ds, options=translate_options)
         if out_ds is None:
@@ -1387,7 +1394,7 @@ def merge_group(group: MosaicGroup, config: MosaicConfig) -> None:
             raise RuntimeError(f"Could not build VRT for {group.output_file.name}")
         translate_options = gdal.TranslateOptions(
             format="GTiff",
-            creationOptions=geotiff_creation_options(config),
+            creationOptions=geotiff_creation_options(config, vrt_ds.GetRasterBand(1).DataType),
         )
         output_dataset = gdal.Translate(str(temp_output), vrt_ds, options=translate_options)
         if output_dataset is None:

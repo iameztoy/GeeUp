@@ -1,5 +1,7 @@
 # SWOTFlow
 
+**v0.9.2: selectable lossless mosaic compression.** ZSTD and DEFLATE preserve decoded values and masks. Shared processing controls, unchanged source history, and Resume reuse of existing verified files. See [compression and existing projects](docs/mosaic-compression.md).
+
 **v0.9.1 Cloud Upload:** optional Google Cloud Storage staging
 and ordinary Earth Engine ingestion, with a shared Automation backend selector.
 Browser uploads remain the default. See the beginner [Google Cloud setup guide](docs/cloud-upload-setup.md)

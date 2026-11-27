@@ -39,6 +39,7 @@ PROGRESS_PREFIX = "GEEUP_PROGRESS\t"
 APP_NAME = "SWOTFlow"
 from swotflow.version import __version__
 from swotflow.verification.retention import POLICY_LABELS, mosaic_cleanup_policy
+from swotflow.processing.encoding import COMPRESSION_LABELS, COMPRESSION_LABEL_BY_VALUE
 APP_VERSION = "v" + __version__
 GITHUB_URL = "https://github.com/iameztoy/GeeUp"
 DEFAULT_PROCESSING_ROOT = "./SWOT_Processing"
@@ -550,6 +551,10 @@ class LauncherApp:
         )
         self.mosaic_workers_var = tk.StringVar(
             value=str(mosaic_data.get("workers", 1))
+        )
+        self.mosaic_compression_var = tk.StringVar(
+            value=COMPRESSION_LABEL_BY_VALUE.get(mosaic_data.get("compression", "none"),
+                                                COMPRESSION_LABEL_BY_VALUE["none"])
         )
         self.mosaic_report_var = tk.StringVar(
             value=mosaic_data.get("report_csv", f"{processing_logs}/mosaic_report.csv")
@@ -1103,6 +1108,13 @@ class LauncherApp:
             row=11, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(8, 0))
         ttk.Label(settings, text="Cloud settings are in Cloud Upload. Applies to yearly and ordinary runs.").grid(
             row=12, column=0, columnspan=8, sticky="w", pady=(4, 0))
+        ttk.Label(settings, text="Mosaic compression").grid(row=13, column=0, sticky="w", pady=(8, 0))
+        self.automation_compression_combo = ttk.Combobox(
+            settings, textvariable=self.mosaic_compression_var, values=list(COMPRESSION_LABELS),
+            state="readonly", width=35)
+        self.automation_compression_combo.grid(row=13, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Label(settings, text="Shared with Mosaic. Lossless; applies to newly created files. Existing verified files are reused.",
+                  wraplength=920, foreground="#555555").grid(row=14, column=0, columnspan=8, sticky="w", pady=(4, 0))
         ttk.Checkbutton(settings, text="Remove uploaded mosaics", variable=self.mosaic_cleanup_enabled_var,
                         command=self.automation_cleanup_changed).grid(row=9, column=0, sticky="w", pady=(8, 0))
         ttk.Combobox(settings, textvariable=self.mosaic_cleanup_policy_var, values=list(POLICY_LABELS),
@@ -2854,6 +2866,11 @@ class LauncherApp:
     def build_mosaic_tab(self, parent: ttk.Frame) -> None:
         """Create the SWOT GeoTIFF mosaic controls."""
         parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        self.mosaic_scroller = VerticalScrolledFrame(parent)
+        self.mosaic_scroller.grid(row=0, column=0, sticky="nsew")
+        parent = self.mosaic_scroller.content
+        parent.columnconfigure(0, weight=1)
 
         status = ttk.Label(
             parent,
@@ -2972,6 +2989,13 @@ class LauncherApp:
             text="Set Upload origin folder to mosaic output after successful run",
             variable=self.mosaic_set_upload_folder_var,
         ).grid(row=3, column=0, columnspan=2, sticky="w", padx=(0, 18), pady=4)
+        ttk.Label(toggles, text="Mosaic compression").grid(row=4, column=0, sticky="w", pady=4)
+        self.mosaic_compression_combo = ttk.Combobox(
+            toggles, textvariable=self.mosaic_compression_var, values=list(COMPRESSION_LABELS),
+            state="readonly", width=35)
+        self.mosaic_compression_combo.grid(row=4, column=1, sticky="w", pady=4)
+        ttk.Label(toggles, text="Lossless values and masks; shared with Automation. Existing files are not recompressed on Resume.",
+                  wraplength=900, foreground="#555555").grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
 
         notes = ttk.LabelFrame(parent, text="Grouping", padding=12)
         notes.grid(row=4, column=0, sticky="ew", pady=(14, 0))
@@ -3571,6 +3595,8 @@ class LauncherApp:
         )
         self.mosaic_target_crs_label_var.set(mosaic_data.get("target_crs_label", ""))
         self.mosaic_workers_var.set(str(mosaic_data.get("workers", 1)))
+        self.mosaic_compression_var.set(COMPRESSION_LABEL_BY_VALUE.get(
+            mosaic_data.get("compression", "none"), COMPRESSION_LABEL_BY_VALUE["none"]))
         self.mosaic_report_var.set(
             mosaic_data.get("report_csv", f"{processing_logs}/mosaic_report.csv")
         )
@@ -5011,6 +5037,7 @@ class LauncherApp:
                 "recursive": self.mosaic_recursive_var.get(),
                 "overwrite": self.mosaic_overwrite_var.get(),
                 "write_world_file": self.mosaic_write_world_file_var.get(),
+                "compression": COMPRESSION_LABELS[self.mosaic_compression_var.get()],
                 "workers": max(
                     1,
                     self.parse_int_or_default(self.mosaic_workers_var.get(), 1),

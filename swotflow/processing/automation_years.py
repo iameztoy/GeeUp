@@ -35,7 +35,8 @@ def settings_identity(config: engine.AutomationConfig) -> dict:
     keys = ("processing", "download", "extract", "mosaic", "metadata", "destination_parent", "input_folder")
     result = {key: deepcopy(config.base_config.get(key)) for key in keys}
     # Scheduling throughput does not change the selected sources or pixels.
-    for section, key in (("download", "threads"), ("extract", "workers"), ("mosaic", "workers")):
+    for section, key in (("download", "threads"), ("extract", "workers"), ("mosaic", "workers"),
+                         ("mosaic", "compression")):
         if isinstance(result.get(section), dict):
             result[section].pop(key, None)
     result['upload'] = {key: deepcopy(value) for key, value in config.base_config.get('upload', {}).items()

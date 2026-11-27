@@ -286,6 +286,11 @@ class GuiLayoutTests(unittest.TestCase):
         path_patch = mock.patch("swotflow.ui.main.CONFIG_PATH", root / "config.yaml")
         path_patch.start()
         self.addCleanup(path_patch.stop)
+        # New-project tests exercise shipped defaults, never this machine's
+        # personal upload destination/preset. Dedicated preset tests cover it.
+        defaults_patch = mock.patch("swotflow.project.upload_defaults.defaults_path", return_value=root / "upload_defaults.json")
+        defaults_patch.start()
+        self.addCleanup(defaults_patch.stop)
 
     def sample_config(self, root: Path) -> dict:
         return {
@@ -358,6 +363,28 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertTrue(app.mosaic_cleanup_enabled_var.get())
         finally:
             root.destroy()
+
+    def test_compression_is_one_persisted_manual_and_automation_choice(self) -> None:
+        from swotflow.processing.encoding import COMPRESSION_LABELS
+        with tempfile.TemporaryDirectory() as temp:
+            root = tk.Tk(); root.withdraw()
+            try:
+                with mock.patch('swotflow.ui.main.load_config', return_value=self.sample_config(Path(temp))):
+                    app = LauncherApp(root)
+                self.assertEqual(app.build_config()['mosaic']['compression'], 'none')
+                for codec in ('ZSTD (lossless, recommended)', 'DEFLATE (lossless)'):
+                    app.automation_compression_combo.set(codec)
+                    self.assertEqual(app.mosaic_compression_combo.get(), codec)
+                    built = app.build_config()
+                    self.assertEqual(built['mosaic']['compression'], COMPRESSION_LABELS[codec])
+                    app.mosaic_compression_combo.set('Uncompressed (current behavior)')
+                    app.apply_config_to_ui(built)
+                    self.assertEqual(app.automation_compression_combo.get(), codec)
+                self.assertIn('Mosaic compression', collect_label_texts(app.tabs_by_name['Automation']))
+                self.assertIn('Mosaic compression', collect_label_texts(app.tabs_by_name['Mosaic']))
+                self.assertIsNotNone(app.mosaic_scroller)
+            finally:
+                root.destroy()
 
     def test_cloud_settings_round_trip_and_automation_share_one_backend(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

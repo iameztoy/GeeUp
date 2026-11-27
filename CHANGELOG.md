@@ -1,5 +1,13 @@
 # Release history
 
+## 0.9.2 - 27 November 2026
+
+- Add selectable lossless ZSTD/DEFLATE encoding for newly created mosaics, shared by manual and automated processing. Preserve source values, paired quality, masks, grids and metadata; no sparse/lossy options.
+- Record encoding in local provenance while keeping scientific Resume identity stable. Reuse existing verified mosaics/assets and cleaned-input evidence when only the codec changes.
+- Explain oversized staging files with filename, size and selected cap; preserve files and active transfers without automatically raising the cap.
+- Add exact-value GDAL, GUI persistence, ordinary/yearly Resume and cleanup regressions. Keep all investigation material outside GitHub.
+
+
 ## 0.9.1 - 26 November 2026 (Cloud concurrency and personal defaults)
 
 - Add editable concurrent Cloud file transfers (1–8), independently limited from EE ingestions. Reserve in-flight bytes within the staging cap; use isolated transfer sessions and a single writer for history, reports and EE operations. Existing projects retain one transfer unless changed.
